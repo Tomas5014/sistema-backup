@@ -1,0 +1,4 @@
+- Adicionar a opção de exclude no full.
+- Adicionar verificação de integridade no diferencial.
+- exclude diferencial
+- adicionar função para identificar o manifesto do último full no diferencial.
