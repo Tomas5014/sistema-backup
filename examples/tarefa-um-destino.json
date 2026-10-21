@@ -9,6 +9,13 @@
   "sources": ["/dados/financeiro"],
   "exclusions": ["*.tmp", "cache/**"],
   "compression": "auto",
+  "timeouts": {
+    "initialize_seconds": 120,
+    "backup_seconds": 14400,
+    "snapshots_seconds": 120,
+    "check_seconds": 3600,
+    "restore_seconds": 14400
+  },
   "destinations": [
     {
       "id": "destino-rede-local",

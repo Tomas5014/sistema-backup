@@ -12,7 +12,7 @@ from typing import Callable
 
 from .logging import StructuredLogger
 from .models import Destination, TaskSpec
-from .restic import ResticAdapter, ResticCommandError, ResticError
+from .restic import ResticAdapter, ResticCommandError, ResticError, ResticTimeoutError
 
 
 class DestinationStatus(StrEnum):
@@ -39,6 +39,8 @@ class DestinationResult:
     bytes_processed: int | None = None
     error: str | None = None
     exit_code: int | None = None
+    failed_operation: str | None = None
+    timeout_seconds: int | None = None
 
 
 @dataclass(frozen=True)
@@ -138,7 +140,9 @@ class BackupOrchestrator:
         self._logger.emit("info", "backup.destination.started", phase="initialize", **common)
         try:
             password = password_resolver(destination)
-            self._adapter.initialize(destination, password)
+            self._adapter.initialize(
+                destination, password, task.timeouts.initialize_seconds
+            )
             summary = self._adapter.backup(
                 task.id,
                 task.client.id,
@@ -147,9 +151,14 @@ class BackupOrchestrator:
                 task.compression,
                 destination,
                 password,
+                task.timeouts.backup_seconds,
             )
-            self._adapter.check(destination, password)
-            snapshots = self._adapter.snapshots(destination, password)
+            self._adapter.check(
+                destination, password, timeout_seconds=task.timeouts.check_seconds
+            )
+            snapshots = self._adapter.snapshots(
+                destination, password, task.timeouts.snapshots_seconds
+            )
             result = DestinationResult(
                 destination_id=destination.id,
                 status=DestinationStatus.SUCCESS,
@@ -174,12 +183,21 @@ class BackupOrchestrator:
                 **common,
             )
             return result
+        except ResticTimeoutError as error:
+            exit_code = None
+            detail = str(error)
+            failed_operation = error.operation
+            timeout_seconds = error.timeout_seconds
         except ResticCommandError as error:
             exit_code = error.return_code
             detail = error.detail
+            failed_operation = error.command_name
+            timeout_seconds = None
         except (ResticError, OSError, ValueError) as error:
             exit_code = None
             detail = str(error)
+            failed_operation = None
+            timeout_seconds = None
 
         result = DestinationResult(
             destination_id=destination.id,
@@ -189,6 +207,8 @@ class BackupOrchestrator:
             duration_seconds=round(monotonic() - started_monotonic, 3),
             error=detail,
             exit_code=exit_code,
+            failed_operation=failed_operation,
+            timeout_seconds=timeout_seconds,
         )
         self._logger.emit(
             "error",
@@ -198,6 +218,8 @@ class BackupOrchestrator:
             duration_seconds=result.duration_seconds,
             error=result.error,
             exit_code=result.exit_code,
+            failed_operation=result.failed_operation,
+            timeout_seconds=result.timeout_seconds,
             **common,
         )
         return result

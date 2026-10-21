@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
-from .models import CompressionMode, Destination
+from .models import CompressionMode, Destination, OperationTimeouts
 
 
 class ResticError(RuntimeError):
@@ -26,6 +26,17 @@ class ResticCommandError(ResticError):
         self.detail = detail
 
 
+class ResticTimeoutError(ResticError):
+    def __init__(self, operation: str, timeout_seconds: int, detail: str = "") -> None:
+        reason = f"tempo limite de {timeout_seconds}s excedido em restic {operation}"
+        if detail:
+            reason = f"{reason}: {detail}"
+        super().__init__(reason)
+        self.operation = operation
+        self.timeout_seconds = timeout_seconds
+        self.detail = detail
+
+
 @dataclass(frozen=True)
 class BackupSummary:
     snapshot_id: str
@@ -36,15 +47,31 @@ class BackupSummary:
 class ResticAdapter:
     """Executa comandos estruturados. Senhas trafegam somente pelo ambiente."""
 
-    def __init__(self, binary: str = "restic", cache_directory: Path | None = None) -> None:
+    def __init__(
+        self,
+        binary: str = "restic",
+        cache_directory: Path | None = None,
+        timeouts: OperationTimeouts | None = None,
+    ) -> None:
         self._binary = binary
         self._cache_directory = cache_directory
+        self._timeouts = timeouts or OperationTimeouts()
 
-    def initialize(self, destination: Destination, password: str) -> None:
+    def initialize(
+        self,
+        destination: Destination,
+        password: str,
+        timeout_seconds: int | None = None,
+    ) -> None:
         repository = destination.repository_path
         if (repository / "config").is_file():
             return
-        self._run(destination, password, ["init", "--repository-version", "2"])
+        self._run(
+            destination,
+            password,
+            ["init", "--repository-version", "2"],
+            timeout_seconds or self._timeouts.initialize_seconds,
+        )
 
     def backup(
         self,
@@ -55,17 +82,27 @@ class ResticAdapter:
         compression: CompressionMode,
         destination: Destination,
         password: str,
+        timeout_seconds: int | None = None,
     ) -> BackupSummary:
         arguments = ["--json", "--compression", compression.value, "backup"]
         for exclusion in exclusions:
             arguments.extend(["--exclude", exclusion])
         arguments.extend(["--tag", f"task:{task_id}", "--tag", f"client:{client_id}"])
         arguments.extend(str(source.expanduser().resolve()) for source in sources)
-        output = self._run(destination, password, arguments)
+        output = self._run(
+            destination, password, arguments, timeout_seconds or self._timeouts.backup_seconds
+        )
         return _parse_backup_summary(output)
 
-    def snapshots(self, destination: Destination, password: str) -> list[dict[str, Any]]:
-        output = self._run(destination, password, ["--json", "snapshots"])
+    def snapshots(
+        self, destination: Destination, password: str, timeout_seconds: int | None = None
+    ) -> list[dict[str, Any]]:
+        output = self._run(
+            destination,
+            password,
+            ["--json", "snapshots"],
+            timeout_seconds or self._timeouts.snapshots_seconds,
+        )
         try:
             snapshots = json.loads(output)
         except json.JSONDecodeError as error:
@@ -81,6 +118,7 @@ class ResticAdapter:
         snapshot_id: str,
         target: Path,
         source_subfolder: Path | None = None,
+        timeout_seconds: int | None = None,
     ) -> None:
         target.mkdir(parents=True, exist_ok=True)
         snapshot_selector = snapshot_id
@@ -90,15 +128,31 @@ class ResticAdapter:
             destination,
             password,
             ["restore", snapshot_selector, "--target", str(target.resolve()), "--verify"],
+            timeout_seconds or self._timeouts.restore_seconds,
         )
 
-    def check(self, destination: Destination, password: str, *, read_data: bool = False) -> None:
+    def check(
+        self,
+        destination: Destination,
+        password: str,
+        *,
+        read_data: bool = False,
+        timeout_seconds: int | None = None,
+    ) -> None:
         arguments = ["check"]
         if read_data:
             arguments.append("--read-data")
-        self._run(destination, password, arguments)
+        self._run(
+            destination, password, arguments, timeout_seconds or self._timeouts.check_seconds
+        )
 
-    def _run(self, destination: Destination, password: str, arguments: Sequence[str]) -> str:
+    def _run(
+        self,
+        destination: Destination,
+        password: str,
+        arguments: Sequence[str],
+        timeout_seconds: int,
+    ) -> str:
         if not password:
             raise ResticError("senha do repositório não foi fornecida")
         if shutil.which(self._binary) is None and not Path(self._binary).is_file():
@@ -110,17 +164,28 @@ class ResticAdapter:
         if self._cache_directory is not None:
             self._cache_directory.mkdir(parents=True, exist_ok=True)
             environment["RESTIC_CACHE_DIR"] = str(self._cache_directory.resolve())
-        completed = subprocess.run(
+        process = subprocess.Popen(
             command,
-            check=False,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             env=environment,
         )
-        if completed.returncode != 0:
-            detail = _safe_error_detail(completed.stderr or completed.stdout)
-            raise ResticCommandError(_operation_name(arguments), completed.returncode, detail)
-        return completed.stdout
+        operation = _operation_name(arguments)
+        try:
+            stdout, stderr = process.communicate(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+            stdout, stderr = process.communicate()
+            detail = _safe_error_detail(stderr or stdout)
+            raise ResticTimeoutError(operation, timeout_seconds, detail)
+        if process.returncode != 0:
+            detail = _safe_error_detail(stderr or stdout)
+            raise ResticCommandError(operation, process.returncode, detail)
+        return stdout
 
 
 def _parse_backup_summary(output: str) -> BackupSummary:

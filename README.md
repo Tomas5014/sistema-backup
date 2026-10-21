@@ -17,6 +17,8 @@ a restauração no formato anterior. Esta POC não escreve nesse formato.
   fase, duração, arquivos e bytes quando informados pelo restic.
 - Adaptador com `init`, `backup`, `snapshots`, `restore --verify` e `check`;
   comandos são listas de argumentos, nunca shell concatenado.
+- Limites configuráveis por operação; timeout encerra e aguarda o processo restic
+  antes de registrar falha do destino.
 - Testes reais em diretórios temporários: backup, exclusão, lista, restauração,
   `check --read-data` e continuidade após falha de outro destino.
 
@@ -34,6 +36,8 @@ a restauração no formato anterior. Esta POC não escreve nesse formato.
   logs. Cada destino lê sua senha da variável indicada em `password_environment`.
 - A POC executa destinos em série e não possui fila, cancelamento, repetição,
   banco central, API ou portal.
+- Retenção permanece somente declarada. `forget` e `prune` continuam fora desta
+  entrega.
 
 ## Instalação
 
@@ -60,6 +64,46 @@ Use [tarefa-um-destino.json](examples/tarefa-um-destino.json) ou
 Troque as origens e repositórios pelos caminhos de teste. O repositório não pode
 ficar dentro de uma origem.
 
+### Formato aceito
+
+`sources`, `exclusions` e `destinations` são sempre listas JSON. Uma string não
+é convertida em lista. `sources` e `destinations` exigem ao menos um item;
+`exclusions` pode ser `[]`. Cliente, cada destino, `retention` e `timeouts`,
+quando presentes, são objetos.
+
+```json
+{
+  "sources": ["/dados/financeiro"],
+  "exclusions": ["*.tmp", "cache/**"],
+  "compression": "auto",
+  "timeouts": {
+    "initialize_seconds": 120,
+    "backup_seconds": 14400,
+    "snapshots_seconds": 120,
+    "check_seconds": 3600,
+    "restore_seconds": 14400
+  },
+  "destinations": [
+    {
+      "id": "destino-local",
+      "name": "Rede local",
+      "kind": "local",
+      "repository": "/srv/macip-poc/cliente/local",
+      "password_environment": "MACIP_RESTIC_PASSWORD_LOCAL",
+      "retention": {"keep_last": 14}
+    }
+  ]
+}
+```
+
+`retention` pode ser omitido; se existir, deve ser objeto. `keep_last` pode ser
+omitido ou `null`, ou ser inteiro positivo. Booleanos, texto, frações, zero e
+números negativos são inválidos. A política ainda não remove snapshots.
+
+Os limites acima são padrão, em segundos. Para backups grandes, ajuste somente
+o campo necessário no objeto `timeouts`; todos exigem inteiro positivo. O agente
+encerra e coleta o processo restic quando qualquer limite expira.
+
 ```bash
 export MACIP_RESTIC_PASSWORD_LOCAL='use-uma-senha-unica-e-segura'
 export MACIP_RESTIC_PASSWORD_MACIP='use-outra-senha-unica-e-segura'
@@ -67,25 +111,36 @@ macip-backup-poc validate examples/tarefa-dois-destinos.json
 macip-backup-poc run examples/tarefa-dois-destinos.json
 ```
 
-`run` inicializa cada repositório local que não possui `config`, executa backup,
-`check` estrutural e lista os pontos. Eventos JSON vão para `stderr`; o resultado
-JSON da execução vai para `stdout`. Código `0` é sucesso; `2` representa parcial
-ou falha. Senhas perdidas tornam dados restic irrecuperáveis: guarde-as em um
-cofre e documente recuperação de chaves antes do piloto.
+`run` valida toda configuração antes de inicializar repositórios. Depois executa
+cada destino: `init`, `backup`, `check` estrutural e `snapshots`. Eventos JSON
+vão para `stderr`; resultado JSON vai para `stdout`. Cada destino informa sucesso
+ou falha, incluindo operação e limite em timeout. Resultado global é `success`
+quando todos funcionam, `partial` quando ao menos um funciona e outro falha, e
+`failed` quando nenhum funciona. Código `0` é sucesso; `2` representa parcial
+ou falha. Senhas perdidas tornam dados restic irrecuperáveis: guarde-as em cofre.
 
 ## Validação
 
 ```bash
-PYTHONPATH=src python -m unittest discover -s tests -v
+# Testes unitários: validação, timeout, estados e credenciais.
+PYTHONPATH=src python -m unittest discover -s tests -p 'test_*.py' -v
+
+# Testes reais: restic, dois destinos, restauração, exclusões e compressão.
+PYTHONPATH=src python -m unittest discover -s tests -p 'test_integration_restic.py' -v
+
+# Executa a validação real; falha se restic não existir ou nenhum teste rodar.
+macip-backup-poc verify-integration
 ```
 
-O teste cria e remove tudo com `TemporaryDirectory`; não acessa dados reais.
+Testes reais criam e removem dados temporários; não acessam dados reais. Testes
+ignorados não são homologação: `verify-integration` retorna falha sem `restic`.
 
 ## Compatibilidade restic verificada
 
-O adaptador usa repositório local com senha em `RESTIC_PASSWORD`, formato v2,
-`--compression auto|off|max`, `--json`, `snapshots`, `check`, `check --read-data`
-e `restore --verify`. As capacidades e os comportamentos foram confirmados na
+O adaptador foi testado em Linux com restic 0.18.1 e repositórios locais
+temporários: formato v2, senha em `RESTIC_PASSWORD`, `--compression auto|off|max`,
+`--json`, `snapshots`, `check`, `check --read-data` e `restore --verify` em ambos
+os destinos. As capacidades e os comportamentos foram confirmados na
 documentação oficial: [inicialização e backends](https://restic.readthedocs.io/en/stable/030_preparing_a_new_repo.html)
 e [fluxo de backup, check e restore](https://restic.readthedocs.io/en/stable/010_introduction.html).
 S3 e SFTP são suportados pelo restic, mas não são homologados por esta POC.

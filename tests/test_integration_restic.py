@@ -58,21 +58,27 @@ class BackupExecutionIntegrationTests(unittest.TestCase):
         )
         self.assertIn('"event": "backup.destination.finished"', log_stream.getvalue())
 
-        first_result = result.destinations[0]
-        self.assertIsNotNone(first_result.snapshot_id)
-        self.adapter.check(first, self.password, read_data=True)
-        restored = self.root / "restored"
-        self.adapter.restore(
-            first,
-            self.password,
-            first_result.snapshot_id or "",
-            restored,
-            source_subfolder=self.source,
-        )
-        restored_files = list(restored.rglob("report.txt"))
-        self.assertEqual(len(restored_files), 1)
-        self.assertEqual(restored_files[0].read_text(), "dados importantes\n")
-        self.assertFalse(list(restored.rglob("ignored.tmp")))
+        for destination, destination_result in zip(
+            (first, second), result.destinations, strict=True
+        ):
+            self._assert_restored_content(destination, destination_result.snapshot_id or "")
+
+    def test_all_compression_modes_are_accepted_by_restic(self) -> None:
+        destination = self._destination("compression", self.root / "repository-compression")
+        self.adapter.initialize(destination, self.password)
+        for compression in CompressionMode:
+            with self.subTest(compression=compression.value):
+                summary = self.adapter.backup(
+                    "task-compression",
+                    "client-integration",
+                    (self.source,),
+                    ("*.tmp",),
+                    compression,
+                    destination,
+                    self.password,
+                )
+                self.assertTrue(summary.snapshot_id)
+        self.adapter.check(destination, self.password, read_data=True)
 
     def test_failed_destination_does_not_stop_valid_destination(self) -> None:
         failed_repository = self.root / "not-a-directory"
@@ -89,7 +95,9 @@ class BackupExecutionIntegrationTests(unittest.TestCase):
         self.assertEqual(result.destinations[1].status, DestinationStatus.SUCCESS)
         self.assertTrue(self.adapter.snapshots(valid, self.password))
 
-    def _task(self, *destinations: Destination) -> TaskSpec:
+    def _task(
+        self, *destinations: Destination, compression: CompressionMode = CompressionMode.AUTO
+    ) -> TaskSpec:
         return TaskSpec(
             id="task-integration",
             name="Integração temporária",
@@ -97,7 +105,7 @@ class BackupExecutionIntegrationTests(unittest.TestCase):
             device_id="device-integration",
             sources=(self.source,),
             exclusions=("*.tmp",),
-            compression=CompressionMode.AUTO,
+            compression=compression,
             destinations=destinations,
         )
 
@@ -112,3 +120,19 @@ class BackupExecutionIntegrationTests(unittest.TestCase):
 
     def _password(self, _: Destination) -> str:
         return self.password
+
+    def _assert_restored_content(self, destination: Destination, snapshot_id: str) -> None:
+        self.assertTrue(snapshot_id)
+        self.adapter.check(destination, self.password, read_data=True)
+        restored = self.root / f"restored-{destination.id}"
+        self.adapter.restore(
+            destination,
+            self.password,
+            snapshot_id,
+            restored,
+            source_subfolder=self.source,
+        )
+        restored_files = list(restored.rglob("report.txt"))
+        self.assertEqual(len(restored_files), 1)
+        self.assertEqual(restored_files[0].read_text(), "dados importantes\n")
+        self.assertFalse(list(restored.rglob("ignored.tmp")))
