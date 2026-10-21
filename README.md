@@ -36,7 +36,10 @@ Python 3.11+ é exigido. Não há dependências Python externas.
 
 `sources`, `exclusions` e `destinations` são listas. `sources` e `destinations`
 exigem item; `exclusions` aceita `[]`. `client`, cada destino, `retention`,
-`timeouts` e `sftp` são objetos. String no lugar de lista é inválida.
+`timeouts` e `sftp` são objetos. String no lugar de lista é inválida. Essa
+validação estrutural acontece antes de gravar qualquer repositório. Arquivos SSH
+ausentes são pré-requisitos do destino SFTP: falham somente aquele destino, e
+destinos locais continuam.
 
 `keep_last` pode faltar, ser `null` ou inteiro positivo. A política ainda não é
 aplicada.
@@ -134,16 +137,30 @@ macip-backup-poc verify-sftp-integration
 Ambiente SFTP gera diretório e chave temporários; não edita `~/.ssh`,
 `sshd_config` do host nem usa dados reais. Cobre SFTP isolado, local + SFTP,
 exclusões, `snapshots`, `check --read-data`, restauração com cache novo e
-reutilização de repositório. Falhas de rede, acesso negado, chave alterada,
-senha errada e interrupção exigem homologação no ambiente controlado.
+reutilização de repositório. Cada teste cria caminho remoto único
+`MACIP_SFTP_REMOTE_PATH/macip-test-...`; a senha é criada uma vez por teste.
+O contêiner e sua raiz remota são recursos exclusivos do script e são removidos
+ao fim. Os testes reais também cobrem chave inválida, host key desconhecida,
+acesso negado, servidor indisponível, senha restic incorreta e interrupção com
+nova execução. O timeout SFTP seguido de destino local é teste simulado no
+orquestrador, separado das integrações reais.
 
 ## Compatibilidade e limites
 
 Validado neste ambiente: Linux, Python 3.14.4, OpenSSH 10.2p1, restic 0.18.1.
-Integrações locais reais foram homologadas. Host atual não possui `sshd` e não
-permitiu contêiner SFTP; SFTP está pendente de homologação real. `cat config` e
+Integrações locais reais foram homologadas. Host atual não possui `sshd` e o
+daemon Docker/Podman está indisponível; SFTP está pendente de homologação real.
+`cat config` e
 código 10 seguem [scripting restic 0.18](https://restic.readthedocs.io/en/v0.18.0/075_scripting.html).
 Backend segue [repositórios SFTP](https://restic.readthedocs.io/en/stable/030_preparing_a_new_repo.html).
+
+### Registro desta revisão
+
+- Aprovados: 28 testes unitários e integrações locais reais.
+- Ignorados: 7 integrações SFTP reais, pois não há daemon Docker/Podman ativo.
+- Falhas de asserção: nenhuma.
+- Não executado: `tests/sftp/run-integration.sh` encerrou com código 1 na
+  pré-checagem do daemon; isso não é homologação SFTP.
 
 Próximo passo: executar `tests/sftp/run-integration.sh` em host Docker funcional,
 registrar resultado e homologar falhas controladas. SMB, S3, Windows, serviço,

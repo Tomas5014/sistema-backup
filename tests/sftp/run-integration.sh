@@ -3,16 +3,25 @@ set -euo pipefail
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 test_root=$(mktemp -d --tmpdir macip-sftp-integration.XXXXXX)
+started=0
 cleanup() {
-  MACIP_SFTP_TEST_ROOT="$test_root" docker compose -f "$script_dir/compose.yaml" down --volumes
+  if test "$started" -eq 1; then
+    MACIP_SFTP_TEST_ROOT="$test_root" docker compose -f "$script_dir/compose.yaml" down --volumes || true
+  fi
   rm -rf -- "$test_root"
 }
 trap cleanup EXIT
+
+if ! docker info >/dev/null 2>&1; then
+  echo "integração SFTP não executada: daemon Docker indisponível" >&2
+  exit 1
+fi
 
 ssh-keygen -q -t ed25519 -N '' -f "$test_root/id_ed25519"
 cp "$test_root/id_ed25519.pub" "$test_root/authorized_keys"
 chmod 600 "$test_root/authorized_keys"
 MACIP_SFTP_TEST_ROOT="$test_root" docker compose -f "$script_dir/compose.yaml" up --build --detach
+started=1
 
 for attempt in $(seq 1 30); do
   if ssh-keyscan -p 2222 127.0.0.1 >"$test_root/known_hosts" 2>/dev/null; then

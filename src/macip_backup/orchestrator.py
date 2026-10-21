@@ -139,6 +139,7 @@ class BackupOrchestrator:
         }
         self._logger.emit("info", "backup.destination.started", phase="initialize", **common)
         try:
+            destination.validate_for_execution()
             password = password_resolver(destination)
             self._adapter.initialize(
                 destination, password, task.timeouts.initialize_seconds

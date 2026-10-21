@@ -17,6 +17,7 @@ from macip_backup.models import (
     Destination,
     DestinationKind,
     OperationTimeouts,
+    SFTPConnection,
     TaskSpec,
 )
 from macip_backup.orchestrator import BackupOrchestrator, DestinationStatus, ExecutionStatus
@@ -114,6 +115,95 @@ class BackupOrchestratorUnitTests(unittest.TestCase):
         self.assertEqual(result.status, ExecutionStatus.FAILED)
         self.assertIn("MACIP_MISSING_TEST_PASSWORD", result.destinations[0].error or "")
         self.assertNotIn("test-password", log_stream.getvalue())
+
+    def test_missing_sftp_files_fail_only_sftp_between_local_destinations(self) -> None:
+        for missing_field in ("identity_file", "known_hosts_file"):
+            with self.subTest(missing_field=missing_field):
+                identity = self.root / f"id_ed25519-{missing_field}"
+                known_hosts = self.root / f"known_hosts-{missing_field}"
+                existing = known_hosts if missing_field == "identity_file" else identity
+                existing.write_text("test", encoding="utf-8")
+                sftp = Destination(
+                    id=f"sftp-missing-{missing_field}",
+                    name="SFTP sem arquivo",
+                    kind=DestinationKind.SFTP,
+                    repository=None,
+                    password_environment="IGNORED",
+                    sftp=SFTPConnection(
+                        host="backup.example.test",
+                        port=22,
+                        user="backup",
+                        remote_path="repository",
+                        identity_file=str(identity),
+                        known_hosts_file=str(known_hosts),
+                    ),
+                )
+                before = Destination(
+                    id=f"local-before-{missing_field}",
+                    name="Local antes",
+                    kind=DestinationKind.LOCAL,
+                    repository=str(self.root / f"before-{missing_field}"),
+                    password_environment="IGNORED",
+                )
+                after = Destination(
+                    id=f"local-after-{missing_field}",
+                    name="Local depois",
+                    kind=DestinationKind.LOCAL,
+                    repository=str(self.root / f"after-{missing_field}"),
+                    password_environment="IGNORED",
+                )
+                adapter = ControlledAdapter()
+
+                result = BackupOrchestrator(adapter, StructuredLogger(io.StringIO())).execute(
+                    self._task(before, sftp, after), lambda _: "test-password"
+                )
+
+                self.assertEqual(result.status, ExecutionStatus.PARTIAL)
+                self.assertEqual(
+                    [item.status for item in result.destinations],
+                    [DestinationStatus.SUCCESS, DestinationStatus.FAILED, DestinationStatus.SUCCESS],
+                )
+                self.assertIn(f"sftp.{missing_field}", result.destinations[1].error or "")
+                self.assertIn((before.id, "backup", 2), adapter.calls)
+                self.assertIn((after.id, "backup", 2), adapter.calls)
+
+    def test_simulated_sftp_timeout_keeps_local_destination_running(self) -> None:
+        identity = self.root / "id_ed25519"
+        known_hosts = self.root / "known_hosts"
+        identity.write_text("test", encoding="utf-8")
+        known_hosts.write_text("test", encoding="utf-8")
+        sftp = Destination(
+            id="sftp-timeout",
+            name="SFTP com timeout",
+            kind=DestinationKind.SFTP,
+            repository=None,
+            password_environment="IGNORED",
+            sftp=SFTPConnection(
+                host="backup.example.test",
+                port=22,
+                user="backup",
+                remote_path="repository",
+                identity_file=str(identity),
+                known_hosts_file=str(known_hosts),
+            ),
+        )
+        local = Destination(
+            id="local-after-timeout",
+            name="Local após timeout",
+            kind=DestinationKind.LOCAL,
+            repository=str(self.root / "local-after-timeout"),
+            password_environment="IGNORED",
+        )
+        adapter = ControlledAdapter({(sftp.id, "backup"): ResticTimeoutError("backup", 1)})
+
+        result = BackupOrchestrator(adapter, StructuredLogger(io.StringIO())).execute(
+            self._task(sftp, local), lambda _: "test-password"
+        )
+
+        self.assertEqual(result.status, ExecutionStatus.PARTIAL)
+        self.assertEqual(result.destinations[0].status, DestinationStatus.FAILED)
+        self.assertEqual(result.destinations[0].timeout_seconds, 1)
+        self.assertEqual(result.destinations[1].status, DestinationStatus.SUCCESS)
 
     def _task(self, *destinations: Destination) -> TaskSpec:
         return TaskSpec(

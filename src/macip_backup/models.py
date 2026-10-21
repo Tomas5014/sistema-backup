@@ -162,6 +162,11 @@ class Destination:
             raise ConfigurationError("destination.repository_path só existe para destino local")
         return Path(self.repository).expanduser().resolve(strict=False)
 
+    def validate_for_execution(self) -> None:
+        """Valida pré-requisitos que pertencem somente a este destino."""
+        if self.kind is DestinationKind.SFTP and self.sftp is not None:
+            self.sftp.validate_files_for_execution()
+
 
 @dataclass(frozen=True)
 class TaskSpec:
@@ -207,8 +212,6 @@ class TaskSpec:
                             "repositório não pode ficar dentro de uma origem: "
                             f"{repository}"
                         )
-            elif destination.sftp is not None:
-                destination.sftp.validate_files_for_execution()
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "TaskSpec":
