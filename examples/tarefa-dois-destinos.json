@@ -1,0 +1,30 @@
+{
+  "id": "tarefa-financeiro-dupla",
+  "name": "Financeiro: rede local e MAC IP",
+  "client": {
+    "id": "cliente-acme",
+    "name": "ACME LTDA"
+  },
+  "device_id": "servidor-acme-01",
+  "sources": ["/dados/financeiro"],
+  "exclusions": ["*.tmp", "cache/**"],
+  "compression": "max",
+  "destinations": [
+    {
+      "id": "destino-rede-local",
+      "name": "Rede local do cliente",
+      "kind": "local",
+      "repository": "/srv/macip-poc/cliente-acme/local",
+      "password_environment": "MACIP_RESTIC_PASSWORD_LOCAL",
+      "retention": {"keep_last": 14}
+    },
+    {
+      "id": "destino-macip",
+      "name": "Infraestrutura MAC IP",
+      "kind": "local",
+      "repository": "/srv/macip-poc/cliente-acme/macip",
+      "password_environment": "MACIP_RESTIC_PASSWORD_MACIP",
+      "retention": {"keep_last": 30}
+    }
+  ]
+}

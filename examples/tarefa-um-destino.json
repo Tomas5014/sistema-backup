@@ -1,0 +1,22 @@
+{
+  "id": "tarefa-financeiro-diaria",
+  "name": "Financeiro diário",
+  "client": {
+    "id": "cliente-acme",
+    "name": "ACME LTDA"
+  },
+  "device_id": "servidor-acme-01",
+  "sources": ["/dados/financeiro"],
+  "exclusions": ["*.tmp", "cache/**"],
+  "compression": "auto",
+  "destinations": [
+    {
+      "id": "destino-rede-local",
+      "name": "Rede local do cliente",
+      "kind": "local",
+      "repository": "/srv/macip-poc/cliente-acme/local",
+      "password_environment": "MACIP_RESTIC_PASSWORD_LOCAL",
+      "retention": {"keep_last": 14}
+    }
+  ]
+}
