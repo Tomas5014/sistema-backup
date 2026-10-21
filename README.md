@@ -146,8 +146,9 @@ temporária, inclusive se `compose up` falhar parcialmente; o código de saída
 original é preservado. Os testes reais também cobrem chave inválida, host key
 desconhecida, acesso negado, servidor indisponível, senha restic incorreta e
 interrupção após o restic confirmar envio de bytes. Depois da interrupção, o
-teste confirma encerramento do processo, executa nova cópia, `check --read-data`
-e restauração. Timeout SFTP seguido de destino local é teste simulado no
+teste congela o filho ainda ativo, confirma que ele não concluiu normalmente,
+executa nova cópia, `check --read-data` e restauração com comparação de
+`report.txt` e `transfer.bin`. Timeout SFTP seguido de destino local é teste simulado no
 orquestrador, separado das integrações reais.
 
 ## Compatibilidade e limites
@@ -161,7 +162,7 @@ Backend segue [repositórios SFTP](https://restic.readthedocs.io/en/stable/030_p
 
 ### Registro desta revisão
 
-- Aprovados: 30 testes unitários e integrações locais reais.
+- Aprovados: 31 testes unitários e integrações locais reais.
 - Ignorados: 7 integrações SFTP reais, pois não há daemon Docker/Podman ativo.
 - Falhas de asserção: nenhuma.
 - Não executado: `tests/sftp/run-integration.sh` encerrou com código 1 na

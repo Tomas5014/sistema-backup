@@ -224,6 +224,41 @@ class ResticAdapterUnitTests(unittest.TestCase):
                 time.sleep(0.05)
             self.assertFalse(_process_exists(child_pid))
 
+    def test_normal_child_completion_is_not_reported_as_interruption(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="macip-normal-child-") as directory:
+            root = Path(directory)
+            completed = root / "completed"
+            executable = root / "fake-restic.py"
+            executable.write_text(
+                "#!/usr/bin/env python3\n"
+                "import os, subprocess, sys\n"
+                "if 'cat' in sys.argv: sys.exit(10)\n"
+                "if 'init' in sys.argv: sys.exit(0)\n"
+                "if 'backup' in sys.argv:\n"
+                "    child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(0.05)'])\n"
+                "    child.wait()\n"
+                "    open(os.environ['MACIP_NORMAL_CHILD_COMPLETED'], 'w').write('done')\n"
+                "    print('{\"message_type\":\"summary\",\"snapshot_id\":\"normal\",\"total_files_processed\":1,\"total_bytes_processed\":2}')\n",
+                encoding="utf-8",
+            )
+            executable.chmod(0o700)
+            adapter = ResticAdapter(binary=str(executable))
+            with patch.dict(os.environ, {"MACIP_NORMAL_CHILD_COMPLETED": str(completed)}):
+                adapter.initialize(self.destination, "test-password", timeout_seconds=1)
+                summary = adapter.backup(
+                    "task",
+                    "client",
+                    [root],
+                    (),
+                    CompressionMode.AUTO,
+                    self.destination,
+                    "test-password",
+                    timeout_seconds=1,
+                )
+
+            self.assertEqual(summary.snapshot_id, "normal")
+            self.assertTrue(completed.is_file())
+
     def test_backup_passes_each_compression_mode_as_structured_argument(self) -> None:
         processes: list[SuccessfulProcess] = []
 

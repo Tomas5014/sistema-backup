@@ -149,6 +149,7 @@ class SFTPIntegrationTests(unittest.TestCase):
         (self.source / "transfer.bin").write_bytes(os.urandom(2 * 1024 * 1024))
         marker = self.root / "transfer-started"
         child_pid_file = self.root / "restic-child.pid"
+        completion_file = self.root / "restic-completed"
         wrapper = self._blocking_restic_wrapper()
         interrupting = ResticAdapter(binary=str(wrapper), cache_directory=self.root / "cache-interrupt")
         interrupting.initialize(destination, self.password)
@@ -174,6 +175,7 @@ class SFTPIntegrationTests(unittest.TestCase):
             {
                 "MACIP_INTERRUPT_MARKER": str(marker),
                 "MACIP_INTERRUPT_CHILD_PID": str(child_pid_file),
+                "MACIP_INTERRUPT_COMPLETION": str(completion_file),
             },
         ):
             thread = threading.Thread(target=run_backup)
@@ -182,14 +184,17 @@ class SFTPIntegrationTests(unittest.TestCase):
             while not marker.exists() and time.monotonic() < deadline:
                 time.sleep(0.05)
             self.assertTrue(marker.exists(), "transferência não confirmou bytes enviados")
+            self.assertTrue(child_pid_file.is_file())
+            self.assertEqual(_process_state(int(child_pid_file.read_text())), "T")
             self.assertTrue(thread.is_alive())
-            thread.join(timeout=8)
+            thread.join(timeout=12)
 
         self.assertFalse(thread.is_alive())
         self.assertEqual(len(errors), 1)
         self.assertIsInstance(errors[0], ResticTimeoutError)
         self.assertTrue(child_pid_file.is_file())
         self.assertFalse(_process_is_running(int(child_pid_file.read_text())))
+        self.assertFalse(completion_file.exists(), "backup concluiu antes da interrupção")
 
         fresh = ResticAdapter(cache_directory=self.root / "cache-retry")
         summary = fresh.backup(
@@ -207,6 +212,10 @@ class SFTPIntegrationTests(unittest.TestCase):
         self.assertEqual(
             next(restored.rglob("report.txt")).read_text(encoding="utf-8"), "dados SFTP\n"
         )
+        self.assertEqual(
+            next(restored.rglob("transfer.bin")).read_bytes(),
+            (self.source / "transfer.bin").read_bytes(),
+        )
 
     def _blocking_restic_wrapper(self) -> Path:
         real_restic = shutil.which("restic")
@@ -214,7 +223,7 @@ class SFTPIntegrationTests(unittest.TestCase):
         wrapper = self.root / "restic-transfer-wrapper.py"
         wrapper.write_text(
             "#!/usr/bin/env python3\n"
-            "import json, os, subprocess, sys, time\n"
+            "import json, os, signal, subprocess, sys, time\n"
             "real_restic = " + repr(real_restic) + "\n"
             "arguments = sys.argv[1:]\n"
             "if 'backup' not in arguments:\n"
@@ -230,9 +239,13 @@ class SFTPIntegrationTests(unittest.TestCase):
             "    except json.JSONDecodeError:\n"
             "        continue\n"
             "    if event.get('message_type') == 'status' and event.get('bytes_done', 0) > 0:\n"
+            "        if child.poll() is not None:\n"
+            "            sys.exit('restic concluiu antes do ponto de interrupção')\n"
+            "        os.kill(child.pid, signal.SIGSTOP)\n"
             "        open(os.environ['MACIP_INTERRUPT_MARKER'], 'w').write('bytes sent')\n"
             "        time.sleep(30)\n"
             "stdout, stderr = child.communicate()\n"
+            "open(os.environ['MACIP_INTERRUPT_COMPLETION'], 'w').write(str(child.returncode))\n"
             "sys.stdout.write(stdout)\n"
             "sys.stderr.write(stderr)\n"
             "sys.exit(child.returncode)\n",
@@ -277,3 +290,10 @@ def _process_is_running(pid: int) -> bool:
         return False
     stat_file = Path(f"/proc/{pid}/stat")
     return not stat_file.is_file() or stat_file.read_text().split()[2] != "Z"
+
+
+def _process_state(pid: int) -> str | None:
+    stat_file = Path(f"/proc/{pid}/stat")
+    if not stat_file.is_file():
+        return None
+    return stat_file.read_text().split()[2]
