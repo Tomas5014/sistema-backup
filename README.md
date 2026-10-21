@@ -1,155 +1,150 @@
-# POC: núcleo de execução de backup MAC IP
+# POC: núcleo de backup MAC IP
 
-Primeira entrega para validar execução direta e independente por destino usando
-`restic`. O protótipo legado (`backup-full.py`, `backup-diferencial.py`,
-`backup-incremental.py`, manifestos e `restore.py`) foi preservado para manter
-a restauração no formato anterior. Esta POC não escreve nesse formato.
+POC Linux para backups restic independentes em destinos `local` e `sftp`.
+Código legado foi preservado; esta POC não grava no formato legado.
 
-## Escopo entregue
+## Entrega atual
 
-- Modelo de tarefa: cliente, equipamento, IDs estáveis, origens, exclusões,
-  compressão, destinos e retenção declarada por destino.
-- Destino local inicializado como repositório restic v2, quando ainda não existe.
-- Backup para cada destino selecionado, sem cópia ou cadeia implícita entre eles.
-- Histórico por repositório, verificação estrutural e resultado por destino.
-- Resultado global `success`, `partial` ou `failed`.
-- Logs JSON com UTC, cliente, equipamento, tarefa, execução, destino, tentativa,
-  fase, duração, arquivos e bytes quando informados pelo restic.
-- Adaptador com `init`, `backup`, `snapshots`, `restore --verify` e `check`;
-  comandos são listas de argumentos, nunca shell concatenado.
-- Limites configuráveis por operação; timeout encerra e aguarda o processo restic
-  antes de registrar falha do destino.
-- Testes reais em diretórios temporários: backup, exclusão, lista, restauração,
-  `check --read-data` e continuidade após falha de outro destino.
+- Validação JSON antes de criar ou gravar repositórios.
+- Cada destino executa `cat config`, `init` somente com código restic 10,
+  `backup`, `check` e `snapshots` de modo independente.
+- `sftp` usa backend nativo restic. Não existe upload paralelo de arquivos.
+- SSH por chave sem prompt: `BatchMode=yes`, host key obrigatória,
+  `known_hosts` dedicado, identidade explícita, timeout de conexão e keepalive.
+- Timeout inicia sessão Linux própria. Falha envia `SIGTERM` ao grupo, espera 5 s,
+  envia `SIGKILL` e limita a coleta final a 5 s.
+- Senha restic fica somente em `password_environment`. Chave e senha não entram
+  em JSON, argumentos, logs ou resultados.
+- Retenção permanece declarativa. `forget` e `prune` não executam nesta entrega.
 
-## Premissas e limites
-
-- Ambiente homologado nesta entrega: Linux, Python 3.11+ e restic 0.18.1.
-- Foram testados somente repositórios locais temporários. SMB, SFTP, S3/nuvem,
-  Windows e service/systemd ainda não foram homologados.
-- `retention.keep_last` é armazenado por destino, mas o `forget/prune` não foi
-  executado nesta POC. Isso evita apagar pontos restauráveis antes da política.
-- A verificação após cada execução é estrutural. O teste também executa
-  `check --read-data` e uma restauração real; agendamento dessa verificação
-  completa será etapa posterior.
-- Senhas nunca entram nos arquivos de configuração, argumentos, resultados ou
-  logs. Cada destino lê sua senha da variável indicada em `password_environment`.
-- A POC executa destinos em série e não possui fila, cancelamento, repetição,
-  banco central, API ou portal.
-- Retenção permanece somente declarada. `forget` e `prune` continuam fora desta
-  entrega.
+`success`: todos os destinos concluídos. `partial`: ao menos um concluído e outro
+falhou. `failed`: nenhum concluiu. Cada destino informa operação, código ou timeout.
 
 ## Instalação
 
-Em Debian/Ubuntu sem `venv`, instale antes o pacote correspondente à versão de
-Python exibida por `python3 --version`; neste ambiente seria `python3.14-venv`.
-
 ```bash
-sudo apt install python3.14-venv
+sudo apt install python3.14-venv restic openssh-client docker.io
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install --upgrade pip
 python -m pip install -e .
 restic version
 ```
 
-Não há dependências Python externas. `pyproject.toml` fixa o empacotamento e a
-faixa mínima de Python; instale um restic 0.18.x para repetir a validação desta
-entrega.
+Python 3.11+ é exigido. Não há dependências Python externas.
 
-## Configuração e execução
+## Formato da tarefa
 
-Use [tarefa-um-destino.json](examples/tarefa-um-destino.json) ou
-[tarefa-dois-destinos.json](examples/tarefa-dois-destinos.json) como modelo.
-Troque as origens e repositórios pelos caminhos de teste. O repositório não pode
-ficar dentro de uma origem.
+`sources`, `exclusions` e `destinations` são listas. `sources` e `destinations`
+exigem item; `exclusions` aceita `[]`. `client`, cada destino, `retention`,
+`timeouts` e `sftp` são objetos. String no lugar de lista é inválida.
 
-### Formato aceito
+`keep_last` pode faltar, ser `null` ou inteiro positivo. A política ainda não é
+aplicada.
 
-`sources`, `exclusions` e `destinations` são sempre listas JSON. Uma string não
-é convertida em lista. `sources` e `destinations` exigem ao menos um item;
-`exclusions` pode ser `[]`. Cliente, cada destino, `retention` e `timeouts`,
-quando presentes, são objetos.
+Padrões em segundos: `initialize_seconds=120`, `backup_seconds=14400`,
+`snapshots_seconds=120`, `check_seconds=3600`, `restore_seconds=14400`. Ajuste
+backup e restore para conjuntos grandes.
+
+### Destino local
 
 ```json
 {
-  "sources": ["/dados/financeiro"],
-  "exclusions": ["*.tmp", "cache/**"],
-  "compression": "auto",
-  "timeouts": {
-    "initialize_seconds": 120,
-    "backup_seconds": 14400,
-    "snapshots_seconds": 120,
-    "check_seconds": 3600,
-    "restore_seconds": 14400
-  },
-  "destinations": [
-    {
-      "id": "destino-local",
-      "name": "Rede local",
-      "kind": "local",
-      "repository": "/srv/macip-poc/cliente/local",
-      "password_environment": "MACIP_RESTIC_PASSWORD_LOCAL",
-      "retention": {"keep_last": 14}
-    }
-  ]
+  "id": "local", "name": "Cópia local", "kind": "local",
+  "repository": "/srv/macip/cliente/local",
+  "password_environment": "MACIP_RESTIC_PASSWORD_LOCAL",
+  "retention": {"keep_last": 14}
 }
 ```
 
-`retention` pode ser omitido; se existir, deve ser objeto. `keep_last` pode ser
-omitido ou `null`, ou ser inteiro positivo. Booleanos, texto, frações, zero e
-números negativos são inválidos. A política ainda não remove snapshots.
+Repositório local não pode ficar dentro de origem.
 
-Os limites acima são padrão, em segundos. Para backups grandes, ajuste somente
-o campo necessário no objeto `timeouts`; todos exigem inteiro positivo. O agente
-encerra e coleta o processo restic quando qualquer limite expira.
+### Destino SFTP
 
-```bash
-export MACIP_RESTIC_PASSWORD_LOCAL='use-uma-senha-unica-e-segura'
-export MACIP_RESTIC_PASSWORD_MACIP='use-outra-senha-unica-e-segura'
-macip-backup-poc validate examples/tarefa-dois-destinos.json
-macip-backup-poc run examples/tarefa-dois-destinos.json
+```json
+{
+  "id": "macip-sftp", "name": "MAC IP SFTP", "kind": "sftp",
+  "password_environment": "MACIP_RESTIC_PASSWORD_SFTP",
+  "sftp": {
+    "host": "backup.macip.example", "port": 22, "user": "backup_cliente",
+    "remote_path": "/srv/restic/cliente-acme",
+    "identity_file": "/etc/macip-backup/keys/cliente-acme_ed25519",
+    "known_hosts_file": "/etc/macip-backup/known_hosts",
+    "connect_timeout_seconds": 15,
+    "server_alive_interval_seconds": 60,
+    "server_alive_count_max": 3
+  }
+}
 ```
 
-`run` valida toda configuração antes de inicializar repositórios. Depois executa
-cada destino: `init`, `backup`, `check` estrutural e `snapshots`. Eventos JSON
-vão para `stderr`; resultado JSON vai para `stdout`. Cada destino informa sucesso
-ou falha, incluindo operação e limite em timeout. Resultado global é `success`
-quando todos funcionam, `partial` quando ao menos um funciona e outro falha, e
-`failed` quando nenhum funciona. Código `0` é sucesso; `2` representa parcial
-ou falha. Senhas perdidas tornam dados restic irrecuperáveis: guarde-as em cofre.
+`remote_path` com `/` inicial é absoluto no servidor. Sem `/`, como
+`repositories/cliente`, é relativo ao diretório inicial SFTP. Nunca use `~`.
+SFTP não possui `repository`; caminho remoto nunca passa por `Path.resolve()`.
 
-## Validação
+Não há campos `command`, `args`, senha SSH ou conteúdo de chave. Campos SFTP
+desconhecidos são rejeitados. `identity_file` e `known_hosts_file` devem existir
+na execução. Senha de chave não é suportada; use chave de serviço com permissões
+restritas e agente operacional apropriado.
+
+Confirme impressão digital por canal confiável antes de cadastrar servidor:
 
 ```bash
-# Testes unitários: validação, timeout, estados e credenciais.
-PYTHONPATH=src python -m unittest discover -s tests -p 'test_*.py' -v
+ssh-keyscan -p 22 backup.macip.example > /tmp/macip-known-hosts-candidato
+ssh-keygen -lf /tmp/macip-known-hosts-candidato
+# Compare com impressão digital recebida por canal confiável.
+install -m 600 /tmp/macip-known-hosts-candidato /etc/macip-backup/known_hosts
+```
 
-# Testes reais: restic, dois destinos, restauração, exclusões e compressão.
-PYTHONPATH=src python -m unittest discover -s tests -p 'test_integration_restic.py' -v
+Não aceite chave nova automaticamente. Usuário remoto precisa apenas de acesso
+ao diretório do repositório e não deve ser conta humana.
 
-# Executa a validação real; falha se restic não existir ou nenhum teste rodar.
+Exemplos: [somente SFTP](examples/tarefa-sftp.json) e
+[local + SFTP](examples/tarefa-local-sftp.json).
+
+## Execução
+
+```bash
+export MACIP_RESTIC_PASSWORD_LOCAL='senha-restic-local-em-cofre'
+export MACIP_RESTIC_PASSWORD_SFTP='senha-restic-sftp-em-cofre'
+macip-backup-poc validate examples/tarefa-local-sftp.json
+macip-backup-poc run examples/tarefa-local-sftp.json
+```
+
+Senha restic perdida impede recuperação. Guarde cada senha em cofre e teste
+restauração. Para recuperar acesso, restaure a mesma senha no cofre e a chave
+privada no caminho configurado; não execute `init` após erro de senha. Troca de
+chave ou de host exige atualizar `known_hosts` somente após nova confirmação por
+canal confiável. `RESTIC_CACHE_DIR` é cache local; nunca é destino de backup.
+
+## Testes
+
+```bash
+# Unitários e integração local real.
+PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_*.py' -v
+
+# Integração local; falha sem restic.
 macip-backup-poc verify-integration
+
+# SFTP efêmero: chave, known_hosts e contêiner isolado.
+tests/sftp/run-integration.sh
+
+# Apenas integração SFTP real; falha sem pré-requisitos ou execução real.
+macip-backup-poc verify-sftp-integration
 ```
 
-Testes reais criam e removem dados temporários; não acessam dados reais. Testes
-ignorados não são homologação: `verify-integration` retorna falha sem `restic`.
+Ambiente SFTP gera diretório e chave temporários; não edita `~/.ssh`,
+`sshd_config` do host nem usa dados reais. Cobre SFTP isolado, local + SFTP,
+exclusões, `snapshots`, `check --read-data`, restauração com cache novo e
+reutilização de repositório. Falhas de rede, acesso negado, chave alterada,
+senha errada e interrupção exigem homologação no ambiente controlado.
 
-## Compatibilidade restic verificada
+## Compatibilidade e limites
 
-O adaptador foi testado em Linux com restic 0.18.1 e repositórios locais
-temporários: formato v2, senha em `RESTIC_PASSWORD`, `--compression auto|off|max`,
-`--json`, `snapshots`, `check`, `check --read-data` e `restore --verify` em ambos
-os destinos. As capacidades e os comportamentos foram confirmados na
-documentação oficial: [inicialização e backends](https://restic.readthedocs.io/en/stable/030_preparing_a_new_repo.html)
-e [fluxo de backup, check e restore](https://restic.readthedocs.io/en/stable/010_introduction.html).
-S3 e SFTP são suportados pelo restic, mas não são homologados por esta POC.
+Validado neste ambiente: Linux, Python 3.14.4, OpenSSH 10.2p1, restic 0.18.1.
+Integrações locais reais foram homologadas. Host atual não possui `sshd` e não
+permitiu contêiner SFTP; SFTP está pendente de homologação real. `cat config` e
+código 10 seguem [scripting restic 0.18](https://restic.readthedocs.io/en/v0.18.0/075_scripting.html).
+Backend segue [repositórios SFTP](https://restic.readthedocs.io/en/stable/030_preparing_a_new_repo.html).
 
-## Próximas etapas
-
-1. Homologar SMB, SFTP e S3 com TLS, identidade, imutabilidade e credenciais de menor privilégio.
-2. Criar serviço do agente: SQLite para política, fila de eventos e retomada após reinicialização.
-3. Adicionar agenda com fuso, limites, prevenção de sobreposição, repetição e cancelamento seguro.
-4. Criar API FastAPI e PostgreSQL com isolamento obrigatório por cliente, contas, auditoria e MFA.
-5. Criar portal React em português, alertas, retenção segura, verificação periódica e restauração controlada.
-6. Executar piloto supervisionado com medições de volume, alteração diária, banda e teste de recuperação.
+Próximo passo: executar `tests/sftp/run-integration.sh` em host Docker funcional,
+registrar resultado e homologar falhas controladas. SMB, S3, Windows, serviço,
+agenda, API e portal permanecem fora do escopo.

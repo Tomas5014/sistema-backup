@@ -6,12 +6,17 @@ import json
 import os
 import re
 import shutil
+import shlex
+import signal
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
-from .models import CompressionMode, Destination, OperationTimeouts
+from .models import CompressionMode, Destination, DestinationKind, OperationTimeouts
+
+
+_PROCESS_STOP_GRACE_SECONDS = 5
 
 
 class ResticError(RuntimeError):
@@ -63,8 +68,19 @@ class ResticAdapter:
         password: str,
         timeout_seconds: int | None = None,
     ) -> None:
-        repository = destination.repository_path
-        if (repository / "config").is_file():
+        try:
+            self._run(
+                destination,
+                password,
+                ["cat", "config"],
+                timeout_seconds or self._timeouts.initialize_seconds,
+            )
+        except ResticCommandError as error:
+            # Código 10 é a resposta documentada pelo restic para repositório ausente.
+            # Qualquer outro erro pode ser senha, SSH, acesso ou comunicação inválida.
+            if error.return_code != 10:
+                raise
+        else:
             return
         self._run(
             destination,
@@ -158,7 +174,13 @@ class ResticAdapter:
         if shutil.which(self._binary) is None and not Path(self._binary).is_file():
             raise ResticError(f"binário restic não encontrado: {self._binary}")
 
-        command = [self._binary, "--repo", str(destination.repository_path), *arguments]
+        command = [
+            self._binary,
+            "--repo",
+            self._repository_reference(destination),
+            *self._backend_options(destination),
+            *arguments,
+        ]
         environment = os.environ.copy()
         environment["RESTIC_PASSWORD"] = password
         if self._cache_directory is not None:
@@ -170,22 +192,91 @@ class ResticAdapter:
             stderr=subprocess.PIPE,
             text=True,
             env=environment,
+            start_new_session=os.name == "posix",
         )
         operation = _operation_name(arguments)
         try:
             stdout, stderr = process.communicate(timeout=timeout_seconds)
         except subprocess.TimeoutExpired:
-            try:
-                process.kill()
-            except ProcessLookupError:
-                pass
-            stdout, stderr = process.communicate()
+            stdout, stderr = self._stop_timed_out_process(process)
             detail = _safe_error_detail(stderr or stdout)
             raise ResticTimeoutError(operation, timeout_seconds, detail)
         if process.returncode != 0:
             detail = _safe_error_detail(stderr or stdout)
             raise ResticCommandError(operation, process.returncode, detail)
         return stdout
+
+    def _repository_reference(self, destination: Destination) -> str:
+        if destination.kind is DestinationKind.LOCAL:
+            return str(destination.repository_path)
+        if destination.sftp is None:
+            raise ResticError("destino SFTP sem configuração")
+        connection = destination.sftp
+        # Sintaxe nativa restic: "/" inicial preserva caminho absoluto remoto;
+        # sem ela, o caminho é relativo ao diretório inicial do usuário SFTP.
+        host = connection.host
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        return f"sftp:{connection.user}@{host}:{connection.remote_path}"
+
+    def _backend_options(self, destination: Destination) -> list[str]:
+        if destination.kind is not DestinationKind.SFTP:
+            return []
+        if destination.sftp is None:
+            raise ResticError("destino SFTP sem configuração")
+        connection = destination.sftp
+        ssh_arguments = [
+            "-oBatchMode=yes",
+            "-oStrictHostKeyChecking=yes",
+            f"-oUserKnownHostsFile={connection.known_hosts_file}",
+            "-oIdentitiesOnly=yes",
+            "-oPasswordAuthentication=no",
+            "-oKbdInteractiveAuthentication=no",
+            "-oPreferredAuthentications=publickey",
+            "-i",
+            connection.identity_file,
+            "-p",
+            str(connection.port),
+            f"-oConnectTimeout={connection.connect_timeout_seconds}",
+            f"-oServerAliveInterval={connection.server_alive_interval_seconds}",
+            f"-oServerAliveCountMax={connection.server_alive_count_max}",
+        ]
+        # restic interpreta sftp.args como argumentos do ssh. shlex.join preserva
+        # cada valor como um argumento, inclusive caminhos que contenham espaços.
+        return ["-o", f"sftp.args={shlex.join(ssh_arguments)}"]
+
+    def _stop_timed_out_process(self, process: subprocess.Popen[str]) -> tuple[str, str]:
+        self._signal_process_group(process, signal.SIGTERM)
+        try:
+            return process.communicate(timeout=_PROCESS_STOP_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            self._signal_process_group(process, signal.SIGKILL)
+            try:
+                return process.communicate(timeout=_PROCESS_STOP_GRACE_SECONDS)
+            except subprocess.TimeoutExpired:
+                self._close_pipes(process)
+                return "", "processo não encerrou após SIGTERM e SIGKILL"
+
+    @staticmethod
+    def _signal_process_group(process: subprocess.Popen[str], signum: int) -> None:
+        try:
+            if os.name == "posix" and process.pid is not None:
+                os.killpg(process.pid, signum)
+            elif signum == signal.SIGTERM:
+                process.terminate()
+            else:
+                process.kill()
+        except ProcessLookupError:
+            pass
+
+    @staticmethod
+    def _close_pipes(process: subprocess.Popen[str]) -> None:
+        for stream in (process.stdout, process.stderr):
+            if stream is not None:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
 
 
 def _parse_backup_summary(output: str) -> BackupSummary:
@@ -210,5 +301,5 @@ def _safe_error_detail(detail: str) -> str:
 
 
 def _operation_name(arguments: Sequence[str]) -> str:
-    operations = {"init", "backup", "snapshots", "restore", "check"}
+    operations = {"init", "backup", "snapshots", "restore", "check", "cat"}
     return next((argument for argument in arguments if argument in operations), arguments[0])

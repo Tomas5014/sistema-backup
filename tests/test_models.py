@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from pathlib import Path
+import re
 import sys
 import unittest
-from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
@@ -133,3 +134,86 @@ class TaskSpecFromDictTests(unittest.TestCase):
 
         self.assertEqual(task.timeouts.backup_seconds, 4)
         self.assertEqual(task.timeouts.restore_seconds, 7)
+
+    def test_kind_missing_null_or_invalid_is_configuration_error(self) -> None:
+        for value, expected in (
+            (None, "destinations[0].kind é obrigatório"),
+            ("ftp", "destinations[0].kind não é homologado: ftp"),
+        ):
+            with self.subTest(value=value):
+                config = valid_config()
+                destination = config["destinations"][0]
+                assert isinstance(destination, dict)
+                if value is None:
+                    destination["kind"] = None
+                else:
+                    destination["kind"] = value
+                with self.assertRaisesRegex(ConfigurationError, re.escape(expected)):
+                    TaskSpec.from_dict(config)
+
+        config = valid_config()
+        destination = config["destinations"][0]
+        assert isinstance(destination, dict)
+        del destination["kind"]
+        with self.assertRaisesRegex(
+            ConfigurationError, re.escape("destinations[0].kind é obrigatório")
+        ):
+            TaskSpec.from_dict(config)
+
+    def test_parses_sftp_without_resolving_remote_path(self) -> None:
+        config = valid_config()
+        config["destinations"] = [
+            {
+                "id": "destination-sftp",
+                "name": "SFTP isolado",
+                "kind": "sftp",
+                "password_environment": "MACIP_RESTIC_PASSWORD_SFTP",
+                "sftp": {
+                    "host": "backup.example.test",
+                    "port": 2222,
+                    "user": "macip_backup",
+                    "remote_path": "/srv/restic/client",
+                    "identity_file": "/run/macip/id_ed25519",
+                    "known_hosts_file": "/run/macip/known_hosts",
+                },
+            }
+        ]
+
+        task = TaskSpec.from_dict(config)
+
+        connection = task.destinations[0].sftp
+        assert connection is not None
+        self.assertEqual(connection.remote_path, "/srv/restic/client")
+        self.assertTrue(connection.remote_path_is_absolute)
+        self.assertIsNone(task.destinations[0].repository)
+
+        config["destinations"][0]["sftp"]["remote_path"] = "repositories/client"  # type: ignore[index]
+        task = TaskSpec.from_dict(config)
+        assert task.destinations[0].sftp is not None
+        self.assertFalse(task.destinations[0].sftp.remote_path_is_absolute)
+
+    def test_rejects_invalid_sftp_types_and_injection_fields(self) -> None:
+        config = valid_config()
+        destination = config["destinations"][0]
+        assert isinstance(destination, dict)
+        destination.pop("repository")
+        destination["kind"] = "sftp"
+        destination["sftp"] = {
+            "host": "backup.example.test;rm",
+            "port": "22",
+            "user": "backup user",
+            "remote_path": "~/repo",
+            "identity_file": "/tmp/key",
+            "known_hosts_file": "/tmp/known_hosts",
+        }
+        with self.assertRaisesRegex(ConfigurationError, "sftp.port deve ser inteiro"):
+            TaskSpec.from_dict(config)
+
+        destination["sftp"]["port"] = 22  # type: ignore[index]
+        with self.assertRaisesRegex(ConfigurationError, "sftp.host contém caracteres"):
+            TaskSpec.from_dict(config)
+
+        destination["sftp"]["host"] = "backup.example.test"  # type: ignore[index]
+        destination["sftp"]["command"] = "ssh -oStrictHostKeyChecking=no"  # type: ignore[index]
+        with self.assertRaisesRegex(ConfigurationError, "sftp.command não é permitido"):
+            TaskSpec.from_dict(config)

@@ -1,0 +1,26 @@
+{
+  "id": "tarefa-financeiro-sftp",
+  "name": "Financeiro para SFTP MAC IP",
+  "client": {"id": "cliente-acme", "name": "ACME LTDA"},
+  "device_id": "servidor-acme-01",
+  "sources": ["/dados/financeiro"],
+  "exclusions": ["*.tmp", "cache/**"],
+  "compression": "auto",
+  "destinations": [
+    {
+      "id": "macip-sftp",
+      "name": "MAC IP SFTP",
+      "kind": "sftp",
+      "password_environment": "MACIP_RESTIC_PASSWORD_SFTP",
+      "retention": {"keep_last": 30},
+      "sftp": {
+        "host": "backup.macip.example",
+        "port": 22,
+        "user": "backup_cliente",
+        "remote_path": "/srv/restic/cliente-acme",
+        "identity_file": "/etc/macip-backup/keys/cliente-acme_ed25519",
+        "known_hosts_file": "/etc/macip-backup/known_hosts"
+      }
+    }
+  ]
+}

@@ -82,7 +82,8 @@ class BackupExecutionIntegrationTests(unittest.TestCase):
 
     def test_failed_destination_does_not_stop_valid_destination(self) -> None:
         failed_repository = self.root / "not-a-directory"
-        failed_repository.write_text("bloqueia init")
+        failed_repository.mkdir()
+        (failed_repository / "config").write_text("configuração inválida")
         failed = self._destination("invalid", failed_repository)
         valid = self._destination("local", self.root / "repository-local")
 

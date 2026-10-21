@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
-from macip_backup.cli import main, verify_integration
+from macip_backup.cli import main, verify_integration, verify_sftp_integration
 
 
 class IntegrationValidationCommandTests(unittest.TestCase):
@@ -21,6 +21,16 @@ class IntegrationValidationCommandTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 1)
         self.assertIn("binário restic não encontrado", output.getvalue())
+
+    def test_sftp_validation_fails_without_isolated_environment(self) -> None:
+        output = io.StringIO()
+        with patch.dict("macip_backup.cli.os.environ", {}, clear=True), patch(
+            "macip_backup.cli.shutil.which", return_value="/usr/bin/tool"
+        ), patch("sys.stdout", output):
+            exit_code = verify_sftp_integration()
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("ambiente isolado não foi preparado", output.getvalue())
 
     def test_invalid_configuration_does_not_create_adapter_or_repository(self) -> None:
         config = {
