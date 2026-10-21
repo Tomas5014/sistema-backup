@@ -9,9 +9,12 @@ import shutil
 import socket
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
@@ -143,22 +146,53 @@ class SFTPIntegrationTests(unittest.TestCase):
 
     def test_interrupted_transfer_can_retry(self) -> None:
         destination = self._sftp_destination()
-        (self.source / "transfer.bin").write_bytes(os.urandom(8 * 1024 * 1024))
-        self.adapter.initialize(destination, self.password)
+        (self.source / "transfer.bin").write_bytes(os.urandom(2 * 1024 * 1024))
+        marker = self.root / "transfer-started"
+        child_pid_file = self.root / "restic-child.pid"
+        wrapper = self._blocking_restic_wrapper()
+        interrupting = ResticAdapter(binary=str(wrapper), cache_directory=self.root / "cache-interrupt")
+        interrupting.initialize(destination, self.password)
+        errors: list[Exception] = []
 
-        with self.assertRaises(ResticTimeoutError):
-            self.adapter.backup(
-                "sftp-interrupted",
-                "client-sftp",
-                (self.source,),
-                (),
-                CompressionMode.OFF,
-                destination,
-                self.password,
-                timeout_seconds=0,
-            )
+        def run_backup() -> None:
+            try:
+                interrupting.backup(
+                    "sftp-interrupted",
+                    "client-sftp",
+                    (self.source,),
+                    (),
+                    CompressionMode.OFF,
+                    destination,
+                    self.password,
+                    timeout_seconds=5,
+                )
+            except Exception as error:
+                errors.append(error)
 
-        summary = self.adapter.backup(
+        with patch.dict(
+            os.environ,
+            {
+                "MACIP_INTERRUPT_MARKER": str(marker),
+                "MACIP_INTERRUPT_CHILD_PID": str(child_pid_file),
+            },
+        ):
+            thread = threading.Thread(target=run_backup)
+            thread.start()
+            deadline = time.monotonic() + 4
+            while not marker.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertTrue(marker.exists(), "transferência não confirmou bytes enviados")
+            self.assertTrue(thread.is_alive())
+            thread.join(timeout=8)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], ResticTimeoutError)
+        self.assertTrue(child_pid_file.is_file())
+        self.assertFalse(_process_is_running(int(child_pid_file.read_text())))
+
+        fresh = ResticAdapter(cache_directory=self.root / "cache-retry")
+        summary = fresh.backup(
             "sftp-interrupted",
             "client-sftp",
             (self.source,),
@@ -167,8 +201,45 @@ class SFTPIntegrationTests(unittest.TestCase):
             destination,
             self.password,
         )
-        self.assertTrue(summary.snapshot_id)
-        self.adapter.check(destination, self.password, read_data=True)
+        fresh.check(destination, self.password, read_data=True)
+        restored = self.root / "restored-after-interruption"
+        fresh.restore(destination, self.password, summary.snapshot_id, restored, self.source)
+        self.assertEqual(
+            next(restored.rglob("report.txt")).read_text(encoding="utf-8"), "dados SFTP\n"
+        )
+
+    def _blocking_restic_wrapper(self) -> Path:
+        real_restic = shutil.which("restic")
+        assert real_restic is not None
+        wrapper = self.root / "restic-transfer-wrapper.py"
+        wrapper.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, os, subprocess, sys, time\n"
+            "real_restic = " + repr(real_restic) + "\n"
+            "arguments = sys.argv[1:]\n"
+            "if 'backup' not in arguments:\n"
+            "    os.execv(real_restic, [real_restic, *arguments])\n"
+            "backup_index = arguments.index('backup')\n"
+            "arguments.insert(backup_index, '--limit-upload=512')\n"
+            "child = subprocess.Popen([real_restic, *arguments], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)\n"
+            "open(os.environ['MACIP_INTERRUPT_CHILD_PID'], 'w').write(str(child.pid))\n"
+            "for line in child.stdout:\n"
+            "    print(line, end='', flush=True)\n"
+            "    try:\n"
+            "        event = json.loads(line)\n"
+            "    except json.JSONDecodeError:\n"
+            "        continue\n"
+            "    if event.get('message_type') == 'status' and event.get('bytes_done', 0) > 0:\n"
+            "        open(os.environ['MACIP_INTERRUPT_MARKER'], 'w').write('bytes sent')\n"
+            "        time.sleep(30)\n"
+            "stdout, stderr = child.communicate()\n"
+            "sys.stdout.write(stdout)\n"
+            "sys.stderr.write(stderr)\n"
+            "sys.exit(child.returncode)\n",
+            encoding="utf-8",
+        )
+        wrapper.chmod(0o700)
+        return wrapper
 
     def _sftp_destination(self) -> Destination:
         return Destination(
@@ -197,3 +268,12 @@ class SFTPIntegrationTests(unittest.TestCase):
             compression=CompressionMode.AUTO,
             destinations=destinations,
         )
+
+
+def _process_is_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    stat_file = Path(f"/proc/{pid}/stat")
+    return not stat_file.is_file() or stat_file.read_text().split()[2] != "Z"

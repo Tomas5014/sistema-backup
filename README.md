@@ -46,7 +46,9 @@ aplicada.
 
 Padrões em segundos: `initialize_seconds=120`, `backup_seconds=14400`,
 `snapshots_seconds=120`, `check_seconds=3600`, `restore_seconds=14400`. Ajuste
-backup e restore para conjuntos grandes.
+backup e restore para conjuntos grandes. Na API do adaptador, `None` usa esse
+padrão; valor fornecido deve ser inteiro positivo. Zero, booleano, fração e
+negativo falham antes de iniciar processo.
 
 ### Destino local
 
@@ -139,10 +141,13 @@ Ambiente SFTP gera diretório e chave temporários; não edita `~/.ssh`,
 exclusões, `snapshots`, `check --read-data`, restauração com cache novo e
 reutilização de repositório. Cada teste cria caminho remoto único
 `MACIP_SFTP_REMOTE_PATH/macip-test-...`; a senha é criada uma vez por teste.
-O contêiner e sua raiz remota são recursos exclusivos do script e são removidos
-ao fim. Os testes reais também cobrem chave inválida, host key desconhecida,
-acesso negado, servidor indisponível, senha restic incorreta e interrupção com
-nova execução. O timeout SFTP seguido de destino local é teste simulado no
+O script usa projeto Compose exclusivo e remove somente esse projeto e a raiz
+temporária, inclusive se `compose up` falhar parcialmente; o código de saída
+original é preservado. Os testes reais também cobrem chave inválida, host key
+desconhecida, acesso negado, servidor indisponível, senha restic incorreta e
+interrupção após o restic confirmar envio de bytes. Depois da interrupção, o
+teste confirma encerramento do processo, executa nova cópia, `check --read-data`
+e restauração. Timeout SFTP seguido de destino local é teste simulado no
 orquestrador, separado das integrações reais.
 
 ## Compatibilidade e limites
@@ -156,7 +161,7 @@ Backend segue [repositórios SFTP](https://restic.readthedocs.io/en/stable/030_p
 
 ### Registro desta revisão
 
-- Aprovados: 28 testes unitários e integrações locais reais.
+- Aprovados: 30 testes unitários e integrações locais reais.
 - Ignorados: 7 integrações SFTP reais, pois não há daemon Docker/Podman ativo.
 - Falhas de asserção: nenhuma.
 - Não executado: `tests/sftp/run-integration.sh` encerrou com código 1 na

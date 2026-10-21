@@ -3,12 +3,16 @@ set -euo pipefail
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 test_root=$(mktemp -d --tmpdir macip-sftp-integration.XXXXXX)
-started=0
+project_name="macip-sftp-$$-${RANDOM}"
+cleanup_needed=0
 cleanup() {
-  if test "$started" -eq 1; then
-    MACIP_SFTP_TEST_ROOT="$test_root" docker compose -f "$script_dir/compose.yaml" down --volumes || true
+  original_status=$?
+  if test "$cleanup_needed" -eq 1; then
+    MACIP_SFTP_TEST_ROOT="$test_root" docker compose \
+      --project-name "$project_name" -f "$script_dir/compose.yaml" down --volumes || true
   fi
   rm -rf -- "$test_root"
+  return "$original_status"
 }
 trap cleanup EXIT
 
@@ -20,8 +24,9 @@ fi
 ssh-keygen -q -t ed25519 -N '' -f "$test_root/id_ed25519"
 cp "$test_root/id_ed25519.pub" "$test_root/authorized_keys"
 chmod 600 "$test_root/authorized_keys"
-MACIP_SFTP_TEST_ROOT="$test_root" docker compose -f "$script_dir/compose.yaml" up --build --detach
-started=1
+cleanup_needed=1
+MACIP_SFTP_TEST_ROOT="$test_root" docker compose \
+  --project-name "$project_name" -f "$script_dir/compose.yaml" up --build --detach
 
 for attempt in $(seq 1 30); do
   if ssh-keyscan -p 2222 127.0.0.1 >"$test_root/known_hosts" 2>/dev/null; then

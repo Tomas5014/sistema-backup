@@ -17,7 +17,7 @@ from macip_backup.models import (
     DestinationKind,
     SFTPConnection,
 )
-from macip_backup.restic import ResticAdapter, ResticCommandError, ResticTimeoutError
+from macip_backup.restic import ResticAdapter, ResticCommandError, ResticError, ResticTimeoutError
 
 
 class TimedOutProcess:
@@ -39,8 +39,10 @@ class SuccessfulProcess:
     def __init__(self, stdout: str) -> None:
         self.returncode = 0
         self.stdout = stdout
+        self.timeout: int | None = None
 
     def communicate(self, timeout: int | None = None) -> tuple[str, str]:
+        self.timeout = timeout
         return self.stdout, ""
 
 
@@ -136,6 +138,45 @@ class ResticAdapterUnitTests(unittest.TestCase):
             self.assertEqual(context.exception.return_code, returncode)
             self.assertEqual(popen.call_count, 1)
             self.assertIn("cat", popen.call_args.args[0])
+
+    def test_explicit_timeout_must_be_positive_and_none_uses_default(self) -> None:
+        adapter = ResticAdapter()
+        for value in (0, -1, True, 1.5):
+            with self.subTest(value=value), patch(
+                "macip_backup.restic.subprocess.Popen"
+            ) as popen, self.assertRaisesRegex(
+                ResticError, "timeout de restic backup deve ser inteiro positivo"
+            ):
+                adapter.backup(
+                    "task",
+                    "client",
+                    [Path("/tmp/source")],
+                    (),
+                    CompressionMode.AUTO,
+                    self.destination,
+                    "test-password",
+                    timeout_seconds=value,  # type: ignore[arg-type]
+                )
+            popen.assert_not_called()
+
+        process = SuccessfulProcess(
+            '{"message_type":"summary","snapshot_id":"snapshot",'
+            '"total_files_processed":1,"total_bytes_processed":2}\n'
+        )
+        with patch("macip_backup.restic.shutil.which", return_value="/usr/bin/restic"), patch(
+            "macip_backup.restic.subprocess.Popen", return_value=process
+        ):
+            adapter.backup(
+                "task",
+                "client",
+                [Path("/tmp/source")],
+                (),
+                CompressionMode.AUTO,
+                self.destination,
+                "test-password",
+                timeout_seconds=None,
+            )
+        self.assertEqual(process.timeout, 14_400)
 
     def test_timeout_kills_real_child_process_group_and_next_destination_continues(self) -> None:
         with tempfile.TemporaryDirectory(prefix="macip-timeout-") as directory:

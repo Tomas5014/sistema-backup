@@ -68,12 +68,15 @@ class ResticAdapter:
         password: str,
         timeout_seconds: int | None = None,
     ) -> None:
+        timeout = _effective_timeout(
+            timeout_seconds, self._timeouts.initialize_seconds, "initialize"
+        )
         try:
             self._run(
                 destination,
                 password,
                 ["cat", "config"],
-                timeout_seconds or self._timeouts.initialize_seconds,
+                timeout,
             )
         except ResticCommandError as error:
             # Código 10 é a resposta documentada pelo restic para repositório ausente.
@@ -86,7 +89,7 @@ class ResticAdapter:
             destination,
             password,
             ["init", "--repository-version", "2"],
-            timeout_seconds or self._timeouts.initialize_seconds,
+            timeout,
         )
 
     def backup(
@@ -100,24 +103,28 @@ class ResticAdapter:
         password: str,
         timeout_seconds: int | None = None,
     ) -> BackupSummary:
+        timeout = _effective_timeout(timeout_seconds, self._timeouts.backup_seconds, "backup")
         arguments = ["--json", "--compression", compression.value, "backup"]
         for exclusion in exclusions:
             arguments.extend(["--exclude", exclusion])
         arguments.extend(["--tag", f"task:{task_id}", "--tag", f"client:{client_id}"])
         arguments.extend(str(source.expanduser().resolve()) for source in sources)
         output = self._run(
-            destination, password, arguments, timeout_seconds or self._timeouts.backup_seconds
+            destination, password, arguments, timeout
         )
         return _parse_backup_summary(output)
 
     def snapshots(
         self, destination: Destination, password: str, timeout_seconds: int | None = None
     ) -> list[dict[str, Any]]:
+        timeout = _effective_timeout(
+            timeout_seconds, self._timeouts.snapshots_seconds, "snapshots"
+        )
         output = self._run(
             destination,
             password,
             ["--json", "snapshots"],
-            timeout_seconds or self._timeouts.snapshots_seconds,
+            timeout,
         )
         try:
             snapshots = json.loads(output)
@@ -136,6 +143,9 @@ class ResticAdapter:
         source_subfolder: Path | None = None,
         timeout_seconds: int | None = None,
     ) -> None:
+        timeout = _effective_timeout(
+            timeout_seconds, self._timeouts.restore_seconds, "restore"
+        )
         target.mkdir(parents=True, exist_ok=True)
         snapshot_selector = snapshot_id
         if source_subfolder is not None:
@@ -144,7 +154,7 @@ class ResticAdapter:
             destination,
             password,
             ["restore", snapshot_selector, "--target", str(target.resolve()), "--verify"],
-            timeout_seconds or self._timeouts.restore_seconds,
+            timeout,
         )
 
     def check(
@@ -155,11 +165,12 @@ class ResticAdapter:
         read_data: bool = False,
         timeout_seconds: int | None = None,
     ) -> None:
+        timeout = _effective_timeout(timeout_seconds, self._timeouts.check_seconds, "check")
         arguments = ["check"]
         if read_data:
             arguments.append("--read-data")
         self._run(
-            destination, password, arguments, timeout_seconds or self._timeouts.check_seconds
+            destination, password, arguments, timeout
         )
 
     def _run(
@@ -292,6 +303,14 @@ def _parse_backup_summary(output: str) -> BackupSummary:
                 bytes_processed=event.get("total_bytes_processed"),
             )
     raise ResticError("restic backup não retornou resumo com snapshot_id")
+
+
+def _effective_timeout(value: int | None, default: int, operation: str) -> int:
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ResticError(f"timeout de restic {operation} deve ser inteiro positivo")
+    return value
 
 
 def _safe_error_detail(detail: str) -> str:
