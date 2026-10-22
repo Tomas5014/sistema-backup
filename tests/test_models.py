@@ -520,3 +520,28 @@ class S3ConfigurationTests(unittest.TestCase):
             os.environ, {"MACIP_S3_ACCESS": "key", "MACIP_S3_SECRET": "secret"}
         ):
             task.destinations[0].validate_for_execution()
+
+
+class RetryPolicyTests(unittest.TestCase):
+    def test_defaults_when_retry_absent(self) -> None:
+        task = TaskSpec.from_dict(valid_config())
+        self.assertEqual((task.retry.attempts, task.retry.backoff_seconds), (1, 0))
+
+    def test_parses_retry_policy(self) -> None:
+        config = valid_config()
+        config["retry"] = {"attempts": 3, "backoff_seconds": 30}
+        task = TaskSpec.from_dict(config)
+        self.assertEqual((task.retry.attempts, task.retry.backoff_seconds), (3, 30))
+
+    def test_rejects_invalid_retry_values(self) -> None:
+        for retry, message in (
+            ({"attempts": 0}, "attempts deve ser inteiro positivo"),
+            ({"attempts": -2}, "attempts deve ser inteiro positivo"),
+            ({"backoff_seconds": -1}, "backoff_seconds deve ser inteiro não negativo"),
+            ({"backoff_seconds": True}, "backoff_seconds deve ser inteiro não negativo"),
+        ):
+            with self.subTest(retry=retry):
+                config = valid_config()
+                config["retry"] = retry
+                with self.assertRaisesRegex(ConfigurationError, re.escape(message)):
+                    TaskSpec.from_dict(config)

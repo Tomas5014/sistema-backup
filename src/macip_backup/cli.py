@@ -49,6 +49,24 @@ def main() -> int:
         "verify-s3-integration",
         help="executa testes S3 reais e falha sem pré-requisitos",
     )
+    agent_parser = subcommands.add_parser(
+        "agent",
+        help="executa a tarefa como agente local (retry, histórico SQLite, credencial do SO)",
+    )
+    agent_parser.add_argument("config", type=Path)
+    agent_parser.add_argument(
+        "--store", type=Path, default=Path("/var/lib/macip-backup/agent.db"),
+        help="banco SQLite do histórico local (padrão: /var/lib/macip-backup/agent.db)",
+    )
+    history_parser = subcommands.add_parser(
+        "history",
+        help="lista execuções registradas no banco do agente",
+    )
+    history_parser.add_argument(
+        "--store", type=Path, default=Path("/var/lib/macip-backup/agent.db"),
+        help="banco SQLite do histórico local",
+    )
+    history_parser.add_argument("--task", dest="task_id", help="filtra por task id")
     arguments = parser.parse_args()
 
     try:
@@ -58,6 +76,17 @@ def main() -> int:
             return verify_sftp_integration()
         if arguments.command == "verify-s3-integration":
             return verify_s3_integration()
+        if arguments.command == "history":
+            from .agent import history_json
+
+            print(history_json(arguments.store, arguments.task_id))
+            return 0
+        if arguments.command == "agent":
+            from .agent import run_task
+
+            result = run_task(arguments.config, arguments.store)
+            print(json.dumps(result.as_dict(), ensure_ascii=False))
+            return 0 if result.status is ExecutionStatus.SUCCESS else 2
         task = _load_task(arguments.config)
         if arguments.command == "validate":
             task.validate_for_execution()

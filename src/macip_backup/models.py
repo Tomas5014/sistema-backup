@@ -342,6 +342,36 @@ class Destination:
 
 
 @dataclass(frozen=True)
+class RetryPolicy:
+    """Repetição por destino após falha transitória."""
+
+    attempts: int = 1
+    backoff_seconds: int = 0
+
+    def __post_init__(self) -> None:
+        _require_positive_integer("retry.attempts", self.attempts)
+        if (
+            not isinstance(self.backoff_seconds, int)
+            or isinstance(self.backoff_seconds, bool)
+            or self.backoff_seconds < 0
+        ):
+            raise ConfigurationError(
+                "retry.backoff_seconds deve ser inteiro não negativo"
+            )
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "RetryPolicy":
+        return cls(
+            attempts=_optional_positive_integer(
+                data, "attempts", 1, "retry.attempts"
+            ),
+            backoff_seconds=_optional_non_negative_integer(
+                data, "backoff_seconds", 0, "retry.backoff_seconds"
+            ),
+        )
+
+
+@dataclass(frozen=True)
 class TaskSpec:
     id: str
     name: str
@@ -352,6 +382,7 @@ class TaskSpec:
     compression: CompressionMode
     destinations: tuple[Destination, ...]
     timeouts: OperationTimeouts = field(default_factory=OperationTimeouts)
+    retry: RetryPolicy = field(default_factory=RetryPolicy)
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -416,6 +447,7 @@ class TaskSpec:
         exclusions_data = _optional_list(data, "exclusions")
         destinations_data = _required_list(data, "destinations")
         timeouts_data = _optional_object(data, "timeouts")
+        retry_data = _optional_object(data, "retry")
 
         client = Client(
             id=_required_text(client_data, "id", "client.id"),
@@ -444,6 +476,7 @@ class TaskSpec:
             compression=compression,
             destinations=destinations,
             timeouts=OperationTimeouts.from_dict(timeouts_data),
+            retry=RetryPolicy.from_dict(retry_data),
         )
 
 
@@ -820,6 +853,17 @@ def _require_positive_integer(
         return
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ConfigurationError(f"{field_name} deve ser inteiro positivo")
+
+
+def _optional_non_negative_integer(
+    data: dict[str, Any], key: str, default: int, field_name: str
+) -> int:
+    if key not in data:
+        return default
+    value = data[key]
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ConfigurationError(f"{field_name} deve ser inteiro não negativo")
+    return value
 
 
 def _required_port_value(data: dict[str, Any], key: str, field_name: str) -> int:

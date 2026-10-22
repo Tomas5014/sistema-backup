@@ -247,6 +247,46 @@ origem ou do repositório local. Isso evita restaurar sobre dados de produção 
 alterar o repositório. Use o `id` retornado por `snapshots`; a restauração não
 substitui arquivos por meio da CLI.
 
+## Agente local
+
+O modo `agent` executa a tarefa como um agente offline: não há portal nem API
+central — tarefa, credenciais e histórico vivem no host.
+
+```json
+"retry": {"attempts": 3, "backoff_seconds": 30}
+```
+
+`retry` é opcional por tarefa: cada destino é retentado de forma independente
+até `attempts` tentativas com espera de `backoff_seconds` entre elas
+(padrão: `attempts=1`, sem espera). O log marca `attempt` e emite
+`backup.destination.retry` entre tentativas.
+
+```bash
+# Executa a tarefa como agente e registra no SQLite local.
+macip-backup-poc agent examples/tarefa-smb.json --store /var/lib/macip-backup/agent.db
+
+# Histórico de execuções do agente (JSON, com destinos e erros por tentativa).
+macip-backup-poc history --store /var/lib/macip-backup/agent.db --task tarefa-financeiro-smb
+```
+
+O banco SQLite guarda execuções e resultados por destino — nunca segredos.
+
+### Credenciais do SO
+
+No modo `agent`, `password_environment` continua sendo o **nome** do segredo,
+resolvido nesta ordem: variável de ambiente → **kernel keyring** (`keyctl`,
+já presente via `keyutils`/`cifs-utils`). A configuração nunca guarda o valor.
+
+```bash
+# Grava o segredo no keyring da sessão do agente (uma vez, por boot):
+keyctl add user macip.MACIP_RESTIC_PASSWORD_SMB 'segredo' @s
+# ou persistido via systemd: LoadCredential=, ou keyctl persistent-keyring.
+```
+
+Segredo ausente em ambos os lugares falha com erro controlado — nunca sai em
+log. systemd `LoadCredential`/Secret Service entram depois atrás da mesma
+interface de resolução.
+
 ## Testes
 
 ```bash

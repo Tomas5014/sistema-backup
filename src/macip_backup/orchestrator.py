@@ -7,7 +7,7 @@ import uuid
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
-from time import monotonic
+from time import monotonic, sleep
 from typing import Callable
 
 from .logging import StructuredLogger
@@ -127,6 +127,36 @@ class BackupOrchestrator:
         destination: Destination,
         password_resolver: PasswordResolver,
     ) -> DestinationResult:
+        for attempt in range(1, task.retry.attempts + 1):
+            result = self._attempt_destination(
+                task, execution_id, destination, password_resolver, attempt
+            )
+            if result.status is DestinationStatus.SUCCESS:
+                return result
+            if attempt < task.retry.attempts:
+                self._logger.emit(
+                    "warning",
+                    "backup.destination.retry",
+                    client_id=task.client.id,
+                    device_id=task.device_id,
+                    task_id=task.id,
+                    execution_id=execution_id,
+                    destination_id=destination.id,
+                    attempt=attempt + 1,
+                    backoff_seconds=task.retry.backoff_seconds,
+                    previous_error=result.error,
+                )
+                sleep(task.retry.backoff_seconds)
+        return result
+
+    def _attempt_destination(
+        self,
+        task: TaskSpec,
+        execution_id: str,
+        destination: Destination,
+        password_resolver: PasswordResolver,
+        attempt: int,
+    ) -> DestinationResult:
         started_at = _utc_now()
         started_monotonic = monotonic()
         common = {
@@ -135,7 +165,7 @@ class BackupOrchestrator:
             "task_id": task.id,
             "execution_id": execution_id,
             "destination_id": destination.id,
-            "attempt": 1,
+            "attempt": attempt,
         }
         self._logger.emit("info", "backup.destination.started", phase="initialize", **common)
         summary = None

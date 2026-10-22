@@ -18,6 +18,7 @@ from macip_backup.models import (
     DestinationKind,
     OperationTimeouts,
     RetentionPolicy,
+    RetryPolicy,
     SFTPConnection,
     TaskSpec,
 )
@@ -26,9 +27,14 @@ from macip_backup.restic import BackupSummary, ResticError, ResticTimeoutError
 
 
 class ControlledAdapter:
-    def __init__(self, failures: dict[tuple[str, str], Exception] | None = None) -> None:
+    def __init__(
+        self,
+        failures: dict[tuple[str, str], Exception] | None = None,
+        failures_once: dict[tuple[str, str], Exception] | None = None,
+    ) -> None:
         self.failures = failures or {}
-        self.calls: list[tuple[str, str, int]] = []
+        self.failures_once = failures_once or {}
+        self.calls: list[tuple] = []
 
     def initialize(self, destination: Destination, _: str, timeout_seconds: int) -> None:
         self.calls.append((destination.id, "init", timeout_seconds))
@@ -67,6 +73,9 @@ class ControlledAdapter:
         self._raise(destination, "forget")
 
     def _raise(self, destination: Destination, operation: str) -> None:
+        error = self.failures_once.pop((destination.id, operation), None)
+        if error:
+            raise error
         error = self.failures.get((destination.id, operation))
         if error:
             raise error
@@ -260,6 +269,46 @@ class BackupOrchestratorUnitTests(unittest.TestCase):
         self.assertEqual(result.destinations[0].snapshot_id, "snapshot")
         self.assertIn("prune failed", result.destinations[0].error or "")
 
+    def test_retry_recovers_destination_and_logs_attempt(self) -> None:
+        destination = self._destinations()[0]
+        adapter = ControlledAdapter(
+            failures_once={
+                (destination.id, "backup"): ResticError("falha transitória")
+            }
+        )
+        log_stream = io.StringIO()
+
+        result = BackupOrchestrator(adapter, StructuredLogger(log_stream)).execute(
+            self._task(destination, retry=RetryPolicy(attempts=3)),
+            lambda _: "test-password",
+        )
+
+        self.assertEqual(result.status, ExecutionStatus.SUCCESS)
+        backup_calls = [
+            call for call in adapter.calls if call[:2] == (destination.id, "backup")
+        ]
+        self.assertEqual(len(backup_calls), 2)
+        self.assertIn('"event": "backup.destination.retry"', log_stream.getvalue())
+        self.assertIn('"attempt": 2', log_stream.getvalue())
+
+    def test_retry_exhaustion_marks_destination_failed(self) -> None:
+        destination = self._destinations()[0]
+        adapter = ControlledAdapter(
+            {(destination.id, "backup"): ResticError("sempre falha")}
+        )
+
+        result = BackupOrchestrator(adapter, StructuredLogger(io.StringIO())).execute(
+            self._task(destination, retry=RetryPolicy(attempts=2)),
+            lambda _: "test-password",
+        )
+
+        self.assertEqual(result.status, ExecutionStatus.FAILED)
+        backup_calls = [
+            call for call in adapter.calls if call[:2] == (destination.id, "backup")
+        ]
+        self.assertEqual(len(backup_calls), 2)
+        self.assertIn("sempre falha", result.destinations[0].error or "")
+
     def test_no_retention_policy_skips_forget(self) -> None:
         first, _ = self._destinations()
         adapter = ControlledAdapter()
@@ -271,7 +320,9 @@ class BackupOrchestratorUnitTests(unittest.TestCase):
         self.assertEqual(result.status, ExecutionStatus.SUCCESS)
         self.assertFalse(any(call[1] == "forget" for call in adapter.calls))
 
-    def _task(self, *destinations: Destination) -> TaskSpec:
+    def _task(
+        self, *destinations: Destination, retry: RetryPolicy | None = None
+    ) -> TaskSpec:
         return TaskSpec(
             id="task-orchestrator",
             name="Tarefa de orquestração",
@@ -281,6 +332,7 @@ class BackupOrchestratorUnitTests(unittest.TestCase):
             exclusions=(),
             compression=CompressionMode.AUTO,
             destinations=destinations,
+            retry=retry or RetryPolicy(),
             timeouts=OperationTimeouts(
                 initialize_seconds=1,
                 backup_seconds=2,
