@@ -158,6 +158,14 @@ tests/sftp/run-integration.sh
 
 # Apenas integração SFTP real; falha sem pré-requisitos ou execução real.
 macip-backup-poc verify-sftp-integration
+
+# Piloto SFTP contra servidor real (fora do Docker).
+MACIP_SFTP_HOST=sftp.exemplo.com \
+MACIP_SFTP_USER=backup-piloto \
+MACIP_SFTP_IDENTITY_FILE=~/.ssh/macip-piloto_ed25519 \
+MACIP_SFTP_REMOTE_PATH=backups/piloto \
+MACIP_SFTP_HOST_KEY_SHA256=SHA256:... \
+tests/sftp/run-pilot.sh
 ```
 
 Ambiente SFTP gera diretório e chave temporários; não edita `~/.ssh`,
@@ -174,6 +182,20 @@ teste congela o filho ainda ativo, confirma que ele não concluiu normalmente,
 executa nova cópia, `check --read-data` e restauração com comparação de
 `report.txt` e `transfer.bin`. Timeout SFTP seguido de destino local é teste simulado no
 orquestrador, separado das integrações reais.
+
+`run-pilot.sh` repete a suíte contra um servidor real informado por variáveis
+de ambiente, sem Docker. Sem `MACIP_SFTP_KNOWN_HOSTS_FILE` a host key é obtida
+por `ssh-keyscan` e exibida para conferência: o script só prossegue se
+`MACIP_SFTP_HOST_KEY_SHA256` conferir (preferido) ou se
+`MACIP_SFTP_TRUST_ON_FIRST_USE=1` aceitar a chave observada. Com o piloto
+habilitado (`MACIP_SFTP_PILOT=1`, definido pelo script) roda também
+`test_pilot_volume_and_many_files_survive_restore`: backup, `check
+--read-data` e restauração de 300 arquivos distribuídos mais um volume de
+64 MiB, com comparação SHA-256 de todo o conteúdo restaurado; volumes são
+ajustáveis por `MACIP_SFTP_PILOT_FILES` e `MACIP_SFTP_PILOT_MEBIBYTES`.
+Repositórios `macip-test-*` permanecem no servidor para inspeção;
+`MACIP_SFTP_CLEANUP_SSH=1` tenta removê-los via shell SSH quando a conta
+permite execução remota.
 
 ## Compatibilidade e limites
 

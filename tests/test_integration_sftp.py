@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import os
 import secrets
@@ -219,6 +220,68 @@ class SFTPIntegrationTests(unittest.TestCase):
             next(restored.rglob("transfer.bin")).read_bytes(),
             (self.source / "transfer.bin").read_bytes(),
         )
+
+    @unittest.skipUnless(
+        os.environ.get("MACIP_SFTP_PILOT") == "1", "piloto SFTP não habilitado"
+    )
+    def test_pilot_volume_and_many_files_survive_restore(self) -> None:
+        file_count = int(os.environ.get("MACIP_SFTP_PILOT_FILES", "300"))
+        large_mebibytes = int(os.environ.get("MACIP_SFTP_PILOT_MEBIBYTES", "64"))
+        source = self.root / "pilot-source"
+        source.mkdir()
+        expected: dict[Path, str] = {}
+        for index in range(file_count):
+            relative = Path(f"lote-{index % 10:02d}") / f"arquivo-{index:04d}.txt"
+            content = f"conteúdo piloto {index}\n".encode()
+            expected[relative] = hashlib.sha256(content).hexdigest()
+            file_path = source / relative
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            file_path.write_bytes(content)
+        large = os.urandom(large_mebibytes * 1024 * 1024)
+        expected[Path("volume") / "grande.bin"] = hashlib.sha256(large).hexdigest()
+        (source / "volume").mkdir()
+        (source / "volume" / "grande.bin").write_bytes(large)
+
+        destination = self._sftp_destination()
+        task = TaskSpec(
+            id="sftp-pilot",
+            name="Piloto SFTP real",
+            client=Client(id="client-sftp", name="Cliente SFTP"),
+            device_id="device-sftp",
+            sources=(source,),
+            exclusions=(),
+            compression=CompressionMode.AUTO,
+            destinations=(destination,),
+        )
+        started = time.monotonic()
+        result = BackupOrchestrator(self.adapter, StructuredLogger(io.StringIO())).execute(
+            task, lambda _: self.password
+        )
+        backup_seconds = time.monotonic() - started
+        self.assertEqual(result.status, ExecutionStatus.SUCCESS)
+        snapshot_id = result.destinations[0].snapshot_id or ""
+        self.assertTrue(snapshot_id)
+
+        fresh = ResticAdapter(cache_directory=self.root / "cache-pilot")
+        fresh.check(destination, self.password, read_data=True)
+        restored = self.root / "restored-pilot"
+        restore_started = time.monotonic()
+        fresh.restore(destination, self.password, snapshot_id, restored, source)
+        restore_seconds = time.monotonic() - restore_started
+        print(
+            f"piloto SFTP: backup={backup_seconds:.1f}s restore={restore_seconds:.1f}s "
+            f"arquivos={len(expected)} volume={large_mebibytes}MiB",
+            file=sys.stderr,
+        )
+
+        actual: dict[Path, str] = {}
+        for path in restored.rglob("*"):
+            if not path.is_file():
+                continue
+            parts = path.relative_to(restored).parts
+            relative = Path(*parts[parts.index(source.name) + 1 :])
+            actual[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
+        self.assertEqual(actual, expected)
 
     def _blocking_restic_wrapper(self) -> Path:
         real_restic = shutil.which("restic")
