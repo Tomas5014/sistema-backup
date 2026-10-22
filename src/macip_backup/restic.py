@@ -159,6 +159,26 @@ class ResticAdapter:
             timeout,
         )
 
+    def forget(
+        self,
+        destination: Destination,
+        password: str,
+        *,
+        keep_last: int,
+        tag: str | None = None,
+        timeout_seconds: int | None = None,
+    ) -> None:
+        timeout = _effective_timeout(
+            timeout_seconds, self._timeouts.forget_seconds, "forget"
+        )
+        if not isinstance(keep_last, int) or isinstance(keep_last, bool) or keep_last <= 0:
+            raise ResticError("keep_last deve ser inteiro positivo")
+        arguments = ["forget", "--keep-last", str(keep_last)]
+        if tag is not None:
+            arguments.extend(["--tag", tag])
+        arguments.append("--prune")
+        self._run(destination, password, arguments, timeout)
+
     def check(
         self,
         destination: Destination,

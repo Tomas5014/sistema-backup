@@ -426,3 +426,19 @@ def _process_state(pid: int) -> str | None:
         return stat_file.read_text().rsplit(")", 1)[1].split()[0]
     except (FileNotFoundError, IndexError):
         return None
+
+    def test_forget_passes_keep_last_tag_and_prune_as_structured_arguments(self) -> None:
+        adapter = ResticAdapter()
+        with patch("macip_backup.restic.shutil.which", return_value="/usr/bin/restic"), patch(
+            "macip_backup.restic.subprocess.Popen", return_value=SuccessfulProcess("")
+        ) as popen:
+            adapter.forget(
+                self.destination, "test-password", keep_last=5, tag="task:tarefa-x"
+            )
+
+        command = popen.call_args.args[0]
+        self.assertIn("forget", command)
+        self.assertEqual(command[command.index("--keep-last") + 1], "5")
+        self.assertIn("--prune", command)
+        self.assertEqual(command[command.index("--tag") + 1], "task:tarefa-x")
+        self.assertNotIn("test-password", command)

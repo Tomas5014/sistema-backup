@@ -41,11 +41,16 @@ validação estrutural acontece antes de gravar qualquer repositório. Arquivos 
 ausentes são pré-requisitos do destino SFTP: falham somente aquele destino, e
 destinos locais continuam.
 
-`keep_last` pode faltar, ser `null` ou inteiro positivo. A política ainda não é
-aplicada.
+`keep_last` pode faltar, ser `null` ou inteiro positivo. Quando definido, o
+destino aplica `restic forget --keep-last N --tag task:<id> --prune`
+automaticamente após cada backup bem-sucedido — o escopo por tag limita a
+retenção aos snapshots da própria tarefa. Falha na retenção falha o destino
+com `snapshot_id` preservado. A mesma política pode ser aplicada sob demanda
+pelo comando `forget` (ver Recuperação operacional).
 
 Padrões em segundos: `initialize_seconds=120`, `backup_seconds=14400`,
-`snapshots_seconds=120`, `check_seconds=3600`, `restore_seconds=14400`. Ajuste
+`snapshots_seconds=120`, `check_seconds=3600`, `restore_seconds=14400`,
+`forget_seconds=3600`. Ajuste
 backup e restore para conjuntos grandes. Na API do adaptador, `None` usa esse
 padrão; valor fornecido deve ser inteiro positivo. Zero, booleano, fração e
 negativo falham antes de iniciar processo.
@@ -217,9 +222,11 @@ canal confiável. `RESTIC_CACHE_DIR` é cache local; nunca é destino de backup.
 
 Os comandos de recuperação usam um destino identificado pelo `id` presente no
 JSON. Eles leem a senha somente da variável `password_environment`, validam os
-arquivos SSH do destino SFTP e nunca executam `init`, `forget` ou `prune`.
-Também não exigem que as origens da tarefa ainda existam; a proteção contra
-repositório local dentro de origem continua obrigatória.
+arquivos SSH do destino SFTP e nunca executam `init`. O único comando
+destrutivo é `forget`, que aplica apenas a política `keep_last` declarada no
+próprio destino e escopada à tag da tarefa. Também não exigem que as origens
+da tarefa ainda existam; a proteção contra repositório local dentro de origem
+continua obrigatória.
 
 ```bash
 # Lista JSON de snapshots disponíveis no destino.
@@ -230,6 +237,9 @@ macip-backup-poc check examples/tarefa-local-sftp.json local --read-data
 
 # Restaura snapshot completo para um diretório novo.
 macip-backup-poc restore examples/tarefa-local-sftp.json local SNAPSHOT_ID /srv/restore/cliente-2026-10-22
+
+# Aplica a retenção declarada (keep_last) do destino, sob demanda.
+macip-backup-poc forget examples/tarefa-local-sftp.json local
 ```
 
 `restore` exige que `TARGET` ainda não exista e rejeita alvo dentro de uma

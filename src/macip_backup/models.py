@@ -43,6 +43,7 @@ class OperationTimeouts:
     snapshots_seconds: int = 120
     check_seconds: int = 3_600
     restore_seconds: int = 14_400
+    forget_seconds: int = 3_600
 
     def __post_init__(self) -> None:
         for field_name, value in (
@@ -51,6 +52,7 @@ class OperationTimeouts:
             ("timeouts.snapshots_seconds", self.snapshots_seconds),
             ("timeouts.check_seconds", self.check_seconds),
             ("timeouts.restore_seconds", self.restore_seconds),
+            ("timeouts.forget_seconds", self.forget_seconds),
         ):
             _require_positive_integer(field_name, value)
 
@@ -71,6 +73,9 @@ class OperationTimeouts:
             ),
             restore_seconds=_optional_positive_integer(
                 data, "restore_seconds", 14_400, "timeouts.restore_seconds"
+            ),
+            forget_seconds=_optional_positive_integer(
+                data, "forget_seconds", 3_600, "timeouts.forget_seconds"
             ),
         )
 

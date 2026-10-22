@@ -32,6 +32,11 @@ def main() -> int:
     restore_parser.add_argument("destination_id")
     restore_parser.add_argument("snapshot_id")
     restore_parser.add_argument("target", type=Path)
+    forget_parser = subcommands.add_parser(
+        "forget", help="aplica a política de retenção declarada no destino"
+    )
+    forget_parser.add_argument("config", type=Path)
+    forget_parser.add_argument("destination_id")
     subcommands.add_parser(
         "verify-integration",
         help="executa testes reais e falha se restic não estiver disponível",
@@ -58,7 +63,7 @@ def main() -> int:
             task.validate_for_execution()
             print(json.dumps({"status": "valid", "task_id": task.id}))
             return 0
-        if arguments.command in {"snapshots", "check", "restore"}:
+        if arguments.command in {"snapshots", "check", "restore", "forget"}:
             return _run_recovery_operation(task, arguments)
         result = BackupOrchestrator(ResticAdapter()).execute(task)
         print(json.dumps(result.as_dict(), ensure_ascii=False))
@@ -116,6 +121,36 @@ def _run_recovery_operation(task: TaskSpec, arguments: argparse.Namespace) -> in
                     "task_id": task.id,
                     "destination_id": destination.id,
                     "read_data": arguments.read_data,
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 0
+
+    if arguments.command == "forget":
+        keep_last = destination.retention.keep_last
+        if keep_last is None:
+            raise ConfigurationError(
+                f"destino {destination.id} não declara retention.keep_last"
+            )
+        adapter.forget(
+            destination,
+            password,
+            keep_last=keep_last,
+            tag=f"task:{task.id}",
+            timeout_seconds=task.timeouts.forget_seconds,
+        )
+        snapshots = adapter.snapshots(
+            destination, password, timeout_seconds=task.timeouts.snapshots_seconds
+        )
+        print(
+            json.dumps(
+                {
+                    "status": "success",
+                    "task_id": task.id,
+                    "destination_id": destination.id,
+                    "keep_last": keep_last,
+                    "snapshots_available": len(snapshots),
                 },
                 ensure_ascii=False,
             )

@@ -138,6 +138,7 @@ class BackupOrchestrator:
             "attempt": 1,
         }
         self._logger.emit("info", "backup.destination.started", phase="initialize", **common)
+        summary = None
         try:
             destination.validate_for_execution()
             password = password_resolver(destination)
@@ -157,6 +158,14 @@ class BackupOrchestrator:
             self._adapter.check(
                 destination, password, timeout_seconds=task.timeouts.check_seconds
             )
+            if destination.retention.keep_last is not None:
+                self._adapter.forget(
+                    destination,
+                    password,
+                    keep_last=destination.retention.keep_last,
+                    tag=f"task:{task.id}",
+                    timeout_seconds=task.timeouts.forget_seconds,
+                )
             snapshots = self._adapter.snapshots(
                 destination, password, task.timeouts.snapshots_seconds
             )
@@ -206,6 +215,7 @@ class BackupOrchestrator:
             started_at_utc=started_at,
             finished_at_utc=_utc_now(),
             duration_seconds=round(monotonic() - started_monotonic, 3),
+            snapshot_id=summary.snapshot_id if summary is not None else None,
             error=detail,
             exit_code=exit_code,
             failed_operation=failed_operation,

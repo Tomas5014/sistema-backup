@@ -17,6 +17,7 @@ from macip_backup.models import (
     Destination,
     DestinationKind,
     OperationTimeouts,
+    RetentionPolicy,
     SFTPConnection,
     TaskSpec,
 )
@@ -52,6 +53,18 @@ class ControlledAdapter:
         self.calls.append((destination.id, "snapshots", timeout_seconds))
         self._raise(destination, "snapshots")
         return [{"id": "snapshot"}]
+
+    def forget(
+        self,
+        destination: Destination,
+        _: str,
+        *,
+        keep_last: int,
+        tag: str | None,
+        timeout_seconds: int,
+    ) -> None:
+        self.calls.append((destination.id, "forget", keep_last, tag or ""))
+        self._raise(destination, "forget")
 
     def _raise(self, destination: Destination, operation: str) -> None:
         error = self.failures.get((destination.id, operation))
@@ -204,6 +217,59 @@ class BackupOrchestratorUnitTests(unittest.TestCase):
         self.assertEqual(result.destinations[0].status, DestinationStatus.FAILED)
         self.assertEqual(result.destinations[0].timeout_seconds, 1)
         self.assertEqual(result.destinations[1].status, DestinationStatus.SUCCESS)
+
+    def test_retention_policy_runs_forget_scoped_to_task(self) -> None:
+        destination = Destination(
+            id="destination-retention",
+            name="Retenção",
+            kind=DestinationKind.LOCAL,
+            repository=str(self.root / "repository-retention"),
+            password_environment="MACIP_MISSING_TEST_PASSWORD",
+            retention=RetentionPolicy(keep_last=2),
+        )
+        adapter = ControlledAdapter()
+
+        result = BackupOrchestrator(adapter, StructuredLogger(io.StringIO())).execute(
+            self._task(destination), lambda _: "test-password"
+        )
+
+        self.assertEqual(result.status, ExecutionStatus.SUCCESS)
+        self.assertIn(
+            (destination.id, "forget", 2, "task:task-orchestrator"), adapter.calls
+        )
+
+    def test_retention_failure_fails_destination_but_keeps_snapshot_id(self) -> None:
+        destination = Destination(
+            id="destination-retention",
+            name="Retenção",
+            kind=DestinationKind.LOCAL,
+            repository=str(self.root / "repository-retention"),
+            password_environment="MACIP_MISSING_TEST_PASSWORD",
+            retention=RetentionPolicy(keep_last=2),
+        )
+        adapter = ControlledAdapter(
+            {(destination.id, "forget"): ResticError("prune failed")}
+        )
+
+        result = BackupOrchestrator(adapter, StructuredLogger(io.StringIO())).execute(
+            self._task(destination), lambda _: "test-password"
+        )
+
+        self.assertEqual(result.status, ExecutionStatus.FAILED)
+        self.assertEqual(result.destinations[0].status, DestinationStatus.FAILED)
+        self.assertEqual(result.destinations[0].snapshot_id, "snapshot")
+        self.assertIn("prune failed", result.destinations[0].error or "")
+
+    def test_no_retention_policy_skips_forget(self) -> None:
+        first, _ = self._destinations()
+        adapter = ControlledAdapter()
+
+        result = BackupOrchestrator(adapter, StructuredLogger(io.StringIO())).execute(
+            self._task(first), lambda _: "test-password"
+        )
+
+        self.assertEqual(result.status, ExecutionStatus.SUCCESS)
+        self.assertFalse(any(call[1] == "forget" for call in adapter.calls))
 
     def _task(self, *destinations: Destination) -> TaskSpec:
         return TaskSpec(

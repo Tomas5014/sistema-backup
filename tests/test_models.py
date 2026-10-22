@@ -139,12 +139,14 @@ class TaskSpecFromDictTests(unittest.TestCase):
             "snapshots_seconds": 5,
             "check_seconds": 6,
             "restore_seconds": 7,
+            "forget_seconds": 8,
         }
 
         task = TaskSpec.from_dict(config)
 
         self.assertEqual(task.timeouts.backup_seconds, 4)
         self.assertEqual(task.timeouts.restore_seconds, 7)
+        self.assertEqual(task.timeouts.forget_seconds, 8)
 
     def test_kind_missing_null_or_invalid_is_configuration_error(self) -> None:
         for value, expected in (

@@ -20,6 +20,7 @@ from macip_backup.models import (
     CompressionMode,
     Destination,
     DestinationKind,
+    RetentionPolicy,
     TaskSpec,
 )
 from macip_backup.orchestrator import (
@@ -189,6 +190,41 @@ class BackupExecutionIntegrationTests(unittest.TestCase):
         self.assertEqual(result.destinations[0].status, DestinationStatus.FAILED)
         self.assertEqual(result.destinations[1].status, DestinationStatus.SUCCESS)
         self.assertTrue(self.adapter.snapshots(valid, self.password))
+
+    def test_retention_policy_prunes_old_snapshots_after_backup(self) -> None:
+        destination = Destination(
+            id="destination-retention",
+            name="retention",
+            kind=DestinationKind.LOCAL,
+            repository=str(self.root / "repository-retention"),
+            password_environment="IGNORED_BY_TEST",
+            retention=RetentionPolicy(keep_last=1),
+        )
+        task = self._task(destination)
+        orchestrator = BackupOrchestrator(self.adapter, StructuredLogger(io.StringIO()))
+
+        first = orchestrator.execute(task, self._password)
+        (self.source / "documents" / "report.txt").write_text("segunda versão\n")
+        second = orchestrator.execute(task, self._password)
+
+        self.assertEqual(first.status, ExecutionStatus.SUCCESS)
+        self.assertEqual(second.status, ExecutionStatus.SUCCESS)
+        snapshots = self.adapter.snapshots(destination, self.password)
+        self.assertEqual(len(snapshots), 1)
+        self.assertEqual(snapshots[0]["id"], second.destinations[0].snapshot_id)
+
+        self.adapter.check(destination, self.password, read_data=True)
+        restored = self.root / "restored-retention"
+        self.adapter.restore(
+            destination,
+            self.password,
+            second.destinations[0].snapshot_id or "",
+            restored,
+            source_subfolder=self.source,
+        )
+        restored_files = list(restored.rglob("report.txt"))
+        self.assertEqual(len(restored_files), 1)
+        self.assertEqual(restored_files[0].read_text(), "segunda versão\n")
 
     def _task(
         self, *destinations: Destination, compression: CompressionMode = CompressionMode.AUTO
