@@ -26,7 +26,13 @@ class RecoveryAdapter:
         self.calls.append(("check", destination.id, password, read_data, timeout_seconds))
 
     def restore(
-        self, destination, password: str, snapshot_id: str, target: Path, *, timeout_seconds: int
+        self,
+        destination,
+        password: str,
+        snapshot_id: str,
+        target: Path,
+        *,
+        timeout_seconds: int,
     ) -> None:
         self.calls.append(
             ("restore", destination.id, password, snapshot_id, target, timeout_seconds)
@@ -154,10 +160,111 @@ class IntegrationValidationCommandTests(unittest.TestCase):
         self.assertEqual(context.exception.code, 2)
         adapter.assert_not_called()
 
+    def test_recovery_rejects_unknown_destination_before_creating_adapter(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = self._write_recovery_config(Path(directory))
+            with patch.object(
+                sys, "argv", ["macip-backup-poc", "snapshots", str(config_path), "missing"]
+            ), patch("macip_backup.cli.ResticAdapter") as adapter, patch(
+                "sys.stderr", io.StringIO()
+            ):
+                with self.assertRaises(SystemExit) as context:
+                    main()
+
+        self.assertEqual(context.exception.code, 2)
+        adapter.assert_not_called()
+
+    def test_recovery_rejects_missing_credential_without_exposing_secret(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = self._write_recovery_config(Path(directory))
+            error_output = io.StringIO()
+            with patch.dict(
+                os.environ, {"UNRELATED_SECRET": "secret-not-for-output"}, clear=True
+            ), patch.object(
+                sys, "argv", ["macip-backup-poc", "snapshots", str(config_path), "local"]
+            ), patch("macip_backup.cli.ResticAdapter") as adapter, patch(
+                "sys.stderr", error_output
+            ):
+                with self.assertRaises(SystemExit) as context:
+                    main()
+
+        self.assertEqual(context.exception.code, 2)
+        self.assertIn("credencial ausente", error_output.getvalue())
+        self.assertNotIn("secret-not-for-output", error_output.getvalue())
+        self.assertNotIn("Traceback", error_output.getvalue())
+        adapter.assert_not_called()
+
+    def test_restore_rejects_target_parent_of_source_or_repository(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target_parent_of_source = root / "restore-parent-source"
+            source_config = self._write_recovery_config(
+                root,
+                source=target_parent_of_source / "removed-source",
+                repository=root / "repository",
+                create_source=False,
+            )
+            target_parent_of_repository = root / "restore-parent-repository"
+            repository_config = self._write_recovery_config(
+                root / "repository-case",
+                repository=target_parent_of_repository / "repository",
+            )
+
+            for config_path, target, field_name in (
+                (source_config, target_parent_of_source, "origem"),
+                (repository_config, target_parent_of_repository, "repositório"),
+            ):
+                with self.subTest(field_name=field_name), patch.object(
+                    sys,
+                    "argv",
+                    ["macip-backup-poc", "restore", str(config_path), "local", "a" * 64, str(target)],
+                ), patch("macip_backup.cli.ResticAdapter") as adapter, patch(
+                    "sys.stderr", io.StringIO()
+                ):
+                    with self.assertRaises(SystemExit) as context:
+                        main()
+
+                self.assertEqual(context.exception.code, 2)
+                adapter.assert_not_called()
+
+    def test_restore_rejects_equal_or_nested_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = self._write_recovery_config(root)
+            cases = (
+                ("origem igual", root / "source"),
+                ("origem descendente", root / "source" / "restore-inside"),
+                ("repositório igual", root / "repository"),
+                ("repositório descendente", root / "repository" / "restore-inside"),
+            )
+            for field_name, target in cases:
+                with self.subTest(field_name=field_name), patch.object(
+                    sys,
+                    "argv",
+                    ["macip-backup-poc", "restore", str(config_path), "local", "a" * 64, str(target)],
+                ), patch("macip_backup.cli.ResticAdapter") as adapter, patch(
+                    "sys.stderr", io.StringIO()
+                ) as error_output:
+                    with self.assertRaises(SystemExit) as context:
+                        main()
+
+                self.assertEqual(context.exception.code, 2)
+                self.assertNotIn("Traceback", error_output.getvalue())
+                adapter.assert_not_called()
+
     @staticmethod
-    def _write_recovery_config(root: Path) -> Path:
-        source = root / "source"
-        source.mkdir()
+    def _write_recovery_config(
+        root: Path,
+        *,
+        source: Path | None = None,
+        repository: Path | None = None,
+        create_source: bool = True,
+    ) -> Path:
+        root.mkdir(parents=True, exist_ok=True)
+        source = source or root / "source"
+        if create_source:
+            source.mkdir(parents=True, exist_ok=True)
+        repository = repository or root / "repository"
         config = {
             "id": "task-recovery",
             "name": "Recuperação",
@@ -170,7 +277,7 @@ class IntegrationValidationCommandTests(unittest.TestCase):
                     "id": "local",
                     "name": "Local",
                     "kind": "local",
-                    "repository": str(root / "repository"),
+                    "repository": str(repository),
                     "password_environment": "MACIP_RECOVERY_PASSWORD",
                 }
             ],

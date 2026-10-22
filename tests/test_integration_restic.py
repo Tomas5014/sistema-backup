@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import io
+import json
+import os
 import secrets
 import shutil
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
+from macip_backup.cli import main as cli_main
 from macip_backup.logging import StructuredLogger
 from macip_backup.models import (
     Client,
@@ -79,6 +83,96 @@ class BackupExecutionIntegrationTests(unittest.TestCase):
                 )
                 self.assertTrue(summary.snapshot_id)
         self.adapter.check(destination, self.password, read_data=True)
+
+    def test_cli_recovery_commands_restore_after_source_removal(self) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="macip-cli-source-"
+        ) as source_directory, tempfile.TemporaryDirectory(
+            prefix="macip-cli-restore-"
+        ) as restore_directory:
+            source = Path(source_directory) / "source"
+            source.mkdir()
+            (source / "report.txt").write_text("dados de recuperação\n")
+            (source / "ignored.tmp").write_text("não deve entrar\n")
+            repository = self.root / "repository-cli-recovery"
+            password_environment = "MACIP_CLI_RECOVERY_PASSWORD"
+            config = {
+                "id": "task-cli-recovery",
+                "name": "Recuperação CLI",
+                "client": {"id": "client-cli", "name": "Cliente CLI"},
+                "device_id": "device-cli",
+                "sources": [str(source)],
+                "exclusions": ["*.tmp"],
+                "destinations": [
+                    {
+                        "id": "local-cli",
+                        "name": "Local CLI",
+                        "kind": "local",
+                        "repository": str(repository),
+                        "password_environment": password_environment,
+                    }
+                ],
+            }
+            config_path = self.root / "task-cli-recovery.json"
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+
+            output = io.StringIO()
+            environment = {
+                password_environment: self.password,
+                "RESTIC_CACHE_DIR": str(self.root / "cache-cli"),
+            }
+            with patch.dict(os.environ, environment), patch("sys.stdout", output):
+                with patch.object(
+                    sys, "argv", ["macip-backup-poc", "run", str(config_path)]
+                ):
+                    self.assertEqual(cli_main(), 0)
+                run_output = json.loads(output.getvalue())
+                self.assertEqual(run_output["status"], "success")
+                snapshot_id = run_output["destinations"][0]["snapshot_id"]
+                self.assertTrue(snapshot_id)
+
+                output.seek(0)
+                output.truncate(0)
+                with patch.object(
+                    sys, "argv", ["macip-backup-poc", "snapshots", str(config_path), "local-cli"]
+                ):
+                    self.assertEqual(cli_main(), 0)
+                snapshots = json.loads(output.getvalue())["snapshots"]
+                self.assertIn(snapshot_id, [snapshot["id"] for snapshot in snapshots])
+
+                output.seek(0)
+                output.truncate(0)
+                with patch.object(
+                    sys,
+                    "argv",
+                    ["macip-backup-poc", "check", str(config_path), "local-cli", "--read-data"],
+                ):
+                    self.assertEqual(cli_main(), 0)
+                self.assertTrue(json.loads(output.getvalue())["read_data"])
+
+                shutil.rmtree(source)
+                target = Path(restore_directory) / "restored-cli"
+                output.seek(0)
+                output.truncate(0)
+                with patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "macip-backup-poc",
+                        "restore",
+                        str(config_path),
+                        "local-cli",
+                        snapshot_id,
+                        str(target),
+                    ],
+                ):
+                    self.assertEqual(cli_main(), 0)
+
+            self.assertEqual(json.loads(output.getvalue())["target"], str(target.resolve()))
+            restored_reports = list(target.rglob("report.txt"))
+            self.assertEqual(len(restored_reports), 1)
+            self.assertEqual(restored_reports[0].read_text(), "dados de recuperação\n")
+            self.assertFalse(list(target.rglob("ignored.tmp")))
 
     def test_failed_destination_does_not_stop_valid_destination(self) -> None:
         failed_repository = self.root / "not-a-directory"

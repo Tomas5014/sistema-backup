@@ -148,21 +148,29 @@ def _destination_by_id(task: TaskSpec, destination_id: str):
 
 def _safe_restore_target(task: TaskSpec, destination, target: Path) -> Path:
     resolved_target = target.expanduser().resolve(strict=False)
-    if resolved_target.exists():
-        raise ConfigurationError(f"diretório de restauração já existe: {resolved_target}")
     for source in task.sources:
         resolved_source = source.expanduser().resolve(strict=False)
-        if resolved_target == resolved_source or resolved_target.is_relative_to(resolved_source):
+        if _paths_overlap(resolved_target, resolved_source):
             raise ConfigurationError(
-                f"diretório de restauração não pode ficar dentro de uma origem: {resolved_target}"
+                f"diretório de restauração não pode sobrepor uma origem: {resolved_target}"
             )
     if destination.kind is DestinationKind.LOCAL:
         repository = destination.repository_path
-        if resolved_target == repository or resolved_target.is_relative_to(repository):
+        if _paths_overlap(resolved_target, repository):
             raise ConfigurationError(
-                f"diretório de restauração não pode ficar dentro do repositório: {resolved_target}"
+                f"diretório de restauração não pode sobrepor o repositório: {resolved_target}"
             )
+    if resolved_target.exists():
+        raise ConfigurationError(f"diretório de restauração já existe: {resolved_target}")
     return resolved_target
+
+
+def _paths_overlap(first: Path, second: Path) -> bool:
+    return (
+        first == second
+        or first.is_relative_to(second)
+        or second.is_relative_to(first)
+    )
 
 
 def verify_integration() -> int:
