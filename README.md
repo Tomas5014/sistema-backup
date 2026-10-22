@@ -168,6 +168,9 @@ MACIP_SFTP_HOST_KEY_SHA256=SHA256:... \
 tests/sftp/run-pilot.sh
 ```
 
+O provisionamento da conta SFTP dedicada no servidor está em
+`tests/sftp/piloto.md`.
+
 Ambiente SFTP gera diretório e chave temporários; não edita `~/.ssh`,
 `sshd_config` do host nem usa dados reais. Cobre SFTP isolado, local + SFTP,
 exclusões, `snapshots`, `check --read-data`, restauração com cache novo e
