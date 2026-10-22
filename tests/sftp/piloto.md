@@ -7,6 +7,16 @@ executar `tests/sftp/run-pilot.sh`. Os passos espelham o fixture Docker
 
 ## 1. No servidor piloto (requer sudo)
 
+Pré-requisitos em uma VM Ubuntu:
+
+```bash
+sudo apt install openssh-server     # geralmente já presente
+sudo ufw allow 22                   # somente se ufw estiver ativo
+```
+
+A VM precisa ser alcançável na porta 22 pela máquina que rodará o piloto:
+rede *bridged* entrega um IP da LAN direto; NAT exige port-forward do host.
+
 ```bash
 # usuário dedicado, sem shell de login interativa
 sudo useradd --create-home --shell /usr/sbin/nologin macipsftptest
@@ -21,8 +31,9 @@ sudo install -d -m 755 -o macipsftptest -g macipsftptest \
 sudo install -d -m 700 -o macipsftptest -g macipsftptest \
     /home/macipsftptest/.ssh
 echo 'ssh-ed25519 AAAA... macip-backup-piloto' | \
-    sudo install -m 600 -o macipsftptest -g macipsftptest /dev/stdin \
-    /home/macipsftptest/.ssh/authorized_keys
+    sudo tee /home/macipsftptest/.ssh/authorized_keys >/dev/null
+sudo chown macipsftptest:macipsftptest /home/macipsftptest/.ssh/authorized_keys
+sudo chmod 600 /home/macipsftptest/.ssh/authorized_keys
 
 # restringir a conta a SFTP interno; acrescentar AO FINAL de sshd_config
 sudo tee -a /etc/ssh/sshd_config <<'EOF'

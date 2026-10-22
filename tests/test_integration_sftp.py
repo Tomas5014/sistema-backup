@@ -278,9 +278,9 @@ class SFTPIntegrationTests(unittest.TestCase):
         for path in restored.rglob("*"):
             if not path.is_file():
                 continue
-            parts = path.relative_to(restored).parts
-            relative = Path(*parts[parts.index(source.name) + 1 :])
-            actual[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
+            actual[path.relative_to(restored)] = hashlib.sha256(
+                path.read_bytes()
+            ).hexdigest()
         self.assertEqual(actual, expected)
 
     def _blocking_restic_wrapper(self) -> Path:
