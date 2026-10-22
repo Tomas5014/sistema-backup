@@ -190,6 +190,14 @@ com `MACIP_S3_INTEGRATION=1`, `MACIP_S3_ENDPOINT`, `MACIP_S3_BUCKET`,
 (opcionais), `MACIP_S3_ACCESS_KEY_ENV`/`MACIP_S3_SECRET_KEY_ENV` (nomes das
 variáveis com as chaves). O bucket precisa existir — restic não cria buckets.
 
+### Combinações de destinos
+
+`tests/test_integration_combinations.py` grava um único backup em
+local+SFTP+SMB+S3 ao mesmo tempo e restaura de cada repositório — a matriz
+de destinos do planejamento. Roda quando as variáveis `MACIP_SFTP_*`,
+`MACIP_SMB_*` e `MACIP_S3_*` estão todas definidas; caso contrário é
+pulada.
+
 ## Execução
 
 ```bash
