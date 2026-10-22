@@ -36,6 +36,16 @@ for attempt in $(seq 1 30); do
 done
 test -s "$test_root/known_hosts"
 
+sftp \
+  -oBatchMode=yes \
+  -oIdentitiesOnly=yes \
+  -oStrictHostKeyChecking=yes \
+  -oUserKnownHostsFile="$test_root/known_hosts" \
+  -oIdentityFile="$test_root/id_ed25519" \
+  -P 2222 \
+  -b /dev/null \
+  macipsftptest@127.0.0.1
+
 MACIP_SFTP_INTEGRATION=1 \
 MACIP_SFTP_HOST=127.0.0.1 \
 MACIP_SFTP_PORT=2222 \
