@@ -39,7 +39,7 @@ test -s "$test_root/known_hosts"
 MACIP_SFTP_INTEGRATION=1 \
 MACIP_SFTP_HOST=127.0.0.1 \
 MACIP_SFTP_PORT=2222 \
-MACIP_SFTP_USER=backup \
+MACIP_SFTP_USER=macipsftptest \
 MACIP_SFTP_REMOTE_PATH=repository \
 MACIP_SFTP_IDENTITY_FILE="$test_root/id_ed25519" \
 MACIP_SFTP_KNOWN_HOSTS_FILE="$test_root/known_hosts" \

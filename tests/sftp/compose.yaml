@@ -4,4 +4,4 @@ services:
     ports:
       - "127.0.0.1:2222:22"
     volumes:
-      - ${MACIP_SFTP_TEST_ROOT:?defina o diretório temporário}/authorized_keys:/home/backup/.ssh/authorized_keys:ro
+      - ${MACIP_SFTP_TEST_ROOT:?defina o diretório temporário}/authorized_keys:/home/macipsftptest/.ssh/authorized_keys:ro
