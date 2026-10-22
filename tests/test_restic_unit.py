@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
@@ -80,11 +82,16 @@ class ResticAdapterUnitTests(unittest.TestCase):
             "macip_backup.restic.subprocess.Popen",
             side_effect=[MissingRepositoryProcess(), process],
         ) as popen:
-            with patch("macip_backup.restic.os.killpg") as killpg:
+            with patch("macip_backup.restic.os.killpg") as killpg, patch(
+                "macip_backup.restic.ResticAdapter._process_group_exists",
+                return_value=False,
+            ):
                 with self.assertRaisesRegex(ResticTimeoutError, "tempo limite de 1s") as context:
                     adapter.initialize(self.destination, "secret-not-for-command", timeout_seconds=1)
 
-        killpg.assert_called_once()
+        killpg.assert_has_calls(
+            [call(process.pid, signal.SIGCONT), call(process.pid, signal.SIGTERM)]
+        )
         self.assertEqual(process.communicate_calls, 2)
         self.assertEqual(context.exception.operation, "init")
         command = popen.call_args_list[1].args[0]
@@ -190,7 +197,8 @@ class ResticAdapterUnitTests(unittest.TestCase):
                 "if 'init' in sys.argv: sys.exit(0)\n"
                 "if 'backup' in sys.argv:\n"
                 "    child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
-                "    open(os.environ['MACIP_CHILD_PID_FILE'], 'w').write(str(child.pid))\n"
+                "    starttime = open(f'/proc/{child.pid}/stat').read().rsplit(')', 1)[1].split()[19]\n"
+                "    open(os.environ['MACIP_CHILD_PID_FILE'], 'w').write(f'{child.pid}:{starttime}')\n"
                 "    time.sleep(30)\n"
             )
             executable.chmod(0o700)
@@ -218,11 +226,72 @@ class ResticAdapterUnitTests(unittest.TestCase):
                     )
                 adapter.initialize(second, "test-password", timeout_seconds=1)
 
-            child_pid = int(pid_file.read_text())
+            child_pid, child_starttime = _read_process_identity(pid_file)
             deadline = time.monotonic() + 2
-            while _process_exists(child_pid) and time.monotonic() < deadline:
+            while _process_is_running(child_pid, child_starttime) and time.monotonic() < deadline:
                 time.sleep(0.05)
-            self.assertFalse(_process_exists(child_pid))
+            self.assertFalse(_process_is_running(child_pid, child_starttime))
+
+    @unittest.skipUnless(os.name == "posix", "exige grupo de processos POSIX")
+    def test_timeout_resumes_and_kills_stopped_descendant(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="macip-stopped-child-") as directory:
+            root = Path(directory)
+            pid_file = root / "child.pid"
+            executable = root / "fake-restic.py"
+            executable.write_text(
+                "#!/usr/bin/env python3\n"
+                "import os, signal, subprocess, sys, time\n"
+                "if 'cat' in sys.argv: sys.exit(10)\n"
+                "if 'init' in sys.argv: sys.exit(0)\n"
+                "if 'backup' in sys.argv:\n"
+                "    child = subprocess.Popen([sys.executable, '-c', "
+                "'import os, signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                "os.kill(os.getpid(), signal.SIGSTOP); time.sleep(30)'])\n"
+                "    while open(f'/proc/{child.pid}/stat').read().split()[2] != 'T': time.sleep(0.01)\n"
+                "    starttime = open(f'/proc/{child.pid}/stat').read().rsplit(')', 1)[1].split()[19]\n"
+                "    open(os.environ['MACIP_CHILD_PID_FILE'], 'w').write(f'{child.pid}:{starttime}')\n"
+                "    time.sleep(30)\n",
+                encoding="utf-8",
+            )
+            executable.chmod(0o700)
+            adapter = ResticAdapter(binary=str(executable))
+            errors: list[Exception] = []
+
+            def run_backup() -> None:
+                try:
+                    adapter.backup(
+                        "task",
+                        "client",
+                        [root],
+                        (),
+                        CompressionMode.AUTO,
+                        self.destination,
+                        "test-password",
+                        timeout_seconds=3,
+                    )
+                except Exception as error:
+                    errors.append(error)
+
+            with patch.dict(os.environ, {"MACIP_CHILD_PID_FILE": str(pid_file)}):
+                adapter.initialize(self.destination, "test-password", timeout_seconds=1)
+                thread = threading.Thread(target=run_backup)
+                thread.start()
+                deadline = time.monotonic() + 2
+                while not pid_file.is_file() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertTrue(pid_file.is_file())
+                child_pid, child_starttime = _read_process_identity(pid_file)
+                self.assertEqual(_process_state(child_pid), "T")
+                self.assertTrue(thread.is_alive())
+                thread.join(timeout=8)
+
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(len(errors), 1)
+            self.assertIsInstance(errors[0], ResticTimeoutError)
+            deadline = time.monotonic() + 2
+            while _process_is_running(child_pid, child_starttime) and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertFalse(_process_is_running(child_pid, child_starttime))
 
     def test_normal_child_completion_is_not_reported_as_interruption(self) -> None:
         with tempfile.TemporaryDirectory(prefix="macip-normal-child-") as directory:
@@ -291,10 +360,31 @@ class ResticAdapterUnitTests(unittest.TestCase):
             self.assertNotIn("secret-not-for-command", command)
 
 
-def _process_exists(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
+def _process_is_running(pid: int, starttime: str | None) -> bool:
+    current_starttime = _process_starttime(pid)
+    if current_starttime is None or current_starttime != starttime:
         return False
     stat_file = Path(f"/proc/{pid}/stat")
-    return not stat_file.is_file() or stat_file.read_text().split()[2] != "Z"
+    return stat_file.read_text().split()[2] != "Z"
+
+
+def _process_starttime(pid: int) -> str | None:
+    stat_file = Path(f"/proc/{pid}/stat")
+    try:
+        fields = stat_file.read_text().rsplit(")", 1)[1].split()
+    except (FileNotFoundError, IndexError):
+        return None
+    return fields[19]
+
+
+def _read_process_identity(path: Path) -> tuple[int, str]:
+    pid, starttime = path.read_text(encoding="utf-8").split(":", 1)
+    return int(pid), starttime
+
+
+def _process_state(pid: int) -> str | None:
+    stat_file = Path(f"/proc/{pid}/stat")
+    try:
+        return stat_file.read_text().rsplit(")", 1)[1].split()[0]
+    except (FileNotFoundError, IndexError):
+        return None

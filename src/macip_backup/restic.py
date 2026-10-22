@@ -9,6 +9,7 @@ import shutil
 import shlex
 import signal
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
@@ -257,6 +258,9 @@ class ResticAdapter:
         return ["-o", f"sftp.args={shlex.join(ssh_arguments)}"]
 
     def _stop_timed_out_process(self, process: subprocess.Popen[str]) -> tuple[str, str]:
+        if os.name == "posix" and process.pid is not None:
+            return self._stop_posix_process_group(process)
+
         self._signal_process_group(process, signal.SIGTERM)
         try:
             return process.communicate(timeout=_PROCESS_STOP_GRACE_SECONDS)
@@ -267,6 +271,62 @@ class ResticAdapter:
             except subprocess.TimeoutExpired:
                 self._close_pipes(process)
                 return "", "processo não encerrou após SIGTERM e SIGKILL"
+
+    def _stop_posix_process_group(
+        self, process: subprocess.Popen[str]
+    ) -> tuple[str, str]:
+        pgid = process.pid
+        assert pgid is not None
+        # Um descendente parado não processa SIGTERM. Retomá-lo primeiro evita
+        # que ele sobreviva ao encerramento do processo principal.
+        self._signal_process_group(process, signal.SIGCONT)
+        self._signal_process_group(process, signal.SIGTERM)
+
+        stdout = ""
+        stderr = ""
+        parent_finished = False
+        try:
+            stdout, stderr = process.communicate(timeout=_PROCESS_STOP_GRACE_SECONDS)
+            parent_finished = True
+        except subprocess.TimeoutExpired:
+            pass
+
+        if self._process_group_exists(pgid):
+            self._signal_process_group(process, signal.SIGKILL)
+            if not parent_finished:
+                try:
+                    stdout, stderr = process.communicate(timeout=_PROCESS_STOP_GRACE_SECONDS)
+                    parent_finished = True
+                except subprocess.TimeoutExpired:
+                    pass
+            if not self._wait_for_process_group_exit(pgid):
+                self._close_pipes(process)
+                message = "processo ou descendentes não encerraram após SIGTERM e SIGKILL"
+                return stdout, f"{stderr}\n{message}".strip()
+
+        if not parent_finished:
+            self._close_pipes(process)
+            return stdout, f"{stderr}\nprocesso não encerrou após SIGTERM e SIGKILL".strip()
+        return stdout, stderr
+
+    @staticmethod
+    def _process_group_exists(pgid: int) -> bool:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+
+    @classmethod
+    def _wait_for_process_group_exit(cls, pgid: int) -> bool:
+        deadline = time.monotonic() + _PROCESS_STOP_GRACE_SECONDS
+        while cls._process_group_exists(pgid):
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.05)
+        return True
 
     @staticmethod
     def _signal_process_group(process: subprocess.Popen[str], signum: int) -> None:

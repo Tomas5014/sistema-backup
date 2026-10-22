@@ -185,7 +185,8 @@ class SFTPIntegrationTests(unittest.TestCase):
                 time.sleep(0.05)
             self.assertTrue(marker.exists(), "transferência não confirmou bytes enviados")
             self.assertTrue(child_pid_file.is_file())
-            self.assertEqual(_process_state(int(child_pid_file.read_text())), "T")
+            child_pid, child_starttime = _read_process_identity(child_pid_file)
+            self.assertEqual(_process_state(child_pid), "T")
             self.assertTrue(thread.is_alive())
             thread.join(timeout=12)
 
@@ -193,7 +194,7 @@ class SFTPIntegrationTests(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertIsInstance(errors[0], ResticTimeoutError)
         self.assertTrue(child_pid_file.is_file())
-        self.assertFalse(_process_is_running(int(child_pid_file.read_text())))
+        self.assertFalse(_process_is_running(child_pid, child_starttime))
         self.assertFalse(completion_file.exists(), "backup concluiu antes da interrupção")
 
         fresh = ResticAdapter(cache_directory=self.root / "cache-retry")
@@ -231,7 +232,8 @@ class SFTPIntegrationTests(unittest.TestCase):
             "backup_index = arguments.index('backup')\n"
             "arguments.insert(backup_index, '--limit-upload=512')\n"
             "child = subprocess.Popen([real_restic, *arguments], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)\n"
-            "open(os.environ['MACIP_INTERRUPT_CHILD_PID'], 'w').write(str(child.pid))\n"
+            "starttime = open(f'/proc/{child.pid}/stat').read().rsplit(')', 1)[1].split()[19]\n"
+            "open(os.environ['MACIP_INTERRUPT_CHILD_PID'], 'w').write(f'{child.pid}:{starttime}')\n"
             "for line in child.stdout:\n"
             "    print(line, end='', flush=True)\n"
             "    try:\n"
@@ -283,17 +285,22 @@ class SFTPIntegrationTests(unittest.TestCase):
         )
 
 
-def _process_is_running(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
+def _process_is_running(pid: int, starttime: str) -> bool:
     stat_file = Path(f"/proc/{pid}/stat")
-    return not stat_file.is_file() or stat_file.read_text().split()[2] != "Z"
+    try:
+        fields = stat_file.read_text().rsplit(")", 1)[1].split()
+    except (FileNotFoundError, IndexError):
+        return False
+    return fields[0] != "Z" and fields[19] == starttime
+
+
+def _read_process_identity(path: Path) -> tuple[int, str]:
+    pid, starttime = path.read_text(encoding="utf-8").split(":", 1)
+    return int(pid), starttime
 
 
 def _process_state(pid: int) -> str | None:
     stat_file = Path(f"/proc/{pid}/stat")
     if not stat_file.is_file():
         return None
-    return stat_file.read_text().split()[2]
+    return stat_file.read_text().rsplit(")", 1)[1].split()[0]
