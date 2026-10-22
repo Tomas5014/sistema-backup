@@ -147,7 +147,7 @@ class BackupOrchestrator:
             summary = self._adapter.backup(
                 task.id,
                 task.client.id,
-                task.sources,
+                task.source_paths,
                 task.exclusions,
                 task.compression,
                 destination,

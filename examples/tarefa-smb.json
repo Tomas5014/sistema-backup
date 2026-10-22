@@ -1,0 +1,36 @@
+{
+  "id": "tarefa-financeiro-smb",
+  "name": "Financeiro do NAS para NAS de backup",
+  "client": {"id": "cliente-acme", "name": "ACME LTDA"},
+  "device_id": "servidor-acme-01",
+  "sources": [
+    {
+      "path": "/mnt/nas-docs/financeiro",
+      "smb": {
+        "server": "10.10.20.10",
+        "share": "docs",
+        "mount_point": "/mnt/nas-docs",
+        "marker": ".macip-volume"
+      }
+    }
+  ],
+  "exclusions": ["*.tmp", "cache/**"],
+  "compression": "auto",
+  "destinations": [
+    {
+      "id": "nas-backup",
+      "name": "NAS de backup",
+      "kind": "smb",
+      "repository": "restic/cliente-acme",
+      "password_environment": "MACIP_RESTIC_PASSWORD_SMB",
+      "retention": {"keep_last": 30},
+      "smb": {
+        "server": "10.10.20.11",
+        "share": "backups",
+        "mount_point": "/mnt/nas-backups",
+        "marker": ".macip-volume",
+        "probe_timeout_seconds": 10
+      }
+    }
+  ]
+}

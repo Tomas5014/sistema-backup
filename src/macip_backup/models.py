@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import shutil
+import subprocess
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -13,6 +15,10 @@ class ConfigurationError(ValueError):
     """Configuração inválida para uma tarefa de backup."""
 
 
+_SMB_PROBE_TIMEOUT_SECONDS = 10
+_SMB_FS_TYPES = frozenset({"cifs", "smb3"})
+
+
 class CompressionMode(StrEnum):
     AUTO = "auto"
     OFF = "off"
@@ -22,6 +28,7 @@ class CompressionMode(StrEnum):
 class DestinationKind(StrEnum):
     LOCAL = "local"
     SFTP = "sftp"
+    SMB = "smb"
 
 
 @dataclass(frozen=True)
@@ -131,6 +138,81 @@ class SFTPConnection:
 
 
 @dataclass(frozen=True)
+class SMBMount:
+    """Identidade esperada de um ponto de montagem SMB gerenciado pelo sistema.
+
+    A montagem (mount.cifs/fstab/automount) é responsabilidade do ambiente;
+    aqui se confere que o ponto existe, é o compartilhamento esperado e que
+    o marcador opcional responde dentro do limite — sem travar num volume
+    cujo servidor caiu.
+    """
+
+    server: str
+    share: str
+    mount_point: str
+    marker: str | None = None
+    probe_timeout_seconds: int = _SMB_PROBE_TIMEOUT_SECONDS
+
+    def __post_init__(self) -> None:
+        _require_smb_server("smb.server", self.server)
+        _require_smb_share("smb.share", self.share)
+        _require_text("smb.mount_point", self.mount_point)
+        if not self.mount_point.startswith("/"):
+            raise ConfigurationError("smb.mount_point deve ser caminho absoluto")
+        if self.marker is not None:
+            _require_relative_subpath("smb.marker", self.marker)
+        _require_positive_integer("smb.probe_timeout_seconds", self.probe_timeout_seconds)
+
+    @property
+    def mount_point_path(self) -> Path:
+        return Path(self.mount_point).expanduser().resolve(strict=False)
+
+    @property
+    def expected_source(self) -> str:
+        return f"//{self.server}/{self.share}"
+
+    def validate_for_execution(self) -> None:
+        mount = self.mount_point_path
+        target, source, fstype = _findmnt_entry(mount, self.probe_timeout_seconds)
+        if target != mount:
+            raise ConfigurationError(f"smb.mount_point não é ponto de montagem: {mount}")
+        if fstype.lower() not in _SMB_FS_TYPES:
+            raise ConfigurationError(
+                f"ponto de montagem não é CIFS/SMB (tipo {fstype}): {mount}"
+            )
+        if source.lower() != self.expected_source.lower():
+            raise ConfigurationError(
+                f"ponto de montagem expõe {source}, esperado {self.expected_source}"
+            )
+        if self.marker is not None:
+            marker_path = mount / self.marker
+            _probe_smb_path(marker_path, self.probe_timeout_seconds)
+
+
+@dataclass(frozen=True)
+class Source:
+    """Origem de backup; opcionalmente exige um volume SMB montado."""
+
+    path: Path
+    smb: SMBMount | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.path, Path):
+            object.__setattr__(self, "path", Path(self.path))
+
+    def validate_for_execution(self) -> None:
+        if self.smb is None:
+            return
+        self.smb.validate_for_execution()
+        mount = self.smb.mount_point_path
+        resolved = self.path.expanduser().resolve(strict=False)
+        if resolved != mount and not resolved.is_relative_to(mount):
+            raise ConfigurationError(
+                f"origem SMB fora do ponto de montagem {mount}: {resolved}"
+            )
+
+
+@dataclass(frozen=True)
 class Destination:
     id: str
     name: str
@@ -139,6 +221,7 @@ class Destination:
     password_environment: str
     retention: RetentionPolicy = field(default_factory=RetentionPolicy)
     sftp: SFTPConnection | None = None
+    smb: SMBMount | None = None
 
     def __post_init__(self) -> None:
         _require_identifier("destination.id", self.id)
@@ -146,26 +229,42 @@ class Destination:
         _require_text("destination.password_environment", self.password_environment)
         if self.kind is DestinationKind.LOCAL:
             _require_text("destination.repository", self.repository)
-            if self.sftp is not None:
-                raise ConfigurationError("destination.sftp não é permitido em destino local")
+            if self.sftp is not None or self.smb is not None:
+                raise ConfigurationError(
+                    "destination.sftp/smb não é permitido em destino local"
+                )
         elif self.kind is DestinationKind.SFTP:
             if self.repository is not None:
                 raise ConfigurationError("destination.repository não é permitido em destino SFTP")
             if self.sftp is None:
                 raise ConfigurationError("destination.sftp é obrigatório em destino SFTP")
+            if self.smb is not None:
+                raise ConfigurationError("destination.smb não é permitido em destino SFTP")
+        elif self.kind is DestinationKind.SMB:
+            if self.sftp is not None:
+                raise ConfigurationError("destination.sftp não é permitido em destino SMB")
+            if self.smb is None:
+                raise ConfigurationError("destination.smb é obrigatório em destino SMB")
+            _require_relative_subpath("destination.repository", self.repository)
         else:
             raise ConfigurationError(f"tipo de destino não homologado nesta POC: {self.kind}")
 
     @property
     def repository_path(self) -> Path:
-        if self.kind is not DestinationKind.LOCAL or self.repository is None:
-            raise ConfigurationError("destination.repository_path só existe para destino local")
-        return Path(self.repository).expanduser().resolve(strict=False)
+        if self.kind is DestinationKind.LOCAL and self.repository is not None:
+            return Path(self.repository).expanduser().resolve(strict=False)
+        if self.kind is DestinationKind.SMB and self.smb is not None:
+            return (self.smb.mount_point_path / (self.repository or "")).resolve(strict=False)
+        raise ConfigurationError(
+            "destination.repository_path só existe para destino local ou SMB"
+        )
 
     def validate_for_execution(self) -> None:
         """Valida pré-requisitos que pertencem somente a este destino."""
         if self.kind is DestinationKind.SFTP and self.sftp is not None:
             self.sftp.validate_files_for_execution()
+        if self.kind is DestinationKind.SMB and self.smb is not None:
+            self.smb.validate_for_execution()
 
 
 @dataclass(frozen=True)
@@ -174,13 +273,21 @@ class TaskSpec:
     name: str
     client: Client
     device_id: str
-    sources: tuple[Path, ...]
+    sources: tuple[Source, ...]
     exclusions: tuple[str, ...]
     compression: CompressionMode
     destinations: tuple[Destination, ...]
     timeouts: OperationTimeouts = field(default_factory=OperationTimeouts)
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "sources",
+            tuple(
+                source if isinstance(source, Source) else Source(path=Path(source))
+                for source in self.sources
+            ),
+        )
         _require_identifier("task.id", self.id)
         _require_text("task.name", self.name)
         _require_identifier("task.device_id", self.device_id)
@@ -195,24 +302,30 @@ class TaskSpec:
         if len(destination_ids) != len(set(destination_ids)):
             raise ConfigurationError("destination.id deve ser único por tarefa")
 
+    @property
+    def source_paths(self) -> tuple[Path, ...]:
+        return tuple(source.path for source in self.sources)
+
     def validate_for_execution(self) -> None:
         resolved_sources = tuple(
-            source.expanduser().resolve(strict=False) for source in self.sources
+            source.path.expanduser().resolve(strict=False) for source in self.sources
         )
         for source in resolved_sources:
             if not source.is_dir():
                 raise ConfigurationError(f"origem inexistente ou não é diretório: {source}")
+        for source in self.sources:
+            source.validate_for_execution()
 
         self.validate_recovery_for_execution()
 
     def validate_recovery_for_execution(self) -> None:
         """Valida invariantes de repositório sem exigir as origens originais."""
         resolved_sources = tuple(
-            source.expanduser().resolve(strict=False) for source in self.sources
+            source.path.expanduser().resolve(strict=False) for source in self.sources
         )
 
         for destination in self.destinations:
-            if destination.kind is DestinationKind.LOCAL:
+            if destination.kind in {DestinationKind.LOCAL, DestinationKind.SMB}:
                 repository = destination.repository_path
                 for source in resolved_sources:
                     if repository == source or repository.is_relative_to(source):
@@ -235,7 +348,7 @@ class TaskSpec:
             name=_required_text(client_data, "name", "client.name"),
         )
         sources = tuple(
-            Path(_list_text_item(sources_data, index, "sources"))
+            _source_from_dict(sources_data[index], index)
             for index in range(len(sources_data))
         )
         exclusions = tuple(
@@ -337,8 +450,20 @@ def _destination_from_dict(value: Any, index: int) -> Destination:
     if "keep_last" in retention_data:
         _require_positive_integer(f"{field_name}.retention.keep_last", keep_last, allow_none=True)
     kind = _destination_kind(value, field_name)
-    sftp = _sftp_from_dict(value, field_name) if kind is DestinationKind.SFTP else None
-    if kind is DestinationKind.LOCAL:
+    if kind is DestinationKind.SFTP:
+        sftp = _sftp_from_dict(value, field_name)
+        smb = None
+    elif kind is DestinationKind.SMB:
+        smb = _smb_from_dict(value, field_name)
+        sftp = None
+    else:
+        sftp = None
+        smb = None
+    if kind is not DestinationKind.SMB and "smb" in value:
+        raise ConfigurationError(f"{field_name}.smb exige kind smb")
+    if kind is not DestinationKind.SFTP and "sftp" in value:
+        raise ConfigurationError(f"{field_name}.sftp exige kind sftp")
+    if kind in {DestinationKind.LOCAL, DestinationKind.SMB}:
         repository: str | None = _required_text(
             value, "repository", f"{field_name}.repository"
         )
@@ -356,7 +481,104 @@ def _destination_from_dict(value: Any, index: int) -> Destination:
         ),
         retention=RetentionPolicy(keep_last=keep_last),
         sftp=sftp,
+        smb=smb,
     )
+
+
+def _source_from_dict(value: Any, index: int) -> Source:
+    field_name = f"sources[{index}]"
+    if isinstance(value, str):
+        _require_text(field_name, value)
+        return Source(path=Path(value))
+    if not isinstance(value, dict):
+        raise ConfigurationError(f"{field_name} deve ser texto ou objeto")
+    _reject_unknown_fields(value, {"path", "smb"}, field_name)
+    path = _required_text(value, "path", f"{field_name}.path")
+    smb = None
+    if "smb" in value:
+        smb = _smb_from_dict(value, field_name)
+    return Source(path=Path(path), smb=smb)
+
+
+def _smb_from_dict(data: dict[str, Any], parent_field: str) -> SMBMount:
+    field_name = f"{parent_field}.smb"
+    if "smb" not in data:
+        raise ConfigurationError(f"{field_name} é obrigatório")
+    smb = data["smb"]
+    _require_object(field_name, smb)
+    _reject_unknown_fields(
+        smb,
+        {"server", "share", "mount_point", "marker", "probe_timeout_seconds"},
+        field_name,
+    )
+    marker = smb.get("marker")
+    if "marker" in smb and marker is not None:
+        _require_text(f"{field_name}.marker", marker)
+    return SMBMount(
+        server=_required_text(smb, "server", f"{field_name}.server"),
+        share=_required_text(smb, "share", f"{field_name}.share"),
+        mount_point=_required_text(smb, "mount_point", f"{field_name}.mount_point"),
+        marker=marker,
+        probe_timeout_seconds=_optional_positive_integer(
+            smb, "probe_timeout_seconds", _SMB_PROBE_TIMEOUT_SECONDS,
+            f"{field_name}.probe_timeout_seconds",
+        ),
+    )
+
+
+def _findmnt_entry(mount_point: Path, timeout_seconds: int) -> tuple[Path, str, str]:
+    findmnt = shutil.which("findmnt")
+    if findmnt is None:
+        raise ConfigurationError("findmnt não encontrado para validar montagem SMB")
+    try:
+        completed = subprocess.run(
+            [
+                findmnt,
+                "-P",
+                "-n",
+                "--first-only",
+                "-o",
+                "TARGET,SOURCE,FSTYPE",
+                "-T",
+                str(mount_point),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise ConfigurationError(
+            f"findmnt não respondeu em {timeout_seconds}s: {mount_point}"
+        ) from error
+    fields = dict(re.findall(r'(\w+)="([^"]*)"', completed.stdout))
+    if completed.returncode != 0 or not fields.get("TARGET"):
+        raise ConfigurationError(f"findmnt não localizou o ponto de montagem: {mount_point}")
+    return (
+        Path(fields["TARGET"]).resolve(strict=False),
+        fields.get("SOURCE", ""),
+        fields.get("FSTYPE", ""),
+    )
+
+
+def _probe_smb_path(path: Path, timeout_seconds: int) -> None:
+    stat_binary = shutil.which("stat")
+    if stat_binary is None:
+        raise ConfigurationError("stat não encontrado para sondar volume SMB")
+    try:
+        completed = subprocess.run(
+            [stat_binary, "-c", "%F", "--", str(path)],
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise ConfigurationError(
+            f"volume SMB não respondeu em {timeout_seconds}s: {path}"
+        ) from error
+    if completed.returncode != 0:
+        raise ConfigurationError(f"marcador de volume SMB ausente: {path}")
 
 
 def _destination_kind(data: dict[str, Any], field_name: str) -> DestinationKind:
@@ -468,6 +690,32 @@ def _require_file_reference(field_name: str, value: str) -> None:
     _require_text(field_name, value)
     if "\x00" in value or any(ord(character) < 32 for character in value):
         raise ConfigurationError(f"{field_name} contém caractere inválido")
+
+
+def _require_smb_server(field_name: str, value: str) -> None:
+    _require_text(field_name, value)
+    if any(character.isspace() or ord(character) < 32 for character in value) or any(
+        character in value for character in "/\\@?#;:"
+    ):
+        raise ConfigurationError(f"{field_name} contém caracteres não permitidos")
+
+
+def _require_smb_share(field_name: str, value: str) -> None:
+    _require_text(field_name, value)
+    if (
+        any(ord(character) < 32 for character in value)
+        or "/" in value
+        or "\\" in value
+    ):
+        raise ConfigurationError(f"{field_name} contém caracteres não permitidos")
+
+
+def _require_relative_subpath(field_name: str, value: Any) -> None:
+    _require_text(field_name, value)
+    if not isinstance(value, str) or value.startswith(("/", "~")):
+        raise ConfigurationError(f"{field_name} deve ser caminho relativo seguro")
+    if any(part in {"", ".", ".."} for part in value.split("/")) or "\\" in value:
+        raise ConfigurationError(f"{field_name} contém segmento de caminho inválido")
 
 
 def _require_sftp_user(field_name: str, value: str) -> None:

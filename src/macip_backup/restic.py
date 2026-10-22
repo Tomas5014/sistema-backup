@@ -224,7 +224,7 @@ class ResticAdapter:
         return stdout
 
     def _repository_reference(self, destination: Destination) -> str:
-        if destination.kind is DestinationKind.LOCAL:
+        if destination.kind in {DestinationKind.LOCAL, DestinationKind.SMB}:
             return str(destination.repository_path)
         if destination.sftp is None:
             raise ResticError("destino SFTP sem configuração")

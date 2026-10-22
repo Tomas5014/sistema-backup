@@ -105,6 +105,54 @@ ao diretório do repositório e não deve ser conta humana.
 Exemplos: [somente SFTP](examples/tarefa-sftp.json) e
 [local + SFTP](examples/tarefa-local-sftp.json).
 
+### Destino SMB
+
+Restic não possui backend SMB nativo: o compartilhamento é montado pelo sistema
+(`mount.cifs`, fstab ou automount) e a POC **valida a identidade do volume**
+antes de ler ou gravar. Um ponto de montagem vazio nunca é confundido com o
+NAS disponível.
+
+```json
+{
+  "id": "nas-backup", "name": "NAS de backup", "kind": "smb",
+  "repository": "restic/cliente-acme",
+  "password_environment": "MACIP_RESTIC_PASSWORD_SMB",
+  "smb": {
+    "server": "10.10.20.11", "share": "backups",
+    "mount_point": "/mnt/nas-backups",
+    "marker": ".macip-volume", "probe_timeout_seconds": 10
+  }
+}
+```
+
+`repository` é caminho **relativo** dentro do compartilhamento; o repositório
+vive em `mount_point/repository`. Na execução a POC confere, via `findmnt`,
+que `mount_point` é de fato um ponto de montagem CIFS/SMB3 do
+`//server/share` esperado; `marker` (opcional, recomendado) é um arquivo dentro
+do compartilhamento cuja existência é sondada com `probe_timeout_seconds`,
+evitando bloqueio quando o servidor cai.
+
+Origem SMB usa a mesma identidade, como objeto em `sources`:
+
+```json
+"sources": [
+  "/srv/local",
+  {"path": "/mnt/nas-docs/financeiro",
+   "smb": {"server": "10.10.20.10", "share": "docs",
+           "mount_point": "/mnt/nas-docs", "marker": ".macip-volume"}}
+]
+```
+
+A `path` da origem deve ser o próprio `mount_point` ou ficar dentro dele.
+Origem SMB indisponível falha a tarefa inteira (não há dados a copiar);
+destino SMB indisponível falha só aquele destino. Credenciais de montagem
+pertencem ao sistema (arquivo `credentials=` restrito ou fstab), não à tarefa.
+
+Exemplo: [tarefa SMB](examples/tarefa-smb.json). A homologação usa
+`tests/test_integration_smb.py` com `MACIP_SMB_INTEGRATION=1`,
+`MACIP_SMB_SERVER`, `MACIP_SMB_SHARE`, `MACIP_SMB_MOUNT_POINT` e
+`MACIP_SMB_MARKER` (opcional). Windows/UNC fica para a etapa Windows.
+
 ## Execução
 
 ```bash

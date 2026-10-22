@@ -2,12 +2,22 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
+import subprocess
 import sys
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
-from macip_backup.models import ConfigurationError, TaskSpec
+from macip_backup.models import (
+    ConfigurationError,
+    DestinationKind,
+    SMBMount,
+    Source,
+    TaskSpec,
+    _findmnt_entry,
+    _probe_smb_path,
+)
 
 
 def valid_config() -> dict[str, object]:
@@ -69,7 +79,7 @@ class TaskSpecFromDictTests(unittest.TestCase):
 
     def test_rejects_invalid_collection_items(self) -> None:
         cases = (
-            ("sources", [42], "sources[0] deve ser texto"),
+            ("sources", [42], "sources[0] deve ser texto ou objeto"),
             ("exclusions", [False], "exclusions[0] deve ser texto"),
             ("destinations", ["destination"], "destinations[0] deve ser um objeto"),
         )
@@ -216,4 +226,208 @@ class TaskSpecFromDictTests(unittest.TestCase):
         destination["sftp"]["host"] = "backup.example.test"  # type: ignore[index]
         destination["sftp"]["command"] = "ssh -oStrictHostKeyChecking=no"  # type: ignore[index]
         with self.assertRaisesRegex(ConfigurationError, "sftp.command não é permitido"):
+            TaskSpec.from_dict(config)
+
+
+class SMBMountValidationTests(unittest.TestCase):
+    """Valida a identidade do volume SMB sem depender de I/O de rede."""
+
+    def _mount(self, **overrides: object) -> SMBMount:
+        values: dict[str, object] = {
+            "server": "nas.local",
+            "share": "backups",
+            "mount_point": "/mnt/nas",
+        }
+        values.update(overrides)
+        return SMBMount(**values)  # type: ignore[arg-type]
+
+    def _findmnt(self, mount: SMBMount, source: str, fstype: str, target: Path | None = None):
+        return patch(
+            "macip_backup.models._findmnt_entry",
+            return_value=(target or mount.mount_point_path, source, fstype),
+        )
+
+    def test_accepts_expected_cifs_share_and_probes_marker(self) -> None:
+        mount = self._mount(marker=".macip-volume")
+        with self._findmnt(mount, "//nas.local/backups", "cifs"), patch(
+            "macip_backup.models._probe_smb_path"
+        ) as probe:
+            mount.validate_for_execution()
+
+        probe.assert_called_once_with(
+            mount.mount_point_path / ".macip-volume", mount.probe_timeout_seconds
+        )
+
+    def test_rejects_point_that_is_not_a_mount(self) -> None:
+        mount = self._mount()
+        with self._findmnt(mount, "/dev/sda1", "ext4", target=Path("/")):
+            with self.assertRaisesRegex(ConfigurationError, "não é ponto de montagem"):
+                mount.validate_for_execution()
+
+    def test_rejects_wrong_share_or_non_cifs_filesystem(self) -> None:
+        mount = self._mount()
+        for source, fstype, message in (
+            ("//nas.local/outro-share", "cifs", "expõe //nas.local/outro-share"),
+            ("//nas.local/backups", "nfs4", "não é CIFS/SMB"),
+        ):
+            with self.subTest(source=source, fstype=fstype), self._findmnt(
+                mount, source, fstype
+            ):
+                with self.assertRaisesRegex(ConfigurationError, re.escape(message)):
+                    mount.validate_for_execution()
+
+    def test_marker_probe_failure_or_timeout_fails_validation(self) -> None:
+        mount = self._mount(marker=".macip-volume")
+        with self._findmnt(mount, "//nas.local/backups", "cifs"), patch(
+            "macip_backup.models._probe_smb_path",
+            side_effect=ConfigurationError("volume SMB não respondeu em 10s"),
+        ):
+            with self.assertRaisesRegex(ConfigurationError, "não respondeu"):
+                mount.validate_for_execution()
+
+    def test_probe_timeout_is_controlled_error(self) -> None:
+        with patch(
+            "macip_backup.models.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(["stat"], 10),
+        ):
+            with self.assertRaisesRegex(ConfigurationError, "não respondeu em 10s"):
+                _probe_smb_path(Path("/mnt/nas/.macip-volume"), 10)
+
+    def test_findmnt_parses_pairs_and_rejects_failures(self) -> None:
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout='TARGET="/mnt/nas" SOURCE="//nas.local/backups" FSTYPE="cifs"\n',
+            stderr="",
+        )
+        with patch(
+            "macip_backup.models.shutil.which", return_value="/usr/bin/findmnt"
+        ), patch("macip_backup.models.subprocess.run", return_value=completed):
+            target, source, fstype = _findmnt_entry(Path("/mnt/nas"), 10)
+
+        self.assertEqual(target, Path("/mnt/nas"))
+        self.assertEqual((source, fstype), ("//nas.local/backups", "cifs"))
+
+        failed = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr="not found"
+        )
+        with patch(
+            "macip_backup.models.shutil.which", return_value="/usr/bin/findmnt"
+        ), patch("macip_backup.models.subprocess.run", return_value=failed):
+            with self.assertRaisesRegex(ConfigurationError, "não localizou"):
+                _findmnt_entry(Path("/mnt/nas"), 10)
+
+
+class SMBSourceValidationTests(unittest.TestCase):
+    def test_source_inside_mount_runs_mount_validation(self) -> None:
+        mount = SMBMount(server="nas", share="docs", mount_point="/mnt/docs")
+        source = Source(path=Path("/mnt/docs/pasta"), smb=mount)
+        with patch.object(SMBMount, "validate_for_execution") as validate:
+            source.validate_for_execution()
+
+        validate.assert_called_once()
+
+    def test_source_outside_mount_is_rejected(self) -> None:
+        mount = SMBMount(server="nas", share="docs", mount_point="/mnt/docs")
+        source = Source(path=Path("/outro/lugar"), smb=mount)
+        with patch.object(SMBMount, "validate_for_execution"):
+            with self.assertRaisesRegex(ConfigurationError, "fora do ponto de montagem"):
+                source.validate_for_execution()
+
+    def test_source_without_smb_needs_no_mount(self) -> None:
+        Source(path=Path("/srv/dados")).validate_for_execution()
+
+
+class SMBConfigurationTests(unittest.TestCase):
+    def _smb_destination(self, **overrides: object) -> dict[str, object]:
+        destination: dict[str, object] = {
+            "id": "nas",
+            "name": "NAS",
+            "kind": "smb",
+            "repository": "backups/cliente-a",
+            "password_environment": "MACIP_SMB_PASSWORD",
+            "smb": {
+                "server": "10.10.20.239",
+                "share": "backups",
+                "mount_point": "/mnt/nas-backups",
+                "marker": ".macip-volume",
+            },
+        }
+        destination.update(overrides)
+        return destination
+
+    def test_parses_smb_destination_and_object_source(self) -> None:
+        config = valid_config()
+        config["sources"] = [
+            "/srv/local",
+            {
+                "path": "/mnt/nas-docs",
+                "smb": {
+                    "server": "10.10.20.239",
+                    "share": "docs",
+                    "mount_point": "/mnt/nas-docs",
+                },
+            },
+        ]
+        config["destinations"] = [self._smb_destination()]
+
+        task = TaskSpec.from_dict(config)
+
+        self.assertEqual(task.source_paths, (Path("/srv/local"), Path("/mnt/nas-docs")))
+        assert task.sources[1].smb is not None
+        self.assertEqual(task.sources[1].smb.share, "docs")
+        destination = task.destinations[0]
+        self.assertEqual(destination.kind, DestinationKind.SMB)
+        self.assertEqual(
+            destination.repository_path, Path("/mnt/nas-backups/backups/cliente-a")
+        )
+
+    def test_rejects_smb_destination_misconfigurations(self) -> None:
+        cases = (
+            ({"smb": None}, "smb deve ser um objeto"),
+            ({"smb": "remover"}, "smb é obrigatório"),
+            ({"repository": "/absoluto"}, "deve ser caminho relativo"),
+            ({"repository": "backups/../fora"}, "segmento de caminho inválido"),
+            ({"sftp": {"x": 1}}, "sftp exige kind sftp"),
+        )
+        for overrides, message in cases:
+            with self.subTest(overrides=overrides):
+                config = valid_config()
+                destination = self._smb_destination(**overrides)
+                if overrides.get("smb") == "remover":
+                    destination.pop("smb")
+                config["destinations"] = [destination]
+                with self.assertRaisesRegex(ConfigurationError, re.escape(message)):
+                    TaskSpec.from_dict(config)
+
+    def test_rejects_smb_block_on_non_smb_kinds(self) -> None:
+        config = valid_config()
+        config["destinations"][0]["smb"] = {  # type: ignore[index]
+            "server": "nas",
+            "share": "backups",
+            "mount_point": "/mnt/nas",
+        }
+        with self.assertRaisesRegex(ConfigurationError, "exige kind smb"):
+            TaskSpec.from_dict(config)
+
+    def test_rejects_invalid_smb_fields(self) -> None:
+        config = valid_config()
+        config["destinations"] = [self._smb_destination()]
+        smb = config["destinations"][0]["smb"]  # type: ignore[index]
+        smb["server"] = "servidor com espaço"  # type: ignore[index]
+        with self.assertRaisesRegex(ConfigurationError, "server contém caracteres"):
+            TaskSpec.from_dict(config)
+
+        config = valid_config()
+        config["destinations"] = [self._smb_destination()]
+        smb = config["destinations"][0]["smb"]  # type: ignore[index]
+        smb["marker"] = "../fora"  # type: ignore[index]
+        with self.assertRaisesRegex(ConfigurationError, "marker contém segmento de caminho inválido"):
+            TaskSpec.from_dict(config)
+
+        config = valid_config()
+        config["destinations"] = [self._smb_destination()]
+        smb = config["destinations"][0]["smb"]  # type: ignore[index]
+        smb["mount_point"] = "mnt/relativo"  # type: ignore[index]
+        with self.assertRaisesRegex(ConfigurationError, "mount_point deve ser caminho absoluto"):
             TaskSpec.from_dict(config)

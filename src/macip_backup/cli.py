@@ -149,12 +149,12 @@ def _destination_by_id(task: TaskSpec, destination_id: str):
 def _safe_restore_target(task: TaskSpec, destination, target: Path) -> Path:
     resolved_target = target.expanduser().resolve(strict=False)
     for source in task.sources:
-        resolved_source = source.expanduser().resolve(strict=False)
+        resolved_source = source.path.expanduser().resolve(strict=False)
         if _paths_overlap(resolved_target, resolved_source):
             raise ConfigurationError(
                 f"diretório de restauração não pode sobrepor uma origem: {resolved_target}"
             )
-    if destination.kind is DestinationKind.LOCAL:
+    if destination.kind in {DestinationKind.LOCAL, DestinationKind.SMB}:
         repository = destination.repository_path
         if _paths_overlap(resolved_target, repository):
             raise ConfigurationError(
