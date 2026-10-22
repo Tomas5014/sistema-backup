@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -431,3 +432,89 @@ class SMBConfigurationTests(unittest.TestCase):
         smb["mount_point"] = "mnt/relativo"  # type: ignore[index]
         with self.assertRaisesRegex(ConfigurationError, "mount_point deve ser caminho absoluto"):
             TaskSpec.from_dict(config)
+
+
+class S3ConfigurationTests(unittest.TestCase):
+    def _s3_destination(self, **overrides: object) -> dict[str, object]:
+        destination: dict[str, object] = {
+            "id": "nuvem",
+            "name": "Nuvem",
+            "kind": "s3",
+            "password_environment": "MACIP_RESTIC_PASSWORD_S3",
+            "s3": {
+                "endpoint": "http://10.10.20.239:9000",
+                "bucket": "macip-backups",
+                "prefix": "restic/cliente-a",
+                "bucket_lookup": "path",
+                "access_key_environment": "MACIP_S3_ACCESS",
+                "secret_key_environment": "MACIP_S3_SECRET",
+            },
+        }
+        destination.update(overrides)
+        return destination
+
+    def test_parses_s3_destination_and_builds_reference(self) -> None:
+        config = valid_config()
+        config["destinations"] = [self._s3_destination()]
+
+        task = TaskSpec.from_dict(config)
+
+        destination = task.destinations[0]
+        self.assertEqual(destination.kind, DestinationKind.S3)
+        assert destination.s3 is not None
+        self.assertEqual(
+            destination.s3.repository_reference,
+            "s3:http://10.10.20.239:9000/macip-backups/restic/cliente-a",
+        )
+
+    def test_rejects_s3_misconfigurations(self) -> None:
+        cases = (
+            ({"endpoint": "ftp://servidor"}, "URL http(s) válida"),
+            ({"endpoint": "http://user:senha@host"}, "não pode conter credenciais"),
+            ({"endpoint": "http://host/caminho"}, "caminho, query ou fragmento"),
+            ({"bucket": "Bucket_Inválido!"}, "nome de bucket válido"),
+            ({"prefix": "../fora"}, "não é um caminho remoto permitido"),
+            ({"prefix": "/absoluto"}, "relativo ao bucket"),
+            ({"bucket_lookup": "virtual"}, "auto, path ou dns"),
+        )
+        for field, message in cases:
+            with self.subTest(field=field):
+                config = valid_config()
+                destination = self._s3_destination()
+                destination["s3"].update(field)  # type: ignore[union-attr]
+                config["destinations"] = [destination]
+                with self.assertRaisesRegex(ConfigurationError, re.escape(message)):
+                    TaskSpec.from_dict(config)
+
+    def test_rejects_repository_and_cross_fields_on_s3(self) -> None:
+        config = valid_config()
+        config["destinations"] = [self._s3_destination(repository="/tmp/repo")]
+        with self.assertRaisesRegex(ConfigurationError, "repository não é permitido"):
+            TaskSpec.from_dict(config)
+
+        config = valid_config()
+        config["destinations"][0]["s3"] = self._s3_destination()["s3"]  # type: ignore[index]
+        with self.assertRaisesRegex(ConfigurationError, "s3 exige kind s3"):
+            TaskSpec.from_dict(config)
+
+    def test_s3_requires_s3_block(self) -> None:
+        config = valid_config()
+        destination = self._s3_destination()
+        destination.pop("s3")
+        config["destinations"] = [destination]
+        with self.assertRaisesRegex(ConfigurationError, "s3 é obrigatório"):
+            TaskSpec.from_dict(config)
+
+    def test_missing_s3_credential_env_fails_validation(self) -> None:
+        config = valid_config()
+        config["destinations"] = [self._s3_destination()]
+        task = TaskSpec.from_dict(config)
+
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(ConfigurationError, "credencial ausente"):
+                task.destinations[0].validate_for_execution()
+
+        with patch.dict(
+            os.environ, {"MACIP_S3_ACCESS": "key", "MACIP_S3_SECRET": "secret"}
+        ):
+            task.destinations[0].validate_for_execution()

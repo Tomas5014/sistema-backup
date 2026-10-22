@@ -153,6 +153,43 @@ Exemplo: [tarefa SMB](examples/tarefa-smb.json). A homologação usa
 `MACIP_SMB_SERVER`, `MACIP_SMB_SHARE`, `MACIP_SMB_MOUNT_POINT` e
 `MACIP_SMB_MARKER` (opcional). Windows/UNC fica para a etapa Windows.
 
+### Destino S3
+
+Usa o backend S3 nativo do restic; qualquer endpoint compatível serve
+(AWS S3, MinIO, outros após homologação).
+
+```json
+{
+  "id": "nuvem", "name": "Nuvem", "kind": "s3",
+  "password_environment": "MACIP_RESTIC_PASSWORD_S3",
+  "s3": {
+    "endpoint": "https://s3.us-east-1.amazonaws.com",
+    "bucket": "macip-backups-cliente-a", "prefix": "restic/servidor-01",
+    "region": "us-east-1", "bucket_lookup": "path",
+    "access_key_environment": "MACIP_S3_ACCESS_KEY",
+    "secret_key_environment": "MACIP_S3_SECRET_KEY"
+  }
+}
+```
+
+O repositório vive em `endpoint/bucket/prefix` (`prefix` opcional; sem ele,
+raiz do bucket). `endpoint` é URL `http(s)` sem credenciais nem caminho.
+`bucket_lookup` aceita `auto`/`path`/`dns` — MinIO normalmente exige `path`.
+`storage_class` é opcional.
+
+Credenciais S3 chegam **somente por variáveis de ambiente** nomeadas em
+`access_key_environment`/`secret_key_environment` — a configuração nunca
+guarda chaves, e o adaptador as injeta como `AWS_ACCESS_KEY_ID`/
+`AWS_SECRET_ACCESS_KEY` apenas no processo restic, nunca em argumentos ou
+logs. Credencial ausente falha o destino antes de iniciar o restic.
+
+Exemplo: [local + nuvem](examples/tarefa-s3.json). A homologação usa
+`tests/test_integration_s3.py` ou `macip-backup-poc verify-s3-integration`
+com `MACIP_S3_INTEGRATION=1`, `MACIP_S3_ENDPOINT`, `MACIP_S3_BUCKET`,
+`MACIP_S3_PREFIX` (opcional), `MACIP_S3_REGION`/`MACIP_S3_BUCKET_LOOKUP`
+(opcionais), `MACIP_S3_ACCESS_KEY_ENV`/`MACIP_S3_SECRET_KEY_ENV` (nomes das
+variáveis com as chaves). O bucket precisa existir — restic não cria buckets.
+
 ## Execução
 
 ```bash

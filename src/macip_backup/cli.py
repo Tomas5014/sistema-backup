@@ -40,6 +40,10 @@ def main() -> int:
         "verify-sftp-integration",
         help="executa testes SFTP reais e falha sem pré-requisitos",
     )
+    subcommands.add_parser(
+        "verify-s3-integration",
+        help="executa testes S3 reais e falha sem pré-requisitos",
+    )
     arguments = parser.parse_args()
 
     try:
@@ -47,6 +51,8 @@ def main() -> int:
             return verify_integration()
         if arguments.command == "verify-sftp-integration":
             return verify_sftp_integration()
+        if arguments.command == "verify-s3-integration":
+            return verify_s3_integration()
         task = _load_task(arguments.config)
         if arguments.command == "validate":
             task.validate_for_execution()
@@ -217,6 +223,35 @@ def verify_sftp_integration() -> int:
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     if result.testsRun == 0 or len(result.skipped) == result.testsRun:
         print("integração SFTP não validada: nenhum teste real executado")
+        return 1
+    return 0 if result.wasSuccessful() else 1
+
+
+def verify_s3_integration() -> int:
+    required_environment = (
+        "MACIP_S3_INTEGRATION",
+        "MACIP_S3_ENDPOINT",
+        "MACIP_S3_BUCKET",
+        "MACIP_S3_ACCESS_KEY_ENV",
+        "MACIP_S3_SECRET_KEY_ENV",
+    )
+    if shutil.which("restic") is None:
+        print("integração S3 não validada: binário restic não encontrado")
+        return 1
+    if any(not os.environ.get(name) for name in required_environment):
+        print("integração S3 não validada: ambiente não foi preparado")
+        return 1
+
+    repository_root = Path(__file__).resolve().parents[2]
+    tests_directory = repository_root / "tests"
+    suite = unittest.defaultTestLoader.discover(
+        str(tests_directory),
+        pattern="test_integration_s3.py",
+        top_level_dir=str(repository_root),
+    )
+    result = unittest.TextTestRunner(verbosity=2).run(suite)
+    if result.testsRun == 0 or len(result.skipped) == result.testsRun:
+        print("integração S3 não validada: nenhum teste real executado")
         return 1
     return 0 if result.wasSuccessful() else 1
 

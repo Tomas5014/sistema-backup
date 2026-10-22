@@ -1,0 +1,34 @@
+{
+  "id": "tarefa-financeiro-nuvem",
+  "name": "Financeiro local + nuvem",
+  "client": {"id": "cliente-acme", "name": "ACME LTDA"},
+  "device_id": "servidor-acme-01",
+  "sources": ["/dados/financeiro"],
+  "exclusions": ["*.tmp", "cache/**"],
+  "compression": "auto",
+  "destinations": [
+    {
+      "id": "local",
+      "name": "Cópia local",
+      "kind": "local",
+      "repository": "/srv/macip/cliente-acme/local",
+      "password_environment": "MACIP_RESTIC_PASSWORD_LOCAL",
+      "retention": {"keep_last": 14}
+    },
+    {
+      "id": "nuvem",
+      "name": "Nuvem homologada",
+      "kind": "s3",
+      "password_environment": "MACIP_RESTIC_PASSWORD_S3",
+      "retention": {"keep_last": 30},
+      "s3": {
+        "endpoint": "https://s3.us-east-1.amazonaws.com",
+        "bucket": "macip-backups-cliente-a",
+        "prefix": "restic/servidor-01",
+        "region": "us-east-1",
+        "access_key_environment": "MACIP_S3_ACCESS_KEY",
+        "secret_key_environment": "MACIP_S3_SECRET_KEY"
+      }
+    }
+  ]
+}

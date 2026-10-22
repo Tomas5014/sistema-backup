@@ -196,6 +196,7 @@ class ResticAdapter:
         ]
         environment = os.environ.copy()
         environment["RESTIC_PASSWORD"] = password
+        self._inject_destination_credentials(destination, environment)
         if self._cache_directory is not None:
             self._cache_directory.mkdir(parents=True, exist_ok=True)
             environment["RESTIC_CACHE_DIR"] = str(self._cache_directory.resolve())
@@ -226,6 +227,10 @@ class ResticAdapter:
     def _repository_reference(self, destination: Destination) -> str:
         if destination.kind in {DestinationKind.LOCAL, DestinationKind.SMB}:
             return str(destination.repository_path)
+        if destination.kind is DestinationKind.S3:
+            if destination.s3 is None:
+                raise ResticError("destino S3 sem configuração")
+            return destination.s3.repository_reference
         if destination.sftp is None:
             raise ResticError("destino SFTP sem configuração")
         connection = destination.sftp
@@ -237,6 +242,18 @@ class ResticAdapter:
         return f"sftp:{connection.user}@{host}:{connection.remote_path}"
 
     def _backend_options(self, destination: Destination) -> list[str]:
+        if destination.kind is DestinationKind.S3:
+            if destination.s3 is None:
+                raise ResticError("destino S3 sem configuração")
+            connection = destination.s3
+            options = []
+            if connection.region:
+                options.extend(["-o", f"s3.region={connection.region}"])
+            if connection.bucket_lookup:
+                options.extend(["-o", f"s3.bucket-lookup={connection.bucket_lookup}"])
+            if connection.storage_class:
+                options.extend(["-o", f"s3.storage-class={connection.storage_class}"])
+            return options
         if destination.kind is not DestinationKind.SFTP:
             return []
         if destination.sftp is None:
@@ -328,6 +345,7 @@ class ResticAdapter:
         ]
         environment = os.environ.copy()
         environment["RESTIC_PASSWORD"] = password
+        self._inject_destination_credentials(destination, environment)
         if self._cache_directory is not None:
             self._cache_directory.mkdir(parents=True, exist_ok=True)
             environment["RESTIC_CACHE_DIR"] = str(self._cache_directory.resolve())
@@ -351,6 +369,24 @@ class ResticAdapter:
                 f"falhou (código {process.returncode}): {stderr or stdout}"
             )
         return None
+
+    @staticmethod
+    def _inject_destination_credentials(
+        destination: Destination, environment: dict[str, str]
+    ) -> None:
+        if destination.kind is not DestinationKind.S3:
+            return
+        connection = destination.s3
+        if connection is None:
+            raise ResticError("destino S3 sem configuração")
+        for name, aws_name in (
+            (connection.access_key_environment, "AWS_ACCESS_KEY_ID"),
+            (connection.secret_key_environment, "AWS_SECRET_ACCESS_KEY"),
+        ):
+            secret = os.environ.get(name)
+            if not secret:
+                raise ResticError(f"credencial ausente na variável de ambiente {name}")
+            environment[aws_name] = secret
 
     @staticmethod
     def _process_group_exists(pgid: int) -> bool:

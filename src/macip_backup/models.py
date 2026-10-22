@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -9,6 +10,7 @@ from enum import StrEnum
 from pathlib import Path
 import re
 from typing import Any
+from urllib.parse import urlsplit
 
 
 class ConfigurationError(ValueError):
@@ -29,6 +31,7 @@ class DestinationKind(StrEnum):
     LOCAL = "local"
     SFTP = "sftp"
     SMB = "smb"
+    S3 = "s3"
 
 
 @dataclass(frozen=True)
@@ -213,6 +216,62 @@ class Source:
 
 
 @dataclass(frozen=True)
+class S3Connection:
+    """Dados não secretos para o backend S3 nativo do restic.
+
+    Chaves de acesso chegam somente por variáveis de ambiente indicadas
+    por `access_key_environment`/`secret_key_environment`, no mesmo
+    padrão de `password_environment`: a configuração nunca guarda segredo.
+    """
+
+    endpoint: str
+    bucket: str
+    access_key_environment: str
+    secret_key_environment: str
+    prefix: str = ""
+    region: str | None = None
+    bucket_lookup: str | None = None
+    storage_class: str | None = None
+
+    def __post_init__(self) -> None:
+        _require_s3_endpoint("s3.endpoint", self.endpoint)
+        _require_s3_bucket("s3.bucket", self.bucket)
+        _require_text("s3.access_key_environment", self.access_key_environment)
+        _require_text("s3.secret_key_environment", self.secret_key_environment)
+        if self.prefix:
+            _require_remote_path("s3.prefix", self.prefix)
+            if self.prefix.startswith("/"):
+                raise ConfigurationError("s3.prefix deve ser relativo ao bucket")
+        if self.region is not None:
+            _require_text("s3.region", self.region)
+            if any(character.isspace() for character in self.region):
+                raise ConfigurationError("s3.region não pode conter espaços")
+        if self.bucket_lookup is not None and self.bucket_lookup not in {
+            "auto",
+            "path",
+            "dns",
+        }:
+            raise ConfigurationError("s3.bucket_lookup deve ser auto, path ou dns")
+        if self.storage_class is not None:
+            _require_text("s3.storage_class", self.storage_class)
+
+    @property
+    def repository_reference(self) -> str:
+        base = f"s3:{self.endpoint}/{self.bucket}"
+        return f"{base}/{self.prefix}" if self.prefix else base
+
+    def validate_credentials_for_execution(self) -> None:
+        for name in (
+            self.access_key_environment,
+            self.secret_key_environment,
+        ):
+            if not os.environ.get(name):
+                raise ConfigurationError(
+                    f"credencial ausente na variável de ambiente {name}"
+                )
+
+
+@dataclass(frozen=True)
 class Destination:
     id: str
     name: str
@@ -222,6 +281,7 @@ class Destination:
     retention: RetentionPolicy = field(default_factory=RetentionPolicy)
     sftp: SFTPConnection | None = None
     smb: SMBMount | None = None
+    s3: S3Connection | None = None
 
     def __post_init__(self) -> None:
         _require_identifier("destination.id", self.id)
@@ -229,23 +289,30 @@ class Destination:
         _require_text("destination.password_environment", self.password_environment)
         if self.kind is DestinationKind.LOCAL:
             _require_text("destination.repository", self.repository)
-            if self.sftp is not None or self.smb is not None:
+            if self.sftp is not None or self.smb is not None or self.s3 is not None:
                 raise ConfigurationError(
-                    "destination.sftp/smb não é permitido em destino local"
+                    "destination.sftp/smb/s3 não é permitido em destino local"
                 )
         elif self.kind is DestinationKind.SFTP:
             if self.repository is not None:
                 raise ConfigurationError("destination.repository não é permitido em destino SFTP")
             if self.sftp is None:
                 raise ConfigurationError("destination.sftp é obrigatório em destino SFTP")
-            if self.smb is not None:
-                raise ConfigurationError("destination.smb não é permitido em destino SFTP")
+            if self.smb is not None or self.s3 is not None:
+                raise ConfigurationError("destination.smb/s3 não é permitido em destino SFTP")
         elif self.kind is DestinationKind.SMB:
-            if self.sftp is not None:
-                raise ConfigurationError("destination.sftp não é permitido em destino SMB")
+            if self.sftp is not None or self.s3 is not None:
+                raise ConfigurationError("destination.sftp/s3 não é permitido em destino SMB")
             if self.smb is None:
                 raise ConfigurationError("destination.smb é obrigatório em destino SMB")
             _require_relative_subpath("destination.repository", self.repository)
+        elif self.kind is DestinationKind.S3:
+            if self.repository is not None:
+                raise ConfigurationError("destination.repository não é permitido em destino S3")
+            if self.s3 is None:
+                raise ConfigurationError("destination.s3 é obrigatório em destino S3")
+            if self.sftp is not None or self.smb is not None:
+                raise ConfigurationError("destination.sftp/smb não é permitido em destino S3")
         else:
             raise ConfigurationError(f"tipo de destino não homologado nesta POC: {self.kind}")
 
@@ -265,6 +332,8 @@ class Destination:
             self.sftp.validate_files_for_execution()
         if self.kind is DestinationKind.SMB and self.smb is not None:
             self.smb.validate_for_execution()
+        if self.kind is DestinationKind.S3 and self.s3 is not None:
+            self.s3.validate_credentials_for_execution()
 
 
 @dataclass(frozen=True)
@@ -453,23 +522,34 @@ def _destination_from_dict(value: Any, index: int) -> Destination:
     if kind is DestinationKind.SFTP:
         sftp = _sftp_from_dict(value, field_name)
         smb = None
+        s3 = None
     elif kind is DestinationKind.SMB:
         smb = _smb_from_dict(value, field_name)
         sftp = None
+        s3 = None
+    elif kind is DestinationKind.S3:
+        s3 = _s3_from_dict(value, field_name)
+        sftp = None
+        smb = None
     else:
         sftp = None
         smb = None
+        s3 = None
     if kind is not DestinationKind.SMB and "smb" in value:
         raise ConfigurationError(f"{field_name}.smb exige kind smb")
     if kind is not DestinationKind.SFTP and "sftp" in value:
         raise ConfigurationError(f"{field_name}.sftp exige kind sftp")
+    if kind is not DestinationKind.S3 and "s3" in value:
+        raise ConfigurationError(f"{field_name}.s3 exige kind s3")
     if kind in {DestinationKind.LOCAL, DestinationKind.SMB}:
         repository: str | None = _required_text(
             value, "repository", f"{field_name}.repository"
         )
     else:
         if "repository" in value and value["repository"] is not None:
-            raise ConfigurationError(f"{field_name}.repository não é permitido em destino SFTP")
+            raise ConfigurationError(
+                f"{field_name}.repository não é permitido em destino {kind}"
+            )
         repository = None
     return Destination(
         id=_required_text(value, "id", f"{field_name}.id"),
@@ -482,6 +562,7 @@ def _destination_from_dict(value: Any, index: int) -> Destination:
         retention=RetentionPolicy(keep_last=keep_last),
         sftp=sftp,
         smb=smb,
+        s3=s3,
     )
 
 
@@ -524,6 +605,77 @@ def _smb_from_dict(data: dict[str, Any], parent_field: str) -> SMBMount:
             f"{field_name}.probe_timeout_seconds",
         ),
     )
+
+
+def _s3_from_dict(data: dict[str, Any], parent_field: str) -> S3Connection:
+    field_name = f"{parent_field}.s3"
+    if "s3" not in data:
+        raise ConfigurationError(f"{field_name} é obrigatório")
+    s3 = data["s3"]
+    _require_object(field_name, s3)
+    _reject_unknown_fields(
+        s3,
+        {
+            "endpoint",
+            "bucket",
+            "prefix",
+            "region",
+            "bucket_lookup",
+            "storage_class",
+            "access_key_environment",
+            "secret_key_environment",
+        },
+        field_name,
+    )
+    prefix = s3.get("prefix", "")
+    if "prefix" in s3:
+        _require_text(f"{field_name}.prefix", prefix)
+    region = s3.get("region")
+    if "region" in s3 and region is not None:
+        _require_text(f"{field_name}.region", region)
+    bucket_lookup = s3.get("bucket_lookup")
+    if "bucket_lookup" in s3 and bucket_lookup is not None:
+        _require_text(f"{field_name}.bucket_lookup", bucket_lookup)
+    storage_class = s3.get("storage_class")
+    if "storage_class" in s3 and storage_class is not None:
+        _require_text(f"{field_name}.storage_class", storage_class)
+    return S3Connection(
+        endpoint=_required_text(s3, "endpoint", f"{field_name}.endpoint"),
+        bucket=_required_text(s3, "bucket", f"{field_name}.bucket"),
+        access_key_environment=_required_text(
+            s3, "access_key_environment", f"{field_name}.access_key_environment"
+        ),
+        secret_key_environment=_required_text(
+            s3, "secret_key_environment", f"{field_name}.secret_key_environment"
+        ),
+        prefix=prefix,
+        region=region,
+        bucket_lookup=bucket_lookup,
+        storage_class=storage_class,
+    )
+
+
+def _require_s3_endpoint(field_name: str, value: str) -> None:
+    _require_text(field_name, value)
+    parsed = urlsplit(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ConfigurationError(f"{field_name} deve ser URL http(s) válida")
+    if parsed.username or parsed.password:
+        raise ConfigurationError(f"{field_name} não pode conter credenciais")
+    if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+        raise ConfigurationError(
+            f"{field_name} não pode conter caminho, query ou fragmento"
+        )
+    try:
+        parsed.port
+    except ValueError as error:
+        raise ConfigurationError(f"{field_name} contém porta inválida") from error
+
+
+def _require_s3_bucket(field_name: str, value: str) -> None:
+    _require_text(field_name, value)
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]", value):
+        raise ConfigurationError(f"{field_name} não é nome de bucket válido")
 
 
 def _findmnt_entry(mount_point: Path, timeout_seconds: int) -> tuple[Path, str, str]:
