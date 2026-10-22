@@ -9,8 +9,8 @@ import shutil
 import unittest
 from pathlib import Path
 
-from .models import ConfigurationError, TaskSpec
-from .orchestrator import BackupOrchestrator, ExecutionStatus
+from .models import ConfigurationError, DestinationKind, TaskSpec
+from .orchestrator import BackupOrchestrator, ExecutionStatus, password_from_environment
 from .restic import ResticAdapter, ResticError
 
 
@@ -20,6 +20,18 @@ def main() -> int:
     for command in ("validate", "run"):
         command_parser = subcommands.add_parser(command)
         command_parser.add_argument("config", type=Path)
+    snapshots_parser = subcommands.add_parser("snapshots", help="lista snapshots de um destino")
+    snapshots_parser.add_argument("config", type=Path)
+    snapshots_parser.add_argument("destination_id")
+    check_parser = subcommands.add_parser("check", help="verifica a integridade de um destino")
+    check_parser.add_argument("config", type=Path)
+    check_parser.add_argument("destination_id")
+    check_parser.add_argument("--read-data", action="store_true")
+    restore_parser = subcommands.add_parser("restore", help="restaura um snapshot em diretório novo")
+    restore_parser.add_argument("config", type=Path)
+    restore_parser.add_argument("destination_id")
+    restore_parser.add_argument("snapshot_id")
+    restore_parser.add_argument("target", type=Path)
     subcommands.add_parser(
         "verify-integration",
         help="executa testes reais e falha se restic não estiver disponível",
@@ -40,6 +52,8 @@ def main() -> int:
             task.validate_for_execution()
             print(json.dumps({"status": "valid", "task_id": task.id}))
             return 0
+        if arguments.command in {"snapshots", "check", "restore"}:
+            return _run_recovery_operation(task, arguments)
         result = BackupOrchestrator(ResticAdapter()).execute(task)
         print(json.dumps(result.as_dict(), ensure_ascii=False))
         return 0 if result.status is ExecutionStatus.SUCCESS else 2
@@ -51,6 +65,104 @@ def main() -> int:
 def _load_task(path: Path) -> TaskSpec:
     with path.open(encoding="utf-8") as config_file:
         return TaskSpec.from_dict(json.load(config_file))
+
+
+def _run_recovery_operation(task: TaskSpec, arguments: argparse.Namespace) -> int:
+    destination = _destination_by_id(task, arguments.destination_id)
+    task.validate_recovery_for_execution()
+    target = (
+        _safe_restore_target(task, destination, arguments.target)
+        if arguments.command == "restore"
+        else None
+    )
+    destination.validate_for_execution()
+    password = password_from_environment(destination)
+    adapter = ResticAdapter(timeouts=task.timeouts)
+
+    if arguments.command == "snapshots":
+        snapshots = adapter.snapshots(
+            destination, password, timeout_seconds=task.timeouts.snapshots_seconds
+        )
+        print(
+            json.dumps(
+                {
+                    "status": "success",
+                    "task_id": task.id,
+                    "destination_id": destination.id,
+                    "snapshots": snapshots,
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 0
+
+    if arguments.command == "check":
+        adapter.check(
+            destination,
+            password,
+            read_data=arguments.read_data,
+            timeout_seconds=task.timeouts.check_seconds,
+        )
+        print(
+            json.dumps(
+                {
+                    "status": "success",
+                    "task_id": task.id,
+                    "destination_id": destination.id,
+                    "read_data": arguments.read_data,
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 0
+
+    assert target is not None
+    adapter.restore(
+        destination,
+        password,
+        arguments.snapshot_id,
+        target,
+        timeout_seconds=task.timeouts.restore_seconds,
+    )
+    print(
+        json.dumps(
+            {
+                "status": "success",
+                "task_id": task.id,
+                "destination_id": destination.id,
+                "snapshot_id": arguments.snapshot_id,
+                "target": str(target),
+            },
+            ensure_ascii=False,
+        )
+    )
+    return 0
+
+
+def _destination_by_id(task: TaskSpec, destination_id: str):
+    for destination in task.destinations:
+        if destination.id == destination_id:
+            return destination
+    raise ConfigurationError(f"destination_id não encontrado na tarefa: {destination_id}")
+
+
+def _safe_restore_target(task: TaskSpec, destination, target: Path) -> Path:
+    resolved_target = target.expanduser().resolve(strict=False)
+    if resolved_target.exists():
+        raise ConfigurationError(f"diretório de restauração já existe: {resolved_target}")
+    for source in task.sources:
+        resolved_source = source.expanduser().resolve(strict=False)
+        if resolved_target == resolved_source or resolved_target.is_relative_to(resolved_source):
+            raise ConfigurationError(
+                f"diretório de restauração não pode ficar dentro de uma origem: {resolved_target}"
+            )
+    if destination.kind is DestinationKind.LOCAL:
+        repository = destination.repository_path
+        if resolved_target == repository or resolved_target.is_relative_to(repository):
+            raise ConfigurationError(
+                f"diretório de restauração não pode ficar dentro do repositório: {resolved_target}"
+            )
+    return resolved_target
 
 
 def verify_integration() -> int:

@@ -203,6 +203,14 @@ class TaskSpec:
             if not source.is_dir():
                 raise ConfigurationError(f"origem inexistente ou não é diretório: {source}")
 
+        self.validate_recovery_for_execution()
+
+    def validate_recovery_for_execution(self) -> None:
+        """Valida invariantes de repositório sem exigir as origens originais."""
+        resolved_sources = tuple(
+            source.expanduser().resolve(strict=False) for source in self.sources
+        )
+
         for destination in self.destinations:
             if destination.kind is DestinationKind.LOCAL:
                 repository = destination.repository_path

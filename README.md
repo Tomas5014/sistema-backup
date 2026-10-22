@@ -120,6 +120,30 @@ privada no caminho configurado; não execute `init` após erro de senha. Troca d
 chave ou de host exige atualizar `known_hosts` somente após nova confirmação por
 canal confiável. `RESTIC_CACHE_DIR` é cache local; nunca é destino de backup.
 
+### Recuperação operacional
+
+Os comandos de recuperação usam um destino identificado pelo `id` presente no
+JSON. Eles leem a senha somente da variável `password_environment`, validam os
+arquivos SSH do destino SFTP e nunca executam `init`, `forget` ou `prune`.
+Também não exigem que as origens da tarefa ainda existam; a proteção contra
+repositório local dentro de origem continua obrigatória.
+
+```bash
+# Lista JSON de snapshots disponíveis no destino.
+macip-backup-poc snapshots examples/tarefa-local-sftp.json local
+
+# Verifica estrutura; --read-data lê e valida todos os dados.
+macip-backup-poc check examples/tarefa-local-sftp.json local --read-data
+
+# Restaura snapshot completo para um diretório novo.
+macip-backup-poc restore examples/tarefa-local-sftp.json local SNAPSHOT_ID /srv/restore/cliente-2026-10-22
+```
+
+`restore` exige que `TARGET` ainda não exista e rejeita alvo dentro de uma
+origem ou do repositório local. Isso evita restaurar sobre dados de produção ou
+alterar o repositório. Use o `id` retornado por `snapshots`; a restauração não
+substitui arquivos por meio da CLI.
+
 ## Testes
 
 ```bash
