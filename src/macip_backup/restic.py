@@ -18,6 +18,7 @@ from .models import CompressionMode, Destination, DestinationKind, OperationTime
 
 
 _PROCESS_STOP_GRACE_SECONDS = 5
+_UNLOCK_TIMEOUT_SECONDS = 120
 
 
 class ResticError(RuntimeError):
@@ -210,7 +211,11 @@ class ResticAdapter:
         try:
             stdout, stderr = process.communicate(timeout=timeout_seconds)
         except subprocess.TimeoutExpired:
-            stdout, stderr = self._stop_timed_out_process(process)
+            stdout, stderr, process_group_terminated = self._stop_timed_out_process(process)
+            if process_group_terminated:
+                unlock_detail = self._unlock_after_timeout(destination, password)
+                if unlock_detail:
+                    stderr = f"{stderr}\nunlock após timeout: {unlock_detail}".strip()
             detail = _safe_error_detail(stderr or stdout)
             raise ResticTimeoutError(operation, timeout_seconds, detail)
         if process.returncode != 0:
@@ -257,24 +262,28 @@ class ResticAdapter:
         # cada valor como um argumento, inclusive caminhos que contenham espaços.
         return ["-o", f"sftp.args={shlex.join(ssh_arguments)}"]
 
-    def _stop_timed_out_process(self, process: subprocess.Popen[str]) -> tuple[str, str]:
+    def _stop_timed_out_process(
+        self, process: subprocess.Popen[str]
+    ) -> tuple[str, str, bool]:
         if os.name == "posix" and process.pid is not None:
             return self._stop_posix_process_group(process)
 
         self._signal_process_group(process, signal.SIGTERM)
         try:
-            return process.communicate(timeout=_PROCESS_STOP_GRACE_SECONDS)
+            stdout, stderr = process.communicate(timeout=_PROCESS_STOP_GRACE_SECONDS)
+            return stdout, stderr, True
         except subprocess.TimeoutExpired:
             self._signal_process_group(process, signal.SIGKILL)
             try:
-                return process.communicate(timeout=_PROCESS_STOP_GRACE_SECONDS)
+                stdout, stderr = process.communicate(timeout=_PROCESS_STOP_GRACE_SECONDS)
+                return stdout, stderr, True
             except subprocess.TimeoutExpired:
                 self._close_pipes(process)
-                return "", "processo não encerrou após SIGTERM e SIGKILL"
+                return "", "processo não encerrou após SIGTERM e SIGKILL", False
 
     def _stop_posix_process_group(
         self, process: subprocess.Popen[str]
-    ) -> tuple[str, str]:
+    ) -> tuple[str, str, bool]:
         pgid = process.pid
         assert pgid is not None
         # Um descendente parado não processa SIGTERM. Retomá-lo primeiro evita
@@ -302,12 +311,46 @@ class ResticAdapter:
             if not self._wait_for_process_group_exit(pgid):
                 self._close_pipes(process)
                 message = "processo ou descendentes não encerraram após SIGTERM e SIGKILL"
-                return stdout, f"{stderr}\n{message}".strip()
+                return stdout, f"{stderr}\n{message}".strip(), False
 
         if not parent_finished:
             self._close_pipes(process)
-            return stdout, f"{stderr}\nprocesso não encerrou após SIGTERM e SIGKILL".strip()
-        return stdout, stderr
+            return stdout, f"{stderr}\nprocesso não encerrou após SIGTERM e SIGKILL".strip(), False
+        return stdout, stderr, True
+
+    def _unlock_after_timeout(self, destination: Destination, password: str) -> str | None:
+        command = [
+            self._binary,
+            "--repo",
+            self._repository_reference(destination),
+            *self._backend_options(destination),
+            "unlock",
+        ]
+        environment = os.environ.copy()
+        environment["RESTIC_PASSWORD"] = password
+        if self._cache_directory is not None:
+            self._cache_directory.mkdir(parents=True, exist_ok=True)
+            environment["RESTIC_CACHE_DIR"] = str(self._cache_directory.resolve())
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=environment,
+            start_new_session=os.name == "posix",
+        )
+        try:
+            stdout, stderr = process.communicate(timeout=_UNLOCK_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            stdout, stderr, _ = self._stop_timed_out_process(process)
+            return _safe_error_detail(
+                f"tempo limite de {_UNLOCK_TIMEOUT_SECONDS}s excedido: {stderr or stdout}"
+            )
+        if process.returncode != 0:
+            return _safe_error_detail(
+                f"falhou (código {process.returncode}): {stderr or stdout}"
+            )
+        return None
 
     @staticmethod
     def _process_group_exists(pgid: int) -> bool:

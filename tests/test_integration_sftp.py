@@ -181,10 +181,12 @@ class SFTPIntegrationTests(unittest.TestCase):
             thread = threading.Thread(target=run_backup)
             thread.start()
             deadline = time.monotonic() + 4
-            while not marker.exists() and time.monotonic() < deadline:
+            while (
+                not marker.exists() or not child_pid_file.is_file()
+            ) and time.monotonic() < deadline:
                 time.sleep(0.05)
             self.assertTrue(marker.exists(), "transferência não confirmou bytes enviados")
-            self.assertTrue(child_pid_file.is_file())
+            self.assertTrue(child_pid_file.is_file(), "identidade do filho não foi registrada")
             child_pid, child_starttime = _read_process_identity(child_pid_file)
             self.assertEqual(_process_state(child_pid), "T")
             self.assertTrue(thread.is_alive())

@@ -49,19 +49,20 @@ class SuccessfulProcess:
 
 
 class MissingRepositoryProcess:
-    def __init__(self) -> None:
+    def __init__(self, detail: str = "repository does not exist") -> None:
         self.returncode = 10
         self.pid = 12344
         self.stdout = None
         self.stderr = None
+        self.detail = detail
 
     def communicate(self, timeout: int | None = None) -> tuple[str, str]:
-        return "", "repository does not exist"
+        return "", self.detail
 
 
 class FailedRepositoryProcess(MissingRepositoryProcess):
-    def __init__(self, returncode: int) -> None:
-        super().__init__()
+    def __init__(self, returncode: int, detail: str = "repository does not exist") -> None:
+        super().__init__(detail)
         self.returncode = returncode
 
 
@@ -80,7 +81,7 @@ class ResticAdapterUnitTests(unittest.TestCase):
         adapter = ResticAdapter()
         with patch("macip_backup.restic.shutil.which", return_value="/usr/bin/restic"), patch(
             "macip_backup.restic.subprocess.Popen",
-            side_effect=[MissingRepositoryProcess(), process],
+            side_effect=[MissingRepositoryProcess(), process, SuccessfulProcess("")],
         ) as popen:
             with patch("macip_backup.restic.os.killpg") as killpg, patch(
                 "macip_backup.restic.ResticAdapter._process_group_exists",
@@ -97,6 +98,41 @@ class ResticAdapterUnitTests(unittest.TestCase):
         command = popen.call_args_list[1].args[0]
         self.assertNotIn("secret-not-for-command", command)
         self.assertNotIn("secret-not-for-command", str(context.exception))
+        unlock_command = popen.call_args_list[2].args[0]
+        self.assertEqual(unlock_command[-1], "unlock")
+        self.assertEqual(unlock_command[unlock_command.index("--repo") + 1], command[command.index("--repo") + 1])
+        self.assertNotIn("secret-not-for-command", unlock_command)
+
+    def test_unlock_failure_keeps_timeout_as_primary_error(self) -> None:
+        process = TimedOutProcess()
+        unlock = FailedRepositoryProcess(1, "sftp://user:secret-not-for-command@host: unlock falhou")
+        adapter = ResticAdapter()
+        with patch("macip_backup.restic.shutil.which", return_value="/usr/bin/restic"), patch(
+            "macip_backup.restic.subprocess.Popen",
+            side_effect=[process, unlock],
+        ) as popen, patch(
+            "macip_backup.restic.os.killpg"
+        ), patch(
+            "macip_backup.restic.ResticAdapter._process_group_exists",
+            return_value=False,
+        ):
+            with self.assertRaises(ResticTimeoutError) as context:
+                adapter.backup(
+                    "task",
+                    "client",
+                    [Path("/tmp/source")],
+                    (),
+                    CompressionMode.AUTO,
+                    self.destination,
+                    "secret-not-for-command",
+                    timeout_seconds=1,
+                )
+
+        self.assertEqual(context.exception.operation, "backup")
+        self.assertIn("unlock após timeout", context.exception.detail)
+        self.assertNotIn("secret-not-for-command", context.exception.detail)
+        self.assertIn("***@", context.exception.detail)
+        self.assertEqual(popen.call_args_list[1].args[0][-1], "unlock")
 
     def test_sftp_uses_native_backend_and_generated_ssh_arguments(self) -> None:
         destination = Destination(
@@ -267,12 +303,14 @@ class ResticAdapterUnitTests(unittest.TestCase):
                         CompressionMode.AUTO,
                         self.destination,
                         "test-password",
-                        timeout_seconds=3,
+                        timeout_seconds=2,
                     )
                 except Exception as error:
                     errors.append(error)
 
-            with patch.dict(os.environ, {"MACIP_CHILD_PID_FILE": str(pid_file)}):
+            with patch.dict(os.environ, {"MACIP_CHILD_PID_FILE": str(pid_file)}), patch(
+                "macip_backup.restic._PROCESS_STOP_GRACE_SECONDS", 0.2
+            ):
                 adapter.initialize(self.destination, "test-password", timeout_seconds=1)
                 thread = threading.Thread(target=run_backup)
                 thread.start()
@@ -283,7 +321,7 @@ class ResticAdapterUnitTests(unittest.TestCase):
                 child_pid, child_starttime = _read_process_identity(pid_file)
                 self.assertEqual(_process_state(child_pid), "T")
                 self.assertTrue(thread.is_alive())
-                thread.join(timeout=8)
+                thread.join(timeout=5)
 
             self.assertFalse(thread.is_alive())
             self.assertEqual(len(errors), 1)
