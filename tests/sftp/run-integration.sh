@@ -7,11 +7,15 @@ project_name="macip-sftp-$$-${RANDOM}"
 cleanup_needed=0
 cleanup() {
   original_status=$?
+  if test "$original_status" -ne 0 && test "$cleanup_needed" -eq 1; then
+    MACIP_SFTP_TEST_ROOT="$test_root" docker compose \
+      --project-name "$project_name" -f "$script_dir/compose.yaml" logs --no-color >&2 || true
+  fi
   if test "$cleanup_needed" -eq 1; then
     MACIP_SFTP_TEST_ROOT="$test_root" docker compose \
       --project-name "$project_name" -f "$script_dir/compose.yaml" down --volumes || true
   fi
-  rm -rf -- "$test_root"
+  rm -rf -- "$test_root" || true
   return "$original_status"
 }
 trap cleanup EXIT

@@ -1,6 +1,7 @@
 Port 22
 Protocol 2
 HostKey /etc/ssh/ssh_host_ed25519_key
+LogLevel VERBOSE
 UsePAM no
 PasswordAuthentication no
 KbdInteractiveAuthentication no
