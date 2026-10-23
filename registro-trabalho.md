@@ -1037,3 +1037,34 @@ Suíte: **148 testes** — 130 aprovados, 0 falhos, 18 ignorados
 (SFTP/SMB/S3/combinações — ambientes remotos não preparados).
 
 ---
+
+## 2026-10-23 — Homologação operacional real (systemd verdadeiro)
+
+Segunda máquina não disponibilizada nesta sessão — por instrução,
+comprovado o que era possível com systemd --user real nesta máquina e
+entregue runbook executável (`docs/homologacao-segunda-maquina.md`).
+
+### Comprovado em sessão real
+
+1. Wheel instalado fora do checkout (`/tmp/macip-homolog`, layout
+   isolado por env) — launcher, marker `install=`, install.json.
+2. Backup → `check --read-data` → `restore` + `diff -r` idêntico,
+   credencial SOMENTE via `keyctl ... @u` (por stdin).
+3. **Update pelo systemd real**: unit gerada em 0.2.0, `install.sh`
+   com wheel 0.2.1, mesmo service startado → `Result=success`,
+   `macip-backup --version` = 0.2.1 → o serviço executou o código
+   novo. Execuções 1→3 sucessivas no histórico.
+4. `unschedule` removeu as units reais corretamente.
+5. `loginctl show-user $USER -p Linger` → **`Linger=no`** —
+   requisito administrativo para timer-sem-login documentado (não
+   alterado automaticamente).
+
+### Pendente (não comprovado)
+
+- Reboot real: timer disparando sem sessão de terminal.
+- Segunda máquina física (não disponibilizada).
+- Piloto de 7 dias (checklist pronto, não iniciado — não se declara).
+
+Suíte: 148 testes — 130 aprovados, 0 falhos, 18 ignorados.
+
+---
