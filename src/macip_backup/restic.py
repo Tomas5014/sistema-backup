@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
+from .credentials import credential_from_environment_or_os
 from .models import CompressionMode, Destination, DestinationKind, OperationTimeouts
 
 
@@ -403,10 +404,7 @@ class ResticAdapter:
             (connection.access_key_environment, "AWS_ACCESS_KEY_ID"),
             (connection.secret_key_environment, "AWS_SECRET_ACCESS_KEY"),
         ):
-            secret = os.environ.get(name)
-            if not secret:
-                raise ResticError(f"credencial ausente na variável de ambiente {name}")
-            environment[aws_name] = secret
+            environment[aws_name] = credential_from_environment_or_os(name)
 
     @staticmethod
     def _process_group_exists(pgid: int) -> bool:

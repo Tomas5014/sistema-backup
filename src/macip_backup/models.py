@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -265,17 +264,6 @@ class S3Connection:
         base = f"s3:{self.endpoint}/{self.bucket}"
         return f"{base}/{self.prefix}" if self.prefix else base
 
-    def validate_credentials_for_execution(self) -> None:
-        for name in (
-            self.access_key_environment,
-            self.secret_key_environment,
-        ):
-            if not os.environ.get(name):
-                raise ConfigurationError(
-                    f"credencial ausente na variável de ambiente {name}"
-                )
-
-
 @dataclass(frozen=True)
 class Destination:
     id: str
@@ -337,8 +325,8 @@ class Destination:
             self.sftp.validate_files_for_execution()
         if self.kind is DestinationKind.SMB and self.smb is not None:
             self.smb.validate_for_execution()
-        if self.kind is DestinationKind.S3 and self.s3 is not None:
-            self.s3.validate_credentials_for_execution()
+        # Credenciais S3 são resolvidas na injeção do adaptador — env ou
+        # kernel keyring — para que todos os comandos usem o mesmo mecanismo.
 
 
 @dataclass(frozen=True)

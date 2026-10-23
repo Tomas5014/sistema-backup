@@ -1,10 +1,11 @@
-"""Resolução de credenciais: variável de ambiente ou keystore do SO.
+"""Resolução unificada de credenciais: ambiente ou keystore do SO.
 
-Nomes de segredos nunca viram valores nesta camada. A consulta ao SO usa
-o kernel keyring via ``keyctl`` (keyutils): segredo gravado uma vez por
-``keyctl add user macip.<nome> 'segredo' @s`` — nada em arquivos de
-tarefa nem em logs. systemd LoadCredential/Secret Service podem ser
-adicionados depois atrás da mesma interface.
+A mesma interface atende `run`, `agent`, `snapshots`, `check`, `restore`
+e `forget`. Nomes de segredos nunca viram valores nesta camada. A
+consulta ao SO usa o kernel keyring via ``keyctl`` (keyutils): segredo
+gravado por ``keyctl padd user macip.<nome> @s`` (lido de stdin, sem
+argv nem histórico do shell). ``os.environ`` nunca é modificado — o
+segredo só é injetado no ambiente do processo filho (restic).
 """
 
 from __future__ import annotations
@@ -13,13 +14,19 @@ import os
 import shutil
 import subprocess
 
-from .restic import ResticError
+from .models import ConfigurationError
 
 _KEYCTL_TIMEOUT_SECONDS = 10
 _KEYCTL_NAMESPACE = "macip"
 
 
-def _keyctl_lookup(name: str, timeout_seconds: int = _KEYCTL_TIMEOUT_SECONDS) -> str | None:
+class CredentialError(ConfigurationError):
+    """Credencial obrigatória ausente ou ilegível — falha não repetível."""
+
+
+def _keyctl_lookup(
+    name: str, timeout_seconds: int = _KEYCTL_TIMEOUT_SECONDS
+) -> str | None:
     keyctl = shutil.which("keyctl")
     if keyctl is None:
         return None
@@ -32,13 +39,13 @@ def _keyctl_lookup(name: str, timeout_seconds: int = _KEYCTL_TIMEOUT_SECONDS) ->
             check=False,
         )
     except subprocess.TimeoutExpired as error:
-        raise ResticError(
+        raise CredentialError(
             f"keyctl não respondeu em {timeout_seconds}s para {name}"
         ) from error
     if completed.returncode != 0:
         return None
-    secret = completed.stdout.strip()
-    return secret or None
+    # `keyctl pipe` devolve o payload exato — nunca normalizar o segredo.
+    return completed.stdout or None
 
 
 def credential_from_environment_or_os(name: str) -> str:
@@ -49,7 +56,7 @@ def credential_from_environment_or_os(name: str) -> str:
     value = _keyctl_lookup(name)
     if value:
         return value
-    raise ResticError(
+    raise CredentialError(
         f"credencial ausente na variável de ambiente {name} e no kernel "
         f"keyring ({_KEYCTL_NAMESPACE}.{name})"
     )

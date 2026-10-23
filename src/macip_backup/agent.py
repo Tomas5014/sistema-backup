@@ -3,18 +3,27 @@
 O agente não depende de portal/API: tarefa, segredos (ambiente ou kernel
 keyring) e histórico são locais. Quando a API central existir, o mesmo
 registro poderá ser sincronizado — o fluxo de execução não muda.
+
+Cada execução é gravada como `running` **antes** do backup e atualizada
+na conclusão — uma execução interrompida permanece identificável. Os
+eventos estruturados da execução são persistidos em
+``<store>.logs/<execution_id>.jsonl`` — nunca descartados.
 """
 
 from __future__ import annotations
 
-import io
 import json
+import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 
-from .credentials import credential_from_environment_or_os
 from .logging import StructuredLogger
-from .models import Destination, TaskSpec
-from .orchestrator import BackupOrchestrator, ExecutionResult
+from .models import TaskSpec
+from .orchestrator import (
+    BackupOrchestrator,
+    ExecutionResult,
+    password_from_environment,
+)
 from .restic import ResticAdapter
 from .store import ExecutionStore
 
@@ -24,19 +33,29 @@ def _load_task(path: Path) -> TaskSpec:
         return TaskSpec.from_dict(json.load(config_file))
 
 
-def _os_aware_password_resolver(destination: Destination) -> str:
-    return credential_from_environment_or_os(destination.password_environment)
-
-
 def run_task(config_path: Path, store_path: Path) -> ExecutionResult:
-    """Executa uma tarefa como agente local e persiste o resultado."""
+    """Executa uma tarefa como agente local e persiste o resultado.
+
+    Credenciais resolvem pelo mesmo mecanismo dos demais comandos:
+    variável de ambiente → kernel keyring (`macip.<nome>`).
+    """
     task = _load_task(config_path)
+    store_path = Path(store_path)
+    execution_id = str(uuid.uuid4())
     store = ExecutionStore(store_path)
     try:
-        result = BackupOrchestrator(
-            ResticAdapter(timeouts=task.timeouts), StructuredLogger(io.StringIO())
-        ).execute(task, _os_aware_password_resolver)
-        store.record(task, result)
+        store.record_start(
+            task, execution_id, datetime.now(UTC).isoformat()
+        )
+        log_directory = store_path.parent / "logs"
+        log_directory.mkdir(parents=True, exist_ok=True)
+        log_path = log_directory / f"{execution_id}.jsonl"
+        with log_path.open("a", encoding="utf-8") as log_stream:
+            result = BackupOrchestrator(
+                ResticAdapter(timeouts=task.timeouts),
+                StructuredLogger(log_stream),
+            ).execute(task, password_from_environment, execution_id)
+        store.record_finish(result)
     finally:
         store.close()
     return result

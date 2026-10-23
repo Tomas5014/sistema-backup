@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -10,9 +9,16 @@ from enum import StrEnum
 from time import monotonic, sleep
 from typing import Callable
 
+from .credentials import credential_from_environment_or_os
 from .logging import StructuredLogger
-from .models import Destination, TaskSpec
-from .restic import ResticAdapter, ResticCommandError, ResticError, ResticTimeoutError
+from .models import ConfigurationError, Destination, TaskSpec
+from .restic import (
+    BackupSummary,
+    ResticAdapter,
+    ResticCommandError,
+    ResticError,
+    ResticTimeoutError,
+)
 
 
 class DestinationStatus(StrEnum):
@@ -24,6 +30,26 @@ class ExecutionStatus(StrEnum):
     SUCCESS = "success"
     PARTIAL = "partial"
     FAILED = "failed"
+
+
+@dataclass(frozen=True)
+class AttemptResult:
+    """Registro consultável de cada tentativa de um destino."""
+
+    attempt: int
+    status: DestinationStatus
+    started_at_utc: str
+    finished_at_utc: str
+    duration_seconds: float
+    retryable: bool
+    snapshot_id: str | None = None
+    snapshots_available: int | None = None
+    files_processed: int | None = None
+    bytes_processed: int | None = None
+    error: str | None = None
+    exit_code: int | None = None
+    failed_operation: str | None = None
+    timeout_seconds: int | None = None
 
 
 @dataclass(frozen=True)
@@ -41,6 +67,7 @@ class DestinationResult:
     exit_code: int | None = None
     failed_operation: str | None = None
     timeout_seconds: int | None = None
+    attempts: tuple[AttemptResult, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -61,13 +88,8 @@ PasswordResolver = Callable[[Destination], str]
 
 
 def password_from_environment(destination: Destination) -> str:
-    password = os.environ.get(destination.password_environment)
-    if not password:
-        raise ResticError(
-            "credencial ausente na variável de ambiente "
-            f"{destination.password_environment}"
-        )
-    return password
+    """Mesma resolução de segredos de todos os comandos: env → kernel keyring."""
+    return credential_from_environment_or_os(destination.password_environment)
 
 
 class BackupOrchestrator:
@@ -79,9 +101,10 @@ class BackupOrchestrator:
         self,
         task: TaskSpec,
         password_resolver: PasswordResolver = password_from_environment,
+        execution_id: str | None = None,
     ) -> ExecutionResult:
         task.validate_for_execution()
-        execution_id = str(uuid.uuid4())
+        execution_id = execution_id or str(uuid.uuid4())
         started_at = _utc_now()
         self._logger.emit(
             "info",
@@ -127,27 +150,58 @@ class BackupOrchestrator:
         destination: Destination,
         password_resolver: PasswordResolver,
     ) -> DestinationResult:
+        attempts: list[AttemptResult] = []
+        summary: BackupSummary | None = None
         for attempt in range(1, task.retry.attempts + 1):
-            result = self._attempt_destination(
-                task, execution_id, destination, password_resolver, attempt
+            attempt_result, summary = self._attempt_destination(
+                task,
+                execution_id,
+                destination,
+                password_resolver,
+                attempt,
+                resume_summary=summary,
             )
-            if result.status is DestinationStatus.SUCCESS:
-                return result
-            if attempt < task.retry.attempts:
-                self._logger.emit(
-                    "warning",
-                    "backup.destination.retry",
-                    client_id=task.client.id,
-                    device_id=task.device_id,
-                    task_id=task.id,
-                    execution_id=execution_id,
-                    destination_id=destination.id,
-                    attempt=attempt + 1,
-                    backoff_seconds=task.retry.backoff_seconds,
-                    previous_error=result.error,
-                )
-                sleep(task.retry.backoff_seconds)
-        return result
+            attempts.append(attempt_result)
+            if attempt_result.status is DestinationStatus.SUCCESS:
+                break
+            if not attempt_result.retryable or attempt == task.retry.attempts:
+                break
+            self._logger.emit(
+                "warning",
+                "backup.destination.retry",
+                client_id=task.client.id,
+                device_id=task.device_id,
+                task_id=task.id,
+                execution_id=execution_id,
+                destination_id=destination.id,
+                attempt=attempt + 1,
+                backoff_seconds=task.retry.backoff_seconds,
+                previous_error=attempt_result.error,
+            )
+            sleep(task.retry.backoff_seconds)
+        return self._finalize_destination(destination, attempts)
+
+    @staticmethod
+    def _finalize_destination(
+        destination: Destination, attempts: list[AttemptResult]
+    ) -> DestinationResult:
+        last = attempts[-1]
+        return DestinationResult(
+            destination_id=destination.id,
+            status=last.status,
+            started_at_utc=last.started_at_utc,
+            finished_at_utc=last.finished_at_utc,
+            duration_seconds=last.duration_seconds,
+            snapshot_id=last.snapshot_id,
+            snapshots_available=last.snapshots_available,
+            files_processed=last.files_processed,
+            bytes_processed=last.bytes_processed,
+            error=last.error,
+            exit_code=last.exit_code,
+            failed_operation=last.failed_operation,
+            timeout_seconds=last.timeout_seconds,
+            attempts=tuple(attempts),
+        )
 
     def _attempt_destination(
         self,
@@ -156,7 +210,8 @@ class BackupOrchestrator:
         destination: Destination,
         password_resolver: PasswordResolver,
         attempt: int,
-    ) -> DestinationResult:
+        resume_summary: BackupSummary | None,
+    ) -> tuple[AttemptResult, BackupSummary | None]:
         started_at = _utc_now()
         started_monotonic = monotonic()
         common = {
@@ -168,23 +223,32 @@ class BackupOrchestrator:
             "attempt": attempt,
         }
         self._logger.emit("info", "backup.destination.started", phase="initialize", **common)
-        summary = None
+        summary = resume_summary
         try:
             destination.validate_for_execution()
             password = password_resolver(destination)
             self._adapter.initialize(
                 destination, password, task.timeouts.initialize_seconds
             )
-            summary = self._adapter.backup(
-                task.id,
-                task.client.id,
-                task.source_paths,
-                task.exclusions,
-                task.compression,
-                destination,
-                password,
-                task.timeouts.backup_seconds,
-            )
+            if summary is None:
+                summary = self._adapter.backup(
+                    task.id,
+                    task.client.id,
+                    task.source_paths,
+                    task.exclusions,
+                    task.compression,
+                    destination,
+                    password,
+                    task.timeouts.backup_seconds,
+                )
+            else:
+                self._logger.emit(
+                    "info",
+                    "backup.destination.resume",
+                    phase="resume_pending",
+                    snapshot_id=summary.snapshot_id,
+                    **common,
+                )
             self._adapter.check(
                 destination, password, timeout_seconds=task.timeouts.check_seconds
             )
@@ -199,12 +263,13 @@ class BackupOrchestrator:
             snapshots = self._adapter.snapshots(
                 destination, password, task.timeouts.snapshots_seconds
             )
-            result = DestinationResult(
-                destination_id=destination.id,
+            attempt_result = AttemptResult(
+                attempt=attempt,
                 status=DestinationStatus.SUCCESS,
                 started_at_utc=started_at,
                 finished_at_utc=_utc_now(),
                 duration_seconds=round(monotonic() - started_monotonic, 3),
+                retryable=False,
                 snapshot_id=summary.snapshot_id,
                 snapshots_available=len(snapshots),
                 files_processed=summary.files_processed,
@@ -214,37 +279,58 @@ class BackupOrchestrator:
                 "info",
                 "backup.destination.finished",
                 phase="verify_structure",
-                status=result.status,
-                duration_seconds=result.duration_seconds,
-                snapshot_id=result.snapshot_id,
-                snapshots_available=result.snapshots_available,
-                files_processed=result.files_processed,
-                bytes_processed=result.bytes_processed,
+                status=attempt_result.status,
+                duration_seconds=attempt_result.duration_seconds,
+                snapshot_id=attempt_result.snapshot_id,
+                snapshots_available=attempt_result.snapshots_available,
+                files_processed=attempt_result.files_processed,
+                bytes_processed=attempt_result.bytes_processed,
                 **common,
             )
-            return result
+            return attempt_result, summary
         except ResticTimeoutError as error:
             exit_code = None
             detail = str(error)
             failed_operation = error.operation
             timeout_seconds = error.timeout_seconds
+            retryable = True
         except ResticCommandError as error:
             exit_code = error.return_code
             detail = error.detail
             failed_operation = error.command_name
             timeout_seconds = None
-        except (ResticError, OSError, ValueError) as error:
+            retryable = True
+        except (ConfigurationError, ValueError) as error:
+            # Configuração inválida ou credencial ausente não se resolvem
+            # repetindo — exigem correção antes de nova tentativa.
             exit_code = None
             detail = str(error)
             failed_operation = None
             timeout_seconds = None
+            retryable = False
+        except ResticError as error:
+            # Pré-condições internas do adaptador (binário ausente, destino
+            # sem configuração, resposta inválida) também são determinísticas.
+            exit_code = None
+            detail = str(error)
+            failed_operation = None
+            timeout_seconds = None
+            retryable = False
+        except OSError as error:
+            # Falhas de transporte/disco podem ser transitórias.
+            exit_code = None
+            detail = str(error)
+            failed_operation = None
+            timeout_seconds = None
+            retryable = True
 
-        result = DestinationResult(
-            destination_id=destination.id,
+        attempt_result = AttemptResult(
+            attempt=attempt,
             status=DestinationStatus.FAILED,
             started_at_utc=started_at,
             finished_at_utc=_utc_now(),
             duration_seconds=round(monotonic() - started_monotonic, 3),
+            retryable=retryable,
             snapshot_id=summary.snapshot_id if summary is not None else None,
             error=detail,
             exit_code=exit_code,
@@ -255,15 +341,15 @@ class BackupOrchestrator:
             "error",
             "backup.destination.finished",
             phase="failed",
-            status=result.status,
-            duration_seconds=result.duration_seconds,
-            error=result.error,
-            exit_code=result.exit_code,
-            failed_operation=result.failed_operation,
-            timeout_seconds=result.timeout_seconds,
+            status=attempt_result.status,
+            duration_seconds=attempt_result.duration_seconds,
+            error=attempt_result.error,
+            exit_code=attempt_result.exit_code,
+            failed_operation=attempt_result.failed_operation,
+            timeout_seconds=attempt_result.timeout_seconds,
             **common,
         )
-        return result
+        return attempt_result, summary
 
 
 def _execution_status(results: tuple[DestinationResult, ...]) -> ExecutionStatus:

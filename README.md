@@ -261,6 +261,14 @@ até `attempts` tentativas com espera de `backoff_seconds` entre elas
 (padrão: `attempts=1`, sem espera). O log marca `attempt` e emite
 `backup.destination.retry` entre tentativas.
 
+**Falhas repetíveis**: erros de backend restic (`ResticCommandError`),
+timeouts (`ResticTimeoutError`) e erros de transporte/disco (`OSError`).
+**Falhas não repetíveis**: configuração inválida e credencial ausente/ilegível
+(`ConfigurationError`/`CredentialError` — exigem correção), pré-condições
+internas do adaptador (`ResticError`). Se o backup de uma tentativa já gerou
+snapshot e a falha ocorre depois (check, retenção ou listagem), a retentativa
+**não repete o backup** — retoma das fases pendentes com o mesmo snapshot.
+
 ```bash
 # Executa a tarefa como agente e registra no SQLite local.
 macip-backup-poc agent examples/tarefa-smb.json --store /var/lib/macip-backup/agent.db
@@ -269,23 +277,37 @@ macip-backup-poc agent examples/tarefa-smb.json --store /var/lib/macip-backup/ag
 macip-backup-poc history --store /var/lib/macip-backup/agent.db --task tarefa-financeiro-smb
 ```
 
-O banco SQLite guarda execuções e resultados por destino — nunca segredos.
+O banco SQLite guarda execuções, resultados por destino e **cada tentativa**
+(número, horários, duração, operação que falhou, snapshot quando existir) —
+nunca segredos. A execução é gravada como `running` antes de iniciar e
+atualizada na conclusão: uma execução interrompida permanece identificável
+com status `running`. Os eventos estruturados da execução ficam em
+`<store-dir>/logs/<execution_id>.jsonl`.
 
 ### Credenciais do SO
 
-No modo `agent`, `password_environment` continua sendo o **nome** do segredo,
-resolvido nesta ordem: variável de ambiente → **kernel keyring** (`keyctl`,
-já presente via `keyutils`/`cifs-utils`). A configuração nunca guarda o valor.
+Todos os comandos (`run`, `agent`, `snapshots`, `check`, `restore`, `forget`)
+usam a **mesma resolução**: `password_environment` e os campos
+`*_key_environment` do S3 são **nomes** de segredo, resolvidos nesta ordem:
+variável de ambiente → **kernel keyring** (`keyctl`, já presente via
+`keyutils`/`cifs-utils`). `os.environ` nunca é modificado — o segredo só
+entra no ambiente do processo filho restic; o conteúdo do keyring é usado
+exatamente como armazenado, sem normalização.
 
 ```bash
-# Grava o segredo no keyring da sessão do agente (uma vez, por boot):
-keyctl add user macip.MACIP_RESTIC_PASSWORD_SMB 'segredo' @s
-# ou persistido via systemd: LoadCredential=, ou keyctl persistent-keyring.
+# Provisiona o segredo sem argv nem histórico do shell (lido de stdin):
+read -r -s -p 'Segredo: ' MACIP_SECRET && printf '%s' "$MACIP_SECRET" | \
+  keyctl padd user macip.MACIP_RESTIC_PASSWORD_SMB @s; unset MACIP_SECRET
 ```
 
+Limitações do keyring: `@s` é o keyring **da sessão** — não sobrevive a
+logout/reboot, exigindo nova gravação a cada boot do agente; para chave
+persistente por usuário existe `@u` (keyring do usuário, requer
+`keyctl persist` e não funciona em todas as sessões). systemd
+`LoadCredential`/Secret Service entram depois atrás da mesma interface.
+
 Segredo ausente em ambos os lugares falha com erro controlado — nunca sai em
-log. systemd `LoadCredential`/Secret Service entram depois atrás da mesma
-interface de resolução.
+log — e não é repetido automaticamente.
 
 ## Testes
 

@@ -507,19 +507,30 @@ class S3ConfigurationTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigurationError, "s3 é obrigatório"):
             TaskSpec.from_dict(config)
 
-    def test_missing_s3_credential_env_fails_validation(self) -> None:
+    def test_s3_credentials_resolved_at_adapter_injection(self) -> None:
+        from macip_backup.credentials import CredentialError
+        from macip_backup.restic import ResticAdapter
+
         config = valid_config()
         config["destinations"] = [self._s3_destination()]
-        task = TaskSpec.from_dict(config)
+        destination = TaskSpec.from_dict(config).destinations[0]
+        adapter = ResticAdapter()
 
-        with patch.dict(os.environ, {}, clear=True):
-            with self.assertRaisesRegex(ConfigurationError, "credencial ausente"):
-                task.destinations[0].validate_for_execution()
+        with patch.dict(os.environ, {}, clear=True), patch(
+            "macip_backup.credentials.shutil.which", return_value=None
+        ):
+            with self.assertRaisesRegex(CredentialError, "credencial ausente"):
+                adapter._inject_destination_credentials(destination, {})
 
         with patch.dict(
             os.environ, {"MACIP_S3_ACCESS": "key", "MACIP_S3_SECRET": "secret"}
         ):
-            task.destinations[0].validate_for_execution()
+            environment: dict[str, str] = {}
+            adapter._inject_destination_credentials(destination, environment)
+        self.assertEqual(
+            environment,
+            {"AWS_ACCESS_KEY_ID": "key", "AWS_SECRET_ACCESS_KEY": "secret"},
+        )
 
 
 class RetryPolicyTests(unittest.TestCase):

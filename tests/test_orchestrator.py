@@ -22,8 +22,14 @@ from macip_backup.models import (
     SFTPConnection,
     TaskSpec,
 )
+from macip_backup.credentials import CredentialError
 from macip_backup.orchestrator import BackupOrchestrator, DestinationStatus, ExecutionStatus
-from macip_backup.restic import BackupSummary, ResticError, ResticTimeoutError
+from macip_backup.restic import (
+    BackupSummary,
+    ResticCommandError,
+    ResticError,
+    ResticTimeoutError,
+)
 
 
 class ControlledAdapter:
@@ -269,11 +275,13 @@ class BackupOrchestratorUnitTests(unittest.TestCase):
         self.assertEqual(result.destinations[0].snapshot_id, "snapshot")
         self.assertIn("prune failed", result.destinations[0].error or "")
 
-    def test_retry_recovers_destination_and_logs_attempt(self) -> None:
+    def test_retry_recovers_destination_and_keeps_both_attempts(self) -> None:
         destination = self._destinations()[0]
         adapter = ControlledAdapter(
             failures_once={
-                (destination.id, "backup"): ResticError("falha transitória")
+                (destination.id, "backup"): ResticCommandError(
+                    "backup", 1, "falha transitória"
+                )
             }
         )
         log_stream = io.StringIO()
@@ -288,13 +296,22 @@ class BackupOrchestratorUnitTests(unittest.TestCase):
             call for call in adapter.calls if call[:2] == (destination.id, "backup")
         ]
         self.assertEqual(len(backup_calls), 2)
+        attempts = result.destinations[0].attempts
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(attempts[0].status, DestinationStatus.FAILED)
+        self.assertEqual(attempts[0].retryable, True)
+        self.assertEqual(attempts[1].status, DestinationStatus.SUCCESS)
         self.assertIn('"event": "backup.destination.retry"', log_stream.getvalue())
         self.assertIn('"attempt": 2', log_stream.getvalue())
 
     def test_retry_exhaustion_marks_destination_failed(self) -> None:
         destination = self._destinations()[0]
         adapter = ControlledAdapter(
-            {(destination.id, "backup"): ResticError("sempre falha")}
+            {
+                (destination.id, "backup"): ResticCommandError(
+                    "backup", 1, "sempre falha"
+                )
+            }
         )
 
         result = BackupOrchestrator(adapter, StructuredLogger(io.StringIO())).execute(
@@ -308,6 +325,50 @@ class BackupOrchestratorUnitTests(unittest.TestCase):
         ]
         self.assertEqual(len(backup_calls), 2)
         self.assertIn("sempre falha", result.destinations[0].error or "")
+
+    def test_non_retryable_failure_runs_single_attempt(self) -> None:
+        destination = self._destinations()[0]
+        adapter = ControlledAdapter(
+            {(destination.id, "backup"): CredentialError("credencial inválida")}
+        )
+
+        result = BackupOrchestrator(adapter, StructuredLogger(io.StringIO())).execute(
+            self._task(destination, retry=RetryPolicy(attempts=3)),
+            lambda _: "test-password",
+        )
+
+        self.assertEqual(result.status, ExecutionStatus.FAILED)
+        backup_calls = [
+            call for call in adapter.calls if call[:2] == (destination.id, "backup")
+        ]
+        self.assertEqual(len(backup_calls), 1)
+        self.assertFalse(result.destinations[0].attempts[0].retryable)
+
+    def test_failure_after_backup_resumes_without_new_snapshot(self) -> None:
+        destination = self._destinations()[0]
+        adapter = ControlledAdapter(
+            failures_once={
+                (destination.id, "check"): ResticCommandError(
+                    "check", 1, "falha transitória de verificação"
+                )
+            }
+        )
+
+        result = BackupOrchestrator(adapter, StructuredLogger(io.StringIO())).execute(
+            self._task(destination, retry=RetryPolicy(attempts=3)),
+            lambda _: "test-password",
+        )
+
+        self.assertEqual(result.status, ExecutionStatus.SUCCESS)
+        backup_calls = [
+            call for call in adapter.calls if call[:2] == (destination.id, "backup")
+        ]
+        check_calls = [
+            call for call in adapter.calls if call[:2] == (destination.id, "check")
+        ]
+        self.assertEqual(len(backup_calls), 1)
+        self.assertEqual(len(check_calls), 2)
+        self.assertEqual(result.destinations[0].attempts[0].snapshot_id, "snapshot")
 
     def test_no_retention_policy_skips_forget(self) -> None:
         first, _ = self._destinations()
