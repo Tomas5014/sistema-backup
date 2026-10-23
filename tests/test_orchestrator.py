@@ -543,6 +543,57 @@ class BackupOrchestratorUnitTests(unittest.TestCase):
         self.assertEqual(destinations[second.id]["status"], "interrupted")
         self.assertEqual(destinations[second.id]["attempts"], [])
 
+    def test_cancel_between_selection_and_first_attempt(self) -> None:
+        """Sinal chega DEPOIS da checagem de seleção e ANTES da tentativa
+        1: zero tentativas, nenhum IndexError, destino interrupted."""
+
+        class FlipAdapter(ControlledAdapter):
+            """cancelled False na 1ª consulta (seleção) e True na 2ª
+            (topo do loop de tentativas) — reproduz o sinal que cai
+            exatamente entre as duas verificações."""
+
+            def __init__(self, **kwargs: object) -> None:
+                super().__init__(**kwargs)
+                self._checks = 0
+
+            @property
+            def cancelled(self) -> bool:
+                self._checks += 1
+                return self._checks > 1
+
+            @property
+            def cancel_reason(self) -> str:
+                return "sinal entre seleção e tentativa"
+
+        first, second = self._destinations()
+        adapter = FlipAdapter()
+        store = ExecutionStore(self.root / "agent.db")
+        task = self._task(first, second)
+        store.record_start(task, "exec-race", "2026-10-23T12:00:00+00:00")
+
+        result = BackupOrchestrator(
+            adapter, StructuredLogger(io.StringIO())
+        ).execute(
+            task,
+            lambda _: "test-password",
+            execution_id="exec-race",
+            recorder=store,
+        )
+        store.mark_stale_interrupted(task.id, "2026-10-23T12:00:10+00:00")
+
+        self.assertEqual(result.status, ExecutionStatus.INTERRUPTED)
+        for destination in result.destinations:
+            self.assertEqual(destination.status, DestinationStatus.INTERRUPTED)
+            self.assertEqual(destination.attempts, ())
+        self.assertEqual(adapter.calls, [])  # nenhuma chamada ao adaptador
+
+        entries = store.history(task.id)
+        store.close()
+        destinations = {d["destination_id"]: d for d in entries[0]["destinations"]}
+        for destination in (first.id, second.id):
+            self.assertEqual(destinations[destination]["status"], "interrupted")
+            self.assertEqual(destinations[destination]["attempts"], [])
+
     def test_no_retention_policy_skips_forget(self) -> None:
         first, _ = self._destinations()
         adapter = ControlledAdapter()

@@ -325,6 +325,10 @@ class BackupOrchestrator:
             )
             if self._sleep_until_cancelled(task.retry.backoff_seconds):
                 break
+        # Sinal entre a seleção do destino e a primeira iteração: nenhuma
+        # tentativa — a finalização por attempts[-1] não existe aqui.
+        if not attempts:
+            return self._cancelled_destination(execution_id, destination, recorder)
         final_result = self._finalize_destination(destination, attempts)
         if recorder is not None:
             recorder.destination_finished(execution_id, final_result)

@@ -835,3 +835,32 @@ Suíte: **127 testes** — 109 aprovados, 0 falhos, 18 ignorados
 (SFTP/SMB/S3/combinações — ambientes remotos não preparados).
 
 ---
+
+## 2026-10-23 — Cancelamento entre seleção do destino e tentativa 1
+
+Caso reproduzido: `execute()` verifica cancelamento na seleção → sinal
+chega antes da primeira iteração de `_execute_destination` → checagem
+no topo do loop encerra com `attempts=[]` → `_finalize_destination`
+acessava `attempts[-1]` → `IndexError`.
+
+### Correção
+
+- `attempts` vazio após o loop → retorna `_cancelled_destination`
+  (interrupted, zero tentativas, persistido pelo recorder) — o
+  `IndexError` da finalização por `attempts[-1]` desaparece.
+
+### Teste determinístico
+
+`FlipAdapter` — `cancelled` False na 1ª consulta (seleção) e True na
+2ª (topo do loop), reproduzindo o sinal que cai exatamente entre as
+duas verificações:
+
+- execução e ambos os destinos `interrupted`;
+- `adapter.calls` vazio — nenhuma chamada de initialize/backup;
+- zero tentativas em todos os destinos;
+- histórico persistido `interrupted` sem tentativas.
+
+Suíte: **128 testes** — 110 aprovados, 0 falhos, 18 ignorados
+(SFTP/SMB/S3/combinações — ambientes remotos não preparados).
+
+---
