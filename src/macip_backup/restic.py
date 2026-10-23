@@ -52,6 +52,16 @@ class BackupSummary:
     bytes_processed: int | None
 
 
+class ResticCancelledError(ResticError):
+    """Execução cancelada por sinal externo — nunca repetível."""
+
+    def __init__(self, reason: str, operation: str | None = None) -> None:
+        detail = f"{reason} (em restic {operation})" if operation else reason
+        super().__init__(detail)
+        self.reason = reason
+        self.operation = operation
+
+
 class ResticAdapter:
     """Executa comandos estruturados. Senhas trafegam somente pelo ambiente."""
 
@@ -64,6 +74,30 @@ class ResticAdapter:
         self._binary = binary
         self._cache_directory = cache_directory
         self._timeouts = timeouts or OperationTimeouts()
+        # Cancelamento: atributos simples (atômicos sob a GIL) — o handler
+        # de sinal roda na main thread e não pode adquirir locks.
+        self._cancel_reason: str | None = None
+        self._current_process: subprocess.Popen[str] | None = None
+        self.cancel_cleanup_error: str | None = None
+
+    def cancel(self, reason: str) -> None:
+        """Cancela: registra o motivo e encerra o grupo do restic em andamento.
+
+        SEGFAULT-safe para handlers de sinal: só leituras/atribuições
+        atômicas. Escalada SIGTERM → SIGKILL com prazo limitado; falha de
+        limpeza é registrada em ``cancel_cleanup_error``.
+        """
+        self._cancel_reason = reason
+        process = self._current_process
+        if process is None or process.pid is None:
+            return
+        try:
+            if not self._stop_for_cancel(process):
+                self.cancel_cleanup_error = (
+                    "processo ou descendentes não encerraram após escalada SIGKILL"
+                )
+        except OSError as error:
+            self.cancel_cleanup_error = str(error)
 
     def initialize(
         self,
@@ -203,6 +237,8 @@ class ResticAdapter:
         arguments: Sequence[str],
         timeout_seconds: int,
     ) -> str:
+        if self._cancel_reason is not None:
+            raise ResticCancelledError(self._cancel_reason)
         if not password:
             raise ResticError("senha do repositório não foi fornecida")
         if shutil.which(self._binary) is None and not Path(self._binary).is_file():
@@ -229,17 +265,28 @@ class ResticAdapter:
             env=environment,
             start_new_session=os.name == "posix",
         )
+        self._current_process = process
+        # Sinal recebido no intervalo Popen→registro: o handler viu
+        # current_process=None; a limpeza é garantida aqui.
+        if self._cancel_reason is not None:
+            self._stop_for_cancel(process)
         operation = _operation_name(arguments)
         try:
-            stdout, stderr = process.communicate(timeout=timeout_seconds)
-        except subprocess.TimeoutExpired:
-            stdout, stderr, process_group_terminated = self._stop_timed_out_process(process)
-            if process_group_terminated:
-                unlock_detail = self._unlock_after_timeout(destination, password)
-                if unlock_detail:
-                    stderr = f"{stderr}\nunlock após timeout: {unlock_detail}".strip()
-            detail = _safe_error_detail(stderr or stdout)
-            raise ResticTimeoutError(operation, timeout_seconds, detail)
+            try:
+                stdout, stderr = process.communicate(timeout=timeout_seconds)
+            except subprocess.TimeoutExpired:
+                stdout, stderr, process_group_terminated = self._stop_timed_out_process(process)
+                if process_group_terminated:
+                    unlock_detail = self._unlock_after_timeout(destination, password)
+                    if unlock_detail:
+                        stderr = f"{stderr}\nunlock após timeout: {unlock_detail}".strip()
+                detail = _safe_error_detail(stderr or stdout)
+                raise ResticTimeoutError(operation, timeout_seconds, detail)
+        finally:
+            self._current_process = None
+            cancelled_reason = self._cancel_reason
+        if cancelled_reason is not None:
+            raise ResticCancelledError(cancelled_reason, operation)
         if process.returncode != 0:
             detail = _safe_error_detail(stderr or stdout)
             raise ResticCommandError(operation, process.returncode, detail)
@@ -299,6 +346,29 @@ class ResticAdapter:
         # restic interpreta sftp.args como argumentos do ssh. shlex.join preserva
         # cada valor como um argumento, inclusive caminhos que contenham espaços.
         return ["-o", f"sftp.args={shlex.join(ssh_arguments)}"]
+
+    def _stop_for_cancel(self, process: subprocess.Popen[str]) -> bool:
+        """Encerra o grupo com SIGTERM→SIGKILL. Chamado por cancel() e
+        pelo próprio _run quando o sinal chega logo após o Popen."""
+        if os.name == "posix" and process.pid is not None:
+            pgid = process.pid
+            self._signal_process_group(process, signal.SIGCONT)
+            self._signal_process_group(process, signal.SIGTERM)
+            if self._wait_for_process_group_exit(pgid):
+                return True
+            self._signal_process_group(process, signal.SIGKILL)
+            return self._wait_for_process_group_exit(pgid)
+        process.terminate()
+        try:
+            process.wait(_PROCESS_STOP_GRACE_SECONDS)
+            return True
+        except subprocess.TimeoutExpired:
+            process.kill()
+            try:
+                process.wait(_PROCESS_STOP_GRACE_SECONDS)
+                return True
+            except subprocess.TimeoutExpired:
+                return False
 
     def _stop_timed_out_process(
         self, process: subprocess.Popen[str]

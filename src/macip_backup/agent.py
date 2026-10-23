@@ -4,29 +4,36 @@ O agente não depende de portal/API: tarefa, segredos (ambiente ou kernel
 keyring) e histórico são locais. Quando a API central existir, o mesmo
 registro poderá ser sincronizado — o fluxo de execução não muda.
 
-Execução exclusiva: um `flock` no arquivo `<store>.lock` impede duas
-execuções simultâneas — vale igualmente para a CLI e para o service
-systemd (mesmo caminho de código). O lock é liberado pelo kernel mesmo
-em morte abrupta.
+Execução exclusiva POR TAREFA: `flock` em
+``<lock_dir>/<task_id>.lock`` — o mesmo arquivo para `run`, `agent` e o
+service systemd (mesmo caminho de código). O lock não depende de
+``--store``: outro banco não contorna a exclusão. O kernel libera o
+lock mesmo em morte abrupta.
+
+Cancelamento: SIGTERM/SIGINT pedem ao adaptador o encerramento do grupo
+de processos do restic (SIGTERM→SIGKILL com prazo limitado). A
+execução só é marcada `interrupted` depois que o encerramento é
+confirmado; falha de limpeza é registrada explicitamente. Cancelamento
+nunca vira retry (ResticCancelledError não é repetível).
 
 Execuções são gravadas como `running` **antes** do backup e atualizadas
-na conclusão. No início, execuções ainda `running` (morte anterior sem
-sinal) são marcadas `interrupted`; SIGTERM/SIGINT também marcam a
-execução corrente como `interrupted` antes de sair — o histórico nunca
-confunde "parou" com "está rodando".
+na conclusão. Execuções ainda `running` de mortes anteriores (kill -9,
+reboot) viram `interrupted` na próxima execução.
 
 Os eventos estruturados da execução são persistidos em
-``<store>.logs/<execution_id>.jsonl`` — nunca descartados.
+``<store-dir>/logs/<execution_id>.jsonl`` — nunca descartados.
 """
 
 from __future__ import annotations
 
 import fcntl
 import json
+import os
 import signal
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import IO
 
 from .logging import StructuredLogger
 from .models import TaskSpec
@@ -48,18 +55,50 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def _acquire_execution_lock(store_path: Path) -> object:
+def task_lock_directory() -> Path:
+    """Diretório fixo de locks por tarefa — sobrescrevível em testes."""
+    override = os.environ.get("MACIP_LOCK_DIR")
+    if override:
+        return Path(override)
+    return Path.home() / ".local" / "state" / "macip-backup" / "locks"
+
+
+def acquire_task_lock(task_id: str) -> IO[str]:
     """flock exclusivo não bloqueante — impede execuções simultâneas."""
-    lock_path = Path(f"{store_path}.lock")
-    lock_file = lock_path.open("a")
+    directory = task_lock_directory()
+    directory.mkdir(parents=True, exist_ok=True)
+    lock_file = (directory / f"{task_id}.lock").open("a")
     try:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError as error:
         lock_file.close()
         raise ResticError(
-            f"já existe uma execução do agente em andamento ({lock_path})"
+            f"já existe execução da tarefa '{task_id}' em andamento"
         ) from error
     return lock_file
+
+
+def install_cancel_handlers(
+    adapter: ResticAdapter, on_signal: object = None
+) -> dict[int, object]:
+    """SIGTERM/SIGINT → adapter.cancel(motivo). Devolve os handlers
+    anteriores para restauração com ``restore_signal_handlers``."""
+    previous: dict[int, object] = {}
+    for signum in (signal.SIGTERM, signal.SIGINT):
+        def _handler(
+            received: int, _frame: object, signum: int = signum
+        ) -> None:
+            if callable(on_signal):
+                on_signal(signum)
+            adapter.cancel(f"interrompido por sinal {signum}")
+
+        previous[signum] = signal.signal(signum, _handler)
+    return previous
+
+
+def restore_signal_handlers(previous: dict[int, object]) -> None:
+    for signum, handler in previous.items():
+        signal.signal(signum, handler)
 
 
 def run_task(config_path: Path, store_path: Path) -> ExecutionResult:
@@ -70,44 +109,61 @@ def run_task(config_path: Path, store_path: Path) -> ExecutionResult:
     """
     task = _load_task(config_path)
     store_path = Path(store_path)
+    # O diretório de estado existe antes de qualquer toque no lock/DB.
+    store_path.parent.mkdir(parents=True, exist_ok=True)
     execution_id = str(uuid.uuid4())
-    lock_file = _acquire_execution_lock(store_path)
-    store = ExecutionStore(store_path)
+    lock_file = acquire_task_lock(task.id)
+    adapter = ResticAdapter(timeouts=task.timeouts)
+    try:
+        store = ExecutionStore(store_path)
+    except Exception:
+        lock_file.close()
+        raise
+    interrupted_by: list[int] = []
     previous_handlers: dict[int, object] = {}
     try:
         store.mark_stale_interrupted(_now())
         store.record_start(task, execution_id, _now())
-
-        def _interrupted(signum: int, _frame: object) -> None:
-            # Best-effort: se o sinal cair no meio de outra escrita
-            # sqlite, a marcação pode falhar — a varredura do próximo
-            # run_task ainda marca a execução como interrupted.
-            store.mark_interrupted(execution_id, _now())
-            raise SystemExit(128 + signum)
-
-        for signum in (signal.SIGTERM, signal.SIGINT):
-            previous_handlers[signum] = signal.signal(signum, _interrupted)
-
+        previous_handlers = install_cancel_handlers(
+            adapter, on_signal=interrupted_by.append
+        )
         log_directory = store_path.parent / "logs"
         log_directory.mkdir(parents=True, exist_ok=True)
         log_path = log_directory / f"{execution_id}.jsonl"
         with log_path.open("a", encoding="utf-8") as log_stream:
+            logger = StructuredLogger(log_stream)
             result = BackupOrchestrator(
-                ResticAdapter(timeouts=task.timeouts),
-                StructuredLogger(log_stream),
+                adapter, logger
             ).execute(
                 task,
                 password_from_environment,
                 execution_id,
                 recorder=store,
             )
-        store.record_finish(result)
+            store.record_finish(result)
+            if interrupted_by:
+                # execute() retornou → cancel() confirmou o encerramento do
+                # grupo (ou registrou a falha). Só agora marca interrompido.
+                signum = interrupted_by[0]
+                detail = f"sinal {signum}"
+                if adapter.cancel_cleanup_error:
+                    detail += (
+                        f"; falha na limpeza: {adapter.cancel_cleanup_error}"
+                    )
+                logger.emit(
+                    "warning",
+                    "backup.execution.interrupted",
+                    task_id=task.id,
+                    execution_id=execution_id,
+                    signum=signum,
+                    cleanup_error=adapter.cancel_cleanup_error,
+                )
+                store.mark_interrupted(execution_id, _now(), detail)
+        return result
     finally:
-        for signum, handler in previous_handlers.items():
-            signal.signal(signum, handler)
+        restore_signal_handlers(previous_handlers)
         store.close()
         lock_file.close()
-    return result
 
 
 def history(store_path: Path, task_id: str | None = None) -> list[dict[str, object]]:

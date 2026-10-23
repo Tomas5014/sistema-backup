@@ -26,6 +26,41 @@ def unit_directory() -> Path:
     return Path.home() / ".config" / "systemd" / "user"
 
 
+def _escape_unit(value: object) -> str:
+    """Escape de conteúdo para sintaxe de unit systemd.
+
+    NÃO é shlex.quote: dentro de aspas duplas, o systemd escapa apenas
+    `\\` e `"` (e expansões `%`/`$` não se aplicam a caminhos gerados
+    aqui). Serve para argumentos de ExecStart e valores de Environment.
+    """
+    return str(value).replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _unit_value(value: object) -> str:
+    return f'"{_escape_unit(value)}"'
+
+
+def _validate_calendar(calendar: str) -> None:
+    """Rejeita expressão OnCalendar inválida ANTES de tocar nas units."""
+    tool = shutil.which("systemd-analyze")
+    if tool is None:
+        raise ConfigurationError(
+            "systemd-analyze ausente — não é possível validar OnCalendar"
+        )
+    completed = subprocess.run(
+        [tool, "calendar", calendar],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout).strip()
+        raise ConfigurationError(
+            f"expressão OnCalendar inválida '{calendar}': {detail}"
+        )
+
+
 def _systemctl(*args: str, check: bool = True) -> None:
     systemctl = shutil.which("systemctl")
     if systemctl is None:
@@ -51,6 +86,7 @@ def install_schedule(
     enable: bool = False,
 ) -> dict[str, str]:
     """Escreve service+timer systemd --user para a tarefa."""
+    _validate_calendar(calendar)  # antes de sobrescrever units existentes
     config_path = Path(config_path).resolve()
     store_path = Path(store_path).resolve()
     src_root = Path(__file__).resolve().parents[1]
@@ -61,15 +97,15 @@ def install_schedule(
     service_path = unit_dir / f"{name}.service"
     service_path.write_text(
         f"""[Unit]
-Description=MAC IP Backup agent — tarefa {task.id}
+Description=MAC IP Backup agent — tarefa {_unit_value(task.id)}
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
-Environment=PYTHONPATH={src_root}
+Environment="PYTHONPATH={_escape_unit(src_root)}"
 EnvironmentFile=-%h/.config/macip-backup/agent.env
-ExecStart={sys.executable} -m macip_backup.cli agent {config_path} --store {store_path}
+ExecStart={_unit_value(sys.executable)} -m macip_backup.cli agent {_unit_value(config_path)} --store {_unit_value(store_path)}
 """,
         encoding="utf-8",
     )

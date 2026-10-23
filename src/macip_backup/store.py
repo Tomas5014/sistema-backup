@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from .models import TaskSpec
     from .orchestrator import AttemptResult, DestinationResult, ExecutionResult
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS executions (
@@ -41,7 +41,8 @@ CREATE TABLE IF NOT EXISTS executions (
     client_id TEXT NOT NULL,
     status TEXT NOT NULL,
     started_at_utc TEXT NOT NULL,
-    finished_at_utc TEXT
+    finished_at_utc TEXT,
+    interrupt_detail TEXT
 );
 CREATE TABLE IF NOT EXISTS destination_results (
     execution_id TEXT NOT NULL,
@@ -121,6 +122,8 @@ class ExecutionStore:
                 self._migrate_v0()
             if version < 2:
                 self._migrate_v1()
+            if version < 3:
+                self._migrate_v2()
             self._connection.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             self._connection.execute("COMMIT")
         except Exception:
@@ -245,6 +248,20 @@ class ExecutionStore:
             ):
                 self._connection.execute(statement)
 
+    def _migrate_v2(self) -> None:
+        """v2 → v3: executions ganha interrupt_detail (motivo do
+        cancelamento, incluindo falha de limpeza)."""
+        columns = {
+            row[1]
+            for row in self._connection.execute(
+                "PRAGMA table_info(executions)"
+            ).fetchall()
+        }
+        if self._table_exists("executions") and "interrupt_detail" not in columns:
+            self._connection.execute(
+                "ALTER TABLE executions ADD COLUMN interrupt_detail TEXT"
+            )
+
     # -- ciclo de vida da execução -------------------------------------------
 
     def record_start(
@@ -334,13 +351,23 @@ class ExecutionStore:
             )
         return cursor.rowcount
 
-    def mark_interrupted(self, execution_id: str, finished_at_utc: str) -> None:
-        """Marca UMA execução como interrompida (sinal recebido)."""
+    def mark_interrupted(
+        self,
+        execution_id: str,
+        finished_at_utc: str,
+        detail: str | None = None,
+    ) -> None:
+        """Marca UMA execução como interrompida (sinal recebido).
+
+        ``detail`` registra o motivo — sinal recebido e eventual falha
+        na limpeza do grupo de processos.
+        """
         with self._connection:
             self._connection.execute(
-                "UPDATE executions SET status = 'interrupted', finished_at_utc = ? "
-                "WHERE execution_id = ? AND status = 'running'",
-                (finished_at_utc, execution_id),
+                "UPDATE executions SET status = 'interrupted', "
+                "finished_at_utc = ?, interrupt_detail = ? "
+                "WHERE execution_id = ? AND status IN ('running', 'failed')",
+                (finished_at_utc, detail, execution_id),
             )
             self._connection.execute(
                 "UPDATE attempts SET status = 'interrupted', "
@@ -477,6 +504,7 @@ class ExecutionStore:
                 "status": row[3],
                 "started_at_utc": row[4],
                 "finished_at_utc": row[5],
+                "interrupt_detail": row[6],
                 "destinations": self._destinations_of(row[0]),
             }
             for row in rows

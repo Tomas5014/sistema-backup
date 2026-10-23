@@ -350,19 +350,27 @@ macip-backup-poc unschedule <task_id>
 O service é `Type=oneshot` rodando o mesmo `agent` da CLI — compartilha lock,
 histórico e resolução de credenciais.
 
-**Bloqueio de simultâneas**: `flock` em `<store>.lock` — uma segunda execução
-(CLI ou serviço) falha imediatamente com erro controlado. O kernel libera o
-lock mesmo em morte abrupta.
+**Bloqueio de simultâneas**: `flock` **por tarefa** em
+`~/.local/state/macip-backup/locks/<task_id>.lock` — o mesmo arquivo para
+`run`, `agent` e o serviço, então `--store` diferente não contorna a
+exclusão. Uma segunda execução da mesma tarefa falha imediatamente; o kernel
+libera o lock mesmo em morte abrupta.
 
 **Credenciais sem terminal**: duas vias — `EnvironmentFile` no service lê
 `~/.config/macip-backup/agent.env` (opcional, modo 600) com `MACIP_*=valor`;
 ou kernel keyring do usuário (`keyctl padd user macip.<nome> @u`), que
 persiste logout mas não reboot. A resolução `%user:` cobre @s e @u.
 
-**Encerramento controlado**: SIGTERM/SIGINT marcam a execução `interrupted`
-antes de sair; execuções órfãs de mortes anteriores (kill -9, reboot) são
-marcadas `interrupted` na próxima execução — o histórico nunca confunde
-"parou" com "está rodando".
+**Encerramento controlado**: SIGTERM/SIGINT pedem o encerramento do grupo de
+processos do restic (SIGTERM → espera → SIGKILL). A execução só é marcada
+`interrupted` depois que o encerramento é confirmado — `interrupt_detail`
+registra o sinal e eventual falha de limpeza. Cancelamento nunca vira retry.
+Execuções órfãs (kill -9, reboot) viram `interrupted` na próxima execução.
+
+**Units**: `ExecStart` e `Environment` usam escape próprio de systemd
+(`"..."` com `\\` e `\"`), não shlex — caminhos com espaços funcionam.
+`OnCalendar` é validado via `systemd-analyze calendar` antes de sobrescrever
+units existentes.
 
 ## Testes
 

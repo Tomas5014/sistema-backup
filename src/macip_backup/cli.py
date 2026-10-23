@@ -136,7 +136,22 @@ def main() -> int:
             return 0
         if arguments.command in {"snapshots", "check", "restore", "forget"}:
             return _run_recovery_operation(task, arguments)
-        result = BackupOrchestrator(ResticAdapter()).execute(task)
+        from .agent import (
+            acquire_task_lock,
+            install_cancel_handlers,
+            restore_signal_handlers,
+        )
+
+        lock_file = acquire_task_lock(task.id)
+        try:
+            adapter = ResticAdapter()
+            previous_handlers = install_cancel_handlers(adapter)
+            try:
+                result = BackupOrchestrator(adapter).execute(task)
+            finally:
+                restore_signal_handlers(previous_handlers)
+        finally:
+            lock_file.close()
         print(json.dumps(result.as_dict(), ensure_ascii=False))
         return 0 if result.status is ExecutionStatus.SUCCESS else 2
     except (ConfigurationError, ResticError, OSError, json.JSONDecodeError) as error:

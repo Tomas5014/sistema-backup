@@ -697,3 +697,54 @@ verificados após migração. Suíte: **108 testes** — 90 aprovados,
   (SFTP/SMB/S3/combinações — ambientes remotos não preparados).
 
 ---
+
+## 2026-10-23 — Consolidação systemd: exclusão por tarefa, cancelamento limpo e units escapadas
+
+Revisão do incremento 34d7f8e — quatro lacunas corrigidas.
+
+### 1. Exclusão de execução
+
+- O lock migrou de `<store>.lock` (por banco) para **flock por tarefa** em
+  `~/.local/state/macip-backup/locks/<task_id>.lock` — `run`, `agent` e o
+  service compartilham o mesmo arquivo; `--store` diferente não contorna.
+  `MACIP_LOCK_DIR` sobrescreve o diretório em testes.
+- Colisão real testada: `agent` em subprocesso (destino SFTP travado) +
+  `python -m macip_backup.cli run` da mesma tarefa → recusa imediata.
+
+### 2. Cancelamento
+
+- `ResticCancelledError` (ResticError → não-repetível por natureza) +
+  `adapter.cancel(motivo)`: registra o motivo e encerra o grupo de
+  processos com SIGTERM → espera limitada → SIGKILL (reusa a escalada já
+  homologada nos timeouts). Handler de sinal sem locks — atribuições
+  atômicas sob a GIL (handler roda na main thread; lock congelaria).
+- Janela Popen→registro coberta: `_run` re-verifica `cancel_reason` após
+  registrar o processo e limpa ali mesmo.
+- `mark_interrupted` só acontece depois que `execute()` retorna — ou
+  seja, após o encerramento confirmado. `executions.interrupt_detail`
+  (v3) registra o sinal e eventual `cancel_cleanup_error`.
+- Migração v2→v3: `ALTER TABLE executions ADD COLUMN interrupt_detail`.
+- Lock permanece adquirido durante toda a limpeza (finally no fim).
+- Teste real sem cgroup: `agent` em subprocesso, `SIGTERM` só no PID →
+  grupo restic+ssh extinto (verificado por pgrep), execução `interrupted`
+  com `sinal 15`, e `run_task` seguinte adquire o lock e conclui.
+
+### 3. Inicialização
+
+- `store_path.parent.mkdir` antes de abrir o lock; se `ExecutionStore`
+  falhar, o lock é liberado imediatamente.
+- Teste de primeira execução com diretórios inexistentes.
+
+### 4. Units
+
+- `_unit_value`/`_escape_unit`: escape próprio de systemd (`"..."` com
+  `\\` e `\"`) em argumentos de ExecStart e Environment — não shlex.
+- `systemd-analyze calendar` valida `OnCalendar` antes de sobrescrever
+  units existentes (inválida → erro, units intactas).
+- Homologação real: service com `dir com espaços/` nos caminhos de
+  config e store executou com sucesso — argumentos recebidos exatos.
+
+Suíte: **122 testes** — 104 aprovados, 0 falhos, 18 ignorados
+(SFTP/SMB/S3/combinações — ambientes remotos não preparados).
+
+---

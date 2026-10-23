@@ -34,7 +34,30 @@ from macip_backup.models import (
 from macip_backup.orchestrator import ExecutionStatus
 from macip_backup.restic import ResticAdapter, ResticError
 from macip_backup.store import ExecutionStore
+from macip_backup.models import ConfigurationError
 from macip_backup.systemd import install_schedule, uninstall_schedule
+
+
+def _lock_config(task_id: str, root: Path | None = None) -> dict[str, object]:
+    root = root or Path("/tmp")
+    return {
+        "id": task_id,
+        "name": "Lock",
+        "client": {"id": "c", "name": "c"},
+        "device_id": "d",
+        "sources": [str(root / "docs")],
+        "exclusions": [],
+        "compression": "auto",
+        "destinations": [
+            {
+                "id": "local",
+                "name": "Local",
+                "kind": "local",
+                "repository": str(root / "repo-lock"),
+                "password_environment": "X",
+            }
+        ],
+    }
 
 
 def _task(task_id: str = "task-systemd") -> TaskSpec:
@@ -64,8 +87,15 @@ class UnitGenerationTests(unittest.TestCase):
         self.unit_dir = Path(self.temp_dir.name) / "units"
         self.store_path = Path(self.temp_dir.name) / "agent.db"
         self.config_path = Path(self.temp_dir.name) / "tarefa.json"
+        self.lock_dir = Path(self.temp_dir.name) / "locks"
+        self._previous_lock_env = os.environ.get("MACIP_LOCK_DIR")
+        os.environ["MACIP_LOCK_DIR"] = str(self.lock_dir)
 
     def tearDown(self) -> None:
+        if self._previous_lock_env is None:
+            os.environ.pop("MACIP_LOCK_DIR", None)
+        else:
+            os.environ["MACIP_LOCK_DIR"] = self._previous_lock_env
         self.temp_dir.cleanup()
 
     def _install(self, enable: bool = False) -> dict[str, str]:
@@ -83,14 +113,39 @@ class UnitGenerationTests(unittest.TestCase):
         timer = Path(result["timer"]).read_text()
         self.assertIn("Type=oneshot", service)
         self.assertIn(
-            f"-m macip_backup.cli agent {self.config_path.resolve()}",
+            f'agent "{self.config_path.resolve()}"',
             service,
         )
-        self.assertIn(f"--store {self.store_path.resolve()}", service)
+        self.assertIn(f'--store "{self.store_path.resolve()}"', service)
         self.assertIn("EnvironmentFile=-%h/.config/macip-backup/agent.env", service)
         self.assertIn("OnCalendar=daily", timer)
         self.assertIn("Persistent=true", timer)
         self.assertIn("WantedBy=timers.target", timer)
+
+    def test_paths_with_spaces_are_escaped(self) -> None:
+        spaced = Path(self.temp_dir.name) / "dir com espaços"
+        spaced.mkdir()
+        config = spaced / "tarefa backup.json"
+        config.write_text("{}")
+        store = spaced / "agent backup.db"
+        with patch(
+            "macip_backup.systemd.unit_directory", return_value=self.unit_dir
+        ):
+            result = install_schedule(_task(), config, store, "daily")
+        service = Path(result["service"]).read_text()
+        self.assertIn(f'agent "{config.resolve()}"', service)
+        self.assertIn(f'--store "{store.resolve()}"', service)
+
+    def test_invalid_calendar_does_not_touch_existing_units(self) -> None:
+        result = self._install()
+        original = Path(result["timer"]).read_text()
+        with patch(
+            "macip_backup.systemd.unit_directory", return_value=self.unit_dir
+        ), self.assertRaisesRegex(ConfigurationError, "OnCalendar"):
+            install_schedule(
+                _task(), self.config_path, self.store_path, "isto nao eh calendario"
+            )
+        self.assertEqual(Path(result["timer"]).read_text(), original)
 
     def test_uninstall_removes_units(self) -> None:
         with patch(
@@ -102,33 +157,28 @@ class UnitGenerationTests(unittest.TestCase):
         self.assertEqual(len(result["removed"]), 2)
         self.assertFalse((self.unit_dir / "macip-backup-agent-task-systemd.service").exists())
 
+    def test_first_run_creates_state_directories(self) -> None:
+        """Store em diretório inexistente: lock e DB criados na ordem."""
+        deep_store = Path(self.temp_dir.name) / "a" / "b" / "c" / "agent.db"
+        (Path(self.temp_dir.name) / "docs").mkdir()
+        self.config_path.write_text(
+            json.dumps(_lock_config("task-lock", Path(self.temp_dir.name)))
+        )
+        result = run_task(self.config_path, deep_store)
+        self.assertTrue(deep_store.exists())
+        self.assertTrue((self.lock_dir / "task-lock.lock").exists())
+
     def test_concurrent_execution_fails_fast_on_lock(self) -> None:
-        """flock impede duas execuções — CLI e service usam o mesmo lock."""
-        store_path = self.store_path
-        config = {
-            "id": "task-lock",
-            "name": "Lock",
-            "client": {"id": "c", "name": "c"},
-            "device_id": "d",
-            "sources": ["/tmp"],
-            "exclusions": [],
-            "compression": "auto",
-            "destinations": [
-                {
-                    "id": "local",
-                    "name": "Local",
-                    "kind": "local",
-                    "repository": "/tmp/repo-lock",
-                    "password_environment": "X",
-                }
-            ],
-        }
-        self.config_path.write_text(json.dumps(config))
-        lock_file = Path(f"{store_path}.lock").open("a")
+        """flock por tarefa — compartilhado por agent, run e service."""
+        self.config_path.write_text(
+            json.dumps(_lock_config("task-lock", Path(self.temp_dir.name)))
+        )
+        self.lock_dir.mkdir(parents=True, exist_ok=True)
+        lock_file = (self.lock_dir / "task-lock.lock").open("a")
         try:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             with self.assertRaisesRegex(ResticError, "em andamento"):
-                run_task(self.config_path, store_path)
+                run_task(self.config_path, self.store_path)
         finally:
             lock_file.close()
 
@@ -301,6 +351,31 @@ class SystemdUserIntegrationTests(unittest.TestCase):
         self.assertEqual(len(restored_files), 1)
         self.assertEqual(restored_files[0].read_text(), "dados via systemd\n")
 
+    def test_service_with_spaced_paths_receives_correct_arguments(self) -> None:
+        """ExecStart escapado: o service recebe exatamente os caminhos gerados."""
+        spaced = self.root / "dir com espaços"
+        spaced.mkdir()
+        config = spaced / "tarefa backup.json"
+        config.write_text(self.config_path.read_text())
+        store = spaced / "agent backup.db"
+        install_schedule(
+            TaskSpec.from_dict(json.loads(config.read_text())),
+            config,
+            store,
+            "daily",
+        )
+        self._systemctl("daemon-reload")
+        completed = self._systemctl("start", f"{self.unit_name}.service")
+        self.assertEqual(
+            completed.returncode, 0, f"{completed.stdout}{completed.stderr}"
+        )
+        store_obj = ExecutionStore(store)
+        try:
+            entries = store_obj.history(self.task_id)
+        finally:
+            store_obj.close()
+        self.assertEqual(entries[0]["status"], "success")
+
     def test_timer_fires_execution_automatically(self) -> None:
         install_schedule(
             TaskSpec.from_dict(json.loads(self.config_path.read_text())),
@@ -378,9 +453,9 @@ class SystemdUserIntegrationTests(unittest.TestCase):
             deadline = time.monotonic() + 60
             while time.monotonic() < deadline:
                 try:
-                    row = sqlite3.connect(self.db_path).execute(
-                        "SELECT status FROM attempts"
-                    ).fetchone()
+                    connection = sqlite3.connect(self.db_path)
+                    row = connection.execute("SELECT status FROM attempts").fetchone()
+                    connection.close()
                 except sqlite3.OperationalError:
                     row = None
                 if row:
@@ -401,11 +476,203 @@ class SystemdUserIntegrationTests(unittest.TestCase):
 
             entries = self._history()
             self.assertEqual(entries[0]["status"], "interrupted")
-            self.assertEqual(
-                entries[0]["destinations"][0]["attempts"][0]["status"],
-                "interrupted",
-            )
+            attempt = entries[0]["destinations"][0]["attempts"][0]
+            self.assertEqual(attempt["status"], "failed")
+            self.assertIn("sinal 15", attempt["error"] or "")
         finally:
             listener.close()
             for connection in held:
                 connection.close()
+
+
+@unittest.skipUnless(
+    shutil.which("restic") and shutil.which("ssh-keygen") and shutil.which("ssh"),
+    "restic/ssh-keygen/ssh ausentes",
+)
+class AgentProcessTests(unittest.TestCase):
+    """Colisão e cancelamento no processo agente real — sem cgroup do systemd."""
+
+    def setUp(self) -> None:
+        self.suffix = secrets.token_hex(4)
+        self.task_id = f"task-cx-{self.suffix}"
+        self.temp_dir = tempfile.TemporaryDirectory(prefix=".test-cx-", dir=Path.cwd())
+        self.root = Path(self.temp_dir.name)
+        self.source = self.root / "source"
+        self.source.mkdir(parents=True)
+        (self.source / "f.txt").write_text("dados\n")
+        self.db_path = self.root / "agent.db"
+        self.config_path = self.root / "tarefa.json"
+        self.lock_dir = self.root / "locks"
+        self.password = secrets.token_urlsafe(24)
+
+        identity = self.root / "id_teste"
+        subprocess.run(
+            ["ssh-keygen", "-t", "ed25519", "-f", str(identity), "-N", "", "-q"],
+            check=True,
+        )
+        public_key = identity.with_suffix(".pub").read_text().split()[1]
+        known_hosts = self.root / "known_hosts"
+        known_hosts.write_text(f"127.0.0.1 ssh-ed25519 {public_key}\n")
+        self.identity = identity
+        self.known_hosts = known_hosts
+
+        self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.listener.bind(("127.0.0.1", 0))
+        self.listener.listen()
+        self.held: list[socket.socket] = []
+        threading.Thread(target=self._never_respond, daemon=True).start()
+
+    def tearDown(self) -> None:
+        self.listener.close()
+        for connection in self.held:
+            connection.close()
+        self.temp_dir.cleanup()
+
+    def _never_respond(self) -> None:
+        try:
+            while True:
+                self.held.append(self.listener.accept()[0])
+        except OSError:
+            return
+
+    def _write_hung_config(self) -> None:
+        self.config_path.write_text(
+            json.dumps(
+                {
+                    "id": self.task_id,
+                    "name": "Concorrência",
+                    "client": {"id": "client-cx", "name": "Cliente"},
+                    "device_id": "device-cx",
+                    "sources": [str(self.source)],
+                    "exclusions": [],
+                    "compression": "auto",
+                    "timeouts": {"initialize_seconds": 120},
+                    "destinations": [
+                        {
+                            "id": "hung",
+                            "name": "Travado",
+                            "kind": "sftp",
+                            "password_environment": "MACIP_CX_PASSWORD",
+                            "sftp": {
+                                "host": "127.0.0.1",
+                                "port": self.listener.getsockname()[1],
+                                "user": "backup",
+                                "remote_path": f"backups/{self.task_id}",
+                                "identity_file": str(self.identity),
+                                "known_hosts_file": str(self.known_hosts),
+                                "connect_timeout_seconds": 5,
+                            },
+                        }
+                    ],
+                }
+            )
+        )
+
+    def _env(self) -> dict[str, str]:
+        return {
+            "PYTHONPATH": str(Path(__file__).parents[1] / "src"),
+            "PATH": os.environ.get("PATH", ""),
+            "HOME": os.environ.get("HOME", ""),
+            "MACIP_LOCK_DIR": str(self.lock_dir),
+            "MACIP_CX_PASSWORD": self.password,
+        }
+
+    def _start_agent(self) -> subprocess.Popen:
+        return subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import sys; from pathlib import Path; "
+                "from macip_backup.agent import run_task; "
+                "run_task(Path(sys.argv[1]), Path(sys.argv[2]))",
+                str(self.config_path),
+                str(self.db_path),
+            ],
+            env=self._env(),
+        )
+
+    def _wait_attempt_running(self, process: subprocess.Popen) -> bool:
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            try:
+                connection = sqlite3.connect(self.db_path)
+                row = connection.execute("SELECT status FROM attempts").fetchone()
+                connection.close()
+            except sqlite3.OperationalError:
+                row = None
+            if row:
+                return True
+            if process.poll() is not None:
+                return False
+            time.sleep(0.05)
+        return False
+
+    def test_cli_run_collides_with_agent_on_same_task(self) -> None:
+        """Colisão real: agent rodando → `run` da mesma tarefa recusa."""
+        self._write_hung_config()
+        agent = self._start_agent()
+        try:
+            self.assertTrue(self._wait_attempt_running(agent))
+
+            run = subprocess.run(
+                [sys.executable, "-m", "macip_backup.cli", "run", str(self.config_path)],
+                env=self._env(),
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            self.assertNotEqual(run.returncode, 0)
+            self.assertIn("em andamento", run.stderr + run.stdout)
+        finally:
+            if agent.poll() is None:
+                agent.kill()
+            agent.wait(timeout=30)
+
+    def test_sigterm_only_to_agent_pid_cleans_restic_group(self) -> None:
+        """SIGTERM só no PID do agente: restic+ssh encerrados, lock liberado
+        somente após a limpeza, execução marcada interrupted."""
+        self._write_hung_config()
+        agent = self._start_agent()
+        self.assertTrue(self._wait_attempt_running(agent))
+
+        os.kill(agent.pid, signal.SIGTERM)  # só o PID — não o grupo
+        agent.wait(timeout=60)
+        self.assertIsNotNone(agent.returncode)
+
+        # Nenhum restic/ssh deste destino ficou vivo
+        leftovers = subprocess.run(
+            ["pgrep", "-f", f"backups/{self.task_id}"],
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        self.assertEqual(leftovers, "", "descendentes restic/ssh sobreviveram")
+
+        # Histórico: execução interrupted com motivo
+        store = ExecutionStore(self.db_path)
+        try:
+            entries = store.history(self.task_id)
+        finally:
+            store.close()
+        self.assertEqual(entries[0]["status"], "interrupted")
+        self.assertIn("sinal 15", entries[0]["interrupt_detail"] or "")
+
+        # Lock liberado só depois da limpeza — nova execução inicia
+        store_path = self.root / "agent2.db"
+        self._write_local_success_config()
+        with patch.dict(os.environ, {"MACIP_CX_PASSWORD": self.password}):
+            result = run_task(self.config_path, store_path)
+        self.assertEqual(result.status, ExecutionStatus.SUCCESS)
+
+    def _write_local_success_config(self) -> None:
+        config = json.loads(self.config_path.read_text())
+        config["destinations"] = [
+            {
+                "id": "local",
+                "name": "Local",
+                "kind": "local",
+                "repository": str(self.root / "repo-ok"),
+                "password_environment": "MACIP_CX_PASSWORD",
+            }
+        ]
+        config["id"] = f"{self.task_id}-novo"
+        self.config_path.write_text(json.dumps(config))
