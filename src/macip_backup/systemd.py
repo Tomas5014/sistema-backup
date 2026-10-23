@@ -112,6 +112,11 @@ def install_schedule(
             f"{_unit_value(config_path)} --store {_unit_value(store_path)}"
         )
         pythonpath_line = ""
+        install_root = os.environ.get("MACIP_HOME")
+        if install_root is None:
+            # sys.executable = <MACIP_HOME>/current/bin/python — sem
+            # resolve(): o venv é symlink para o python do sistema.
+            install_root = str(Path(sys.executable).parents[2])
     else:
         src_root = Path(__file__).resolve().parents[1]
         exec_line = (
@@ -119,10 +124,18 @@ def install_schedule(
             f"{_unit_value(config_path)} --store {_unit_value(store_path)}"
         )
         pythonpath_line = f'Environment="PYTHONPATH={_escape_unit(src_root)}"\n'
+        install_root = str(src_root)
+
+    config_dir = os.environ.get("MACIP_CONFIG")
+    env_file = (
+        f"EnvironmentFile=-{_unit_value(Path(config_dir) / 'agent.env')}"
+        if config_dir
+        else "EnvironmentFile=-%h/.config/macip-backup/agent.env"
+    )
 
     service_path = unit_dir / f"{name}.service"
     service_path.write_text(
-        f"""# macip-backup: unidade gerida pela instalação
+        f"""# macip-backup: install={install_root}
 [Unit]
 Description=MAC IP Backup agent — tarefa {_unit_value(task.id)}
 After=network-online.target
@@ -130,14 +143,14 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-{pythonpath_line}EnvironmentFile=-%h/.config/macip-backup/agent.env
+{pythonpath_line}{env_file}
 {exec_line}
 """,
         encoding="utf-8",
     )
     timer_path = unit_dir / f"{name}.timer"
     timer_path.write_text(
-        f"""# macip-backup: unidade gerida pela instalação
+        f"""# macip-backup: install={install_root}
 [Unit]
 Description=Agendamento do backup {task.id}
 

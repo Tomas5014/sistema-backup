@@ -64,6 +64,15 @@ mkdir -p "$LOCKS"
 exec 9>"$LOCKS/maintenance.lock"
 flock -n 9 || die "execução ou outra manutenção em andamento — tente mais tarde"
 
+# ---- propriedade do binário: nunca sobrescrever executável alheio ----
+BIN_FILE="$MACIP_BIN/macip-backup"
+if [ -e "$BIN_FILE" ]; then
+  if ! (grep -q "macip_backup.cli" "$BIN_FILE" 2>/dev/null \
+        && grep -qF "$MACIP_HOME" "$BIN_FILE" 2>/dev/null); then
+    die "$BIN_FILE existe e não pertence a esta instalação — conteúdo preservado"
+  fi
+fi
+
 # ---- identidade do artefato ------------------------------------------
 base="$(basename "$WHEEL")"
 case "$base" in
@@ -134,12 +143,19 @@ fi
 # ---- ativação atômica por último -------------------------------------
 ln -sfn "$RELEASE" "$MACIP_HOME/.current.tmp"
 mv -T "$MACIP_HOME/.current.tmp" "$CURRENT"
-cat > "$MACIP_BIN/macip-backup" <<EOF
+# Launcher próprio: propaga o layout configurado para run/agent/service
+# — todos resolvem os mesmos caminhos, inclusive locks de manutenção.
+cat > "$BIN_FILE" <<EOF
 #!/bin/sh
 # macip-backup — launcher instalado por deploy/install.sh
+MACIP_HOME="$MACIP_HOME"; export MACIP_HOME
+MACIP_CONFIG="$MACIP_CONFIG"; export MACIP_CONFIG
+MACIP_STATE="$MACIP_STATE"; export MACIP_STATE
+MACIP_CACHE="$MACIP_CACHE"; export MACIP_CACHE
+MACIP_BIN="$MACIP_BIN"; export MACIP_BIN
 exec "$CURRENT/bin/python" -m macip_backup.cli "\$@"
 EOF
-chmod 755 "$MACIP_BIN/macip-backup"
+chmod 755 "$BIN_FILE"
 
 # ---- manifesto com identidade completa do artefato -------------------
 "$RELEASE/bin/python" - "$WHEEL" "$VERSION" "$SHA256" "$COMMIT" "$MACIP_HOME/install.json" <<'PY'

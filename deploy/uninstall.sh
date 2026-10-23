@@ -32,14 +32,15 @@ mkdir -p "$LOCKS"
 exec 9>"$LOCKS/maintenance.lock"
 flock -n 9 || die "execução ou manutenção em andamento — tente mais tarde"
 
-# ---- units: só com marcador próprio; falha ao desativar ABORTA ------
+# ---- units: só com identidade DESTA instalação; falha ABORTA --------
+marker="# macip-backup: install=$MACIP_HOME"
 declare -a OUR_UNITS=()
 for unit in "$UNIT_DIR"/macip-backup-*.timer "$UNIT_DIR"/macip-backup-*.service; do
   [ -e "$unit" ] || continue
-  if grep -q '^# macip-backup:' "$unit" 2>/dev/null; then
+  if grep -qF "$marker" "$unit" 2>/dev/null; then
     OUR_UNITS+=("$unit")
   else
-    PRESERVED+=("unit sem marcador próprio: $unit")
+    PRESERVED+=("unit de outra instalação: $unit")
   fi
 done
 for unit in "${OUR_UNITS[@]}"; do

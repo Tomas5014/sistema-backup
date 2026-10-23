@@ -971,3 +971,43 @@ Suíte: **143 testes** — 125 aprovados, 0 falhos, 18 ignorados
 (SFTP/SMB/S3/combinações — ambientes remotos não preparados).
 
 ---
+
+## 2026-10-23 — Identidade de caminhos e propriedade da instalação
+
+### 1. Layout consistente
+
+- `task_lock_directory()`/`cache_directory()` passam a resolver
+  `MACIP_STATE`/`MACIP_CACHE` — as mesmas variáveis do instalador.
+- O launcher exporta `MACIP_HOME`, `MACIP_CONFIG`, `MACIP_STATE`,
+  `MACIP_CACHE`, `MACIP_BIN` — run/agent/service resolvem exatamente
+  os mesmos caminhos; layout personalizado não contorna o lock.
+- `EnvironmentFile` da unit usa `MACIP_CONFIG` quando definido
+  (escapado); senão `%h/.config/macip-backup/agent.env`.
+- Testes: manutenção EX em `MACIP_STATE` customizado recusa `run`;
+  executor SH no mesmo layout recusa `install.sh`.
+
+### 2. Propriedade dos arquivos
+
+- Antes de escrever `macip-backup`, o instalador exige que o arquivo
+  existente pertença a ESTA instalação (conteúdo referencia
+  `$MACIP_HOME` + `macip_backup.cli`); executável alheio → recusa,
+  byte a byte intacto e nada criado.
+- Units ganham identidade por instalação: `# macip-backup:
+  install=<MACIP_HOME>` (ou `<src_root>` em dev). O desinstalador só
+  remove units cuja identidade bate com o `$MACIP_HOME` atual —
+  units de OUTRA instalação MAC IP são preservadas, assim como
+  executáveis/units sem marcador confirmável.
+- `install_root` derivado de `sys.executable` sem `resolve()` (venv é
+  symlink do python do sistema) e sem avaliar o fallback ansiosamente.
+
+### Homologação desta sessão (isolada)
+
+18 testes em `tests/test_install.py`: executável alheio preservado
+byte a byte; exclusão de manutenção em layout customizado nos dois
+sentidos; units de outra instalação preservadas; reinstalação
+idempotente mantida.
+
+Suíte: **146 testes** — 128 aprovados, 0 falhos, 18 ignorados
+(SFTP/SMB/S3/combinações — ambientes remotos não preparados).
+
+---

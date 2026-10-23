@@ -421,7 +421,9 @@ class InstallFlowTests(unittest.TestCase):
         ).read_text()
         self.assertIn(str(self.bin), service)          # ExecStart = launcher
         self.assertNotIn("PYTHONPATH", service)         # sem pin de release
-        self.assertIn("# macip-backup:", service)       # marcador próprio
+        self.assertIn(
+            f"# macip-backup: install={self.macip_home}", service
+        )                                              # identidade persistida
 
         before = self._run_cli("--version")
         self.assertIn("0.2.0", before.stdout)
@@ -443,15 +445,23 @@ class InstallFlowTests(unittest.TestCase):
         unit_dir.mkdir(parents=True)
         foreign = unit_dir / "macip-backup-alien.timer"
         foreign.write_text("[Timer]\nOnCalendar=daily\n")  # sem marcador
-        ours = unit_dir / "macip-backup-task-inst.timer"
+        other_install = unit_dir / "macip-backup-agent-outro.timer"
+        other_install.write_text(
+            "# macip-backup: install=/outra/instalacao\n[Timer]\nOnCalendar=daily\n"
+        )
+        ours = unit_dir / "macip-backup-agent-task-inst.timer"
         ours.write_text(
-            "# macip-backup: unidade gerida pela instalação\n[Timer]\nOnCalendar=daily\n"
+            f"# macip-backup: install={self.macip_home}\n"
+            "[Timer]\nOnCalendar=daily\n"
         )
         self.env["MACIP_SYSTEMCTL"] = str(self._stub_systemctl(0))
 
         removed = self._uninstall()
         self.assertEqual(removed.returncode, 0, removed.stderr)
         self.assertTrue(foreign.exists())
+        self.assertTrue(
+            other_install.exists(), "unit de OUTRA instalação MAC IP preservada"
+        )
         self.assertFalse(ours.exists())
         self.assertIn("macip-backup-alien.timer", removed.stdout)
 
@@ -462,7 +472,8 @@ class InstallFlowTests(unittest.TestCase):
         unit_dir.mkdir(parents=True)
         ours = unit_dir / "macip-backup-task-inst.service"
         ours.write_text(
-            "# macip-backup: unidade gerida pela instalação\n[Service]\nType=oneshot\n"
+            f"# macip-backup: install={self.macip_home}\n"
+            "[Service]\nType=oneshot\n"
         )
         self.env["MACIP_SYSTEMCTL"] = str(self._stub_systemctl(1))
 
@@ -478,3 +489,59 @@ class InstallFlowTests(unittest.TestCase):
         stub.write_text(f"#!/bin/sh\nexit {returncode}\n")
         stub.chmod(0o755)
         return stub
+
+    def test_foreign_executable_at_bin_path_refused_and_preserved(self) -> None:
+        """Executável alheio em ~/.local/bin/macip-backup → instalação
+        recusa; conteúdo byte a byte intacto e nada criado."""
+        bin_dir = self.home / ".local" / "bin"
+        bin_dir.mkdir(parents=True)
+        foreign = bin_dir / "macip-backup"
+        payload = b"#!/bin/sh\necho programa-alheio\n"
+        foreign.write_bytes(payload)
+        foreign.chmod(0o755)
+
+        refused = self._install()
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("não pertence", refused.stderr)
+        self.assertEqual(foreign.read_bytes(), payload)
+        self.assertFalse((self.macip_home / "current").exists())
+
+    def test_custom_layout_keeps_maintenance_exclusion(self) -> None:
+        """MACIP_STATE personalizado: o lock de manutenção mora no
+        layout configurado — propagado ao launcher e ao agente."""
+        custom_state = self.root / "estado-custom"
+        self.env["MACIP_STATE"] = str(custom_state)
+        self.env["MACIP_CONFIG"] = str(self.root / "config-custom")
+        self.env["MACIP_CACHE"] = str(self.root / "cache-custom")
+        self.assertEqual(self._install().returncode, 0)
+
+        _, config = self._write_task()
+        maintenance = custom_state / "locks" / "maintenance.lock"
+        lock_file = maintenance.open("a")
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            refused = self._run_cli("run", str(config))
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertIn("manutenção", refused.stderr + refused.stdout)
+        finally:
+            lock_file.close()
+
+        # Fora da manutenção: run funciona no mesmo layout customizado.
+        ok = self._run_cli("run", str(config))
+        self.assertEqual(ok.returncode, 0, ok.stderr + ok.stdout)
+
+    def test_install_and_agent_use_same_locks_in_custom_layout(self) -> None:
+        """Executor SH em MACIP_STATE/locks/maintenance.lock bloqueia
+        install.sh — prova que os dois resolvem o mesmo caminho."""
+        custom_state = self.root / "estado-custom"
+        self.env["MACIP_STATE"] = str(custom_state)
+        self.assertEqual(self._install().returncode, 0)
+
+        lock_file = (custom_state / "locks" / "maintenance.lock").open("a")
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+            refused = self._install()
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertIn("em andamento", refused.stderr)
+        finally:
+            lock_file.close()

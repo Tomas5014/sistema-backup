@@ -56,16 +56,20 @@ def _now() -> str:
 
 
 def task_lock_directory() -> Path:
-    """Diretório fixo de locks por tarefa — sobrescrevível em testes."""
+    """Locks por tarefa — mesma regra do instalador: MACIP_STATE/locks
+    (propagado pelo launcher) ou o default do usuário."""
     override = os.environ.get("MACIP_LOCK_DIR")
     if override:
         return Path(override)
+    state = os.environ.get("MACIP_STATE")
+    if state:
+        return Path(state) / "locks"
     return Path.home() / ".local" / "state" / "macip-backup" / "locks"
 
 
 def cache_directory() -> Path:
-    """Cache restic por usuário — MACIP_CACHE_DIR ou ~/.cache/macip-backup."""
-    override = os.environ.get("MACIP_CACHE_DIR")
+    """Cache restic por usuário — MACIP_CACHE (mesmo do instalador)."""
+    override = os.environ.get("MACIP_CACHE")
     if override:
         return Path(override)
     return Path.home() / ".cache" / "macip-backup"
