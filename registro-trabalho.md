@@ -794,3 +794,44 @@ Suíte: **126 testes** — 108 aprovados, 0 falhos, 18 ignorados
 (SFTP/SMB/S3/combinações — ambientes remotos não preparados).
 
 ---
+
+## 2026-10-23 — Cancelamento durante o backoff entre tentativas
+
+Caso reproduzido: falha transitória → espera entre tentativas →
+`adapter.cancel()` chega na espera → o loop só saía DEPOIS de dormir o
+backoff inteiro e ainda chamava `initialize` da próxima tentativa.
+
+### Correção
+
+- `_sleep_until_cancelled`: a espera dorme em fatias de ≤0,1s e retorna
+  assim que `adapter.cancelled` vira verdade — resposta limitada e
+  documentada. Não usa `threading.Event`: `Event.set()` adquire um
+  cond-lock e o handler de sinal roda na main thread — poderia
+  congelar se a thread segurasse o lock (deadlock). Poll em fatias é
+  a alternativa sem locks.
+- Verificação de cancelamento também no TOPO do loop — antes de
+  registrar/iniciar qualquer nova tentativa, inclusive logo após a
+  espera.
+- Tentativa concluída e snapshot (quando existir) preservados; destino
+  finaliza `interrupted` via `_finalize_destination`; destinos seguintes
+  nem iniciados (`_cancelled_destination`).
+
+### Teste determinístico
+
+`backoff_seconds=600`, falha transitória na tentativa 1, cancel logo
+após entrar na espera (sincronizado por hook em
+`_sleep_until_cancelled`):
+
+- saída em ~0,1s (não 600s);
+- exatamente 1 tentativa e nenhum initialize/backup extra;
+- destino seguinte `interrupted` sem tentativas;
+- execução `interrupted` — inclusive no histórico persistido com
+  recorder real.
+
+`ExecutionStore` ganhou `check_same_thread` opcional para o cenário
+multi-thread do teste.
+
+Suíte: **127 testes** — 109 aprovados, 0 falhos, 18 ignorados
+(SFTP/SMB/S3/combinações — ambientes remotos não preparados).
+
+---

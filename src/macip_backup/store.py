@@ -82,10 +82,12 @@ CREATE INDEX IF NOT EXISTS idx_executions_task ON executions(task_id, started_at
 
 
 class ExecutionStore:
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, check_same_thread: bool = True) -> None:
         self._path = Path(path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._connection = sqlite3.connect(str(self._path))
+        self._connection = sqlite3.connect(
+            str(self._path), check_same_thread=check_same_thread
+        )
         try:
             self._migrate()
             self._connection.executescript(_SCHEMA)

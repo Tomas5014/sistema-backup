@@ -168,6 +168,11 @@ def _is_retryable_command_error(error: ResticCommandError) -> bool:
     return any(pattern in detail for pattern in _TRANSIENT_COMMAND_PATTERNS)
 
 
+# Latência máxima documentada da resposta a cancelamento durante o
+# backoff entre tentativas.
+_CANCEL_POLL_SECONDS = 0.1
+
+
 class BackupOrchestrator:
     def __init__(self, adapter: ResticAdapter, logger: StructuredLogger | None = None) -> None:
         self._adapter = adapter
@@ -227,6 +232,22 @@ class BackupOrchestrator:
     def _is_cancelled(self) -> bool:
         return bool(getattr(self._adapter, "cancelled", False))
 
+    def _sleep_until_cancelled(self, seconds: int) -> bool:
+        """Backoff sensível a cancelamento — resposta em ≤0.1s.
+
+        Não usa threading.Event: o handler de sinal roda na main thread e
+        `Event.set()` adquire um cond-lock que pode congelar o handler.
+        Poll em fatias é a alternativa sem locks.
+        """
+        deadline = monotonic() + seconds
+        while True:
+            if self._is_cancelled():
+                return True
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                return False
+            sleep(min(remaining, _CANCEL_POLL_SECONDS))
+
     def _cancelled_destination(
         self,
         execution_id: str,
@@ -268,6 +289,10 @@ class BackupOrchestrator:
         attempts: list[AttemptResult] = []
         summary: BackupSummary | None = None
         for attempt in range(1, task.retry.attempts + 1):
+            # Cancelamento é conferido ANTES de qualquer nova tentativa —
+            # inclusive logo após o backoff (evita um initialize espúrio).
+            if self._is_cancelled():
+                break
             attempt_result, summary = self._attempt_destination(
                 task,
                 execution_id,
@@ -298,7 +323,8 @@ class BackupOrchestrator:
                 backoff_seconds=task.retry.backoff_seconds,
                 previous_error=attempt_result.error,
             )
-            sleep(task.retry.backoff_seconds)
+            if self._sleep_until_cancelled(task.retry.backoff_seconds):
+                break
         final_result = self._finalize_destination(destination, attempts)
         if recorder is not None:
             recorder.destination_finished(execution_id, final_result)

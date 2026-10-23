@@ -4,6 +4,8 @@ import io
 import os
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -24,6 +26,7 @@ from macip_backup.models import (
 )
 from macip_backup.credentials import CredentialError
 from macip_backup.orchestrator import BackupOrchestrator, DestinationStatus, ExecutionStatus
+from macip_backup.store import ExecutionStore
 from macip_backup.restic import (
     BackupSummary,
     ResticCommandError,
@@ -41,6 +44,18 @@ class ControlledAdapter:
         self.failures = failures or {}
         self.failures_once = failures_once or {}
         self.calls: list[tuple] = []
+        self._cancelled_reason: str | None = None
+
+    @property
+    def cancelled(self) -> bool:
+        return self._cancelled_reason is not None
+
+    @property
+    def cancel_reason(self) -> str | None:
+        return self._cancelled_reason
+
+    def cancel(self, reason: str) -> None:
+        self._cancelled_reason = reason
 
     def initialize(self, destination: Destination, _: str, timeout_seconds: int) -> None:
         self.calls.append((destination.id, "init", timeout_seconds))
@@ -418,6 +433,115 @@ class BackupOrchestratorUnitTests(unittest.TestCase):
         self.assertEqual(len(backup_calls), 1)
         self.assertEqual(len(check_calls), 2)
         self.assertEqual(result.destinations[0].attempts[0].snapshot_id, "snapshot")
+
+    def test_cancel_during_backoff_stops_before_new_attempt(self) -> None:
+        """Backoff longo + cancel: saída rápida, 1 tentativa, sem novo
+        initialize — e destino seguinte nem é tocado."""
+        first, second = self._destinations()
+        adapter = ControlledAdapter(
+            failures_once={
+                (first.id, "backup"): ResticCommandError(
+                    "backup", 255, "connection refused"
+                )
+            }
+        )
+        task = self._task(
+            first, second, retry=RetryPolicy(attempts=3, backoff_seconds=600)
+        )
+        orchestrator = BackupOrchestrator(adapter, StructuredLogger(io.StringIO()))
+        sleeping = threading.Event()
+        original = BackupOrchestrator._sleep_until_cancelled
+
+        def probe(instance: BackupOrchestrator, seconds: int) -> bool:
+            sleeping.set()
+            return original(instance, seconds)
+
+        holder: list = []
+        with patch.object(
+            BackupOrchestrator, "_sleep_until_cancelled", probe
+        ):
+            thread = threading.Thread(
+                target=lambda: holder.append(
+                    orchestrator.execute(task, lambda _: "test-password")
+                ),
+                daemon=True,
+            )
+            started = time.monotonic()
+            thread.start()
+            self.assertTrue(sleeping.wait(10), "orquestrador não entrou no backoff")
+            adapter.cancel("sinal de teste")
+            thread.join(timeout=30)
+            elapsed = time.monotonic() - started
+
+        self.assertFalse(thread.is_alive())
+        self.assertLess(elapsed, 60, "backoff de 600s deve sair em ~0.1s")
+        result = holder[0]
+        self.assertEqual(result.status, ExecutionStatus.INTERRUPTED)
+
+        dest_first = result.destinations[0]
+        self.assertEqual(dest_first.status, DestinationStatus.INTERRUPTED)
+        self.assertEqual(len(dest_first.attempts), 1)
+        self.assertEqual(dest_first.attempts[0].status, DestinationStatus.FAILED)
+        self.assertTrue(dest_first.attempts[0].retryable)
+        self.assertIn("connection refused", dest_first.attempts[0].error or "")
+
+        dest_second = result.destinations[1]
+        self.assertEqual(dest_second.status, DestinationStatus.INTERRUPTED)
+        self.assertEqual(dest_second.attempts, ())
+
+        # Só a primeira tentativa rodou — nenhum initialize/backup extra.
+        operations = [call[1] for call in adapter.calls]
+        self.assertEqual(operations, ["init", "backup"])
+
+        # Histórico persistido idêntico via recorder real.
+        store = ExecutionStore(
+            self.root / "agent.db", check_same_thread=False
+        )
+        store.record_start(task, "exec-backoff", "2026-10-23T12:00:00+00:00")
+        adapter2 = ControlledAdapter(
+            failures_once={
+                (first.id, "backup"): ResticCommandError(
+                    "backup", 255, "connection refused"
+                )
+            }
+        )
+        orchestrator2 = BackupOrchestrator(
+            adapter2, StructuredLogger(io.StringIO())
+        )
+        sleeping2 = threading.Event()
+
+        def probe2(instance: BackupOrchestrator, seconds: int) -> bool:
+            sleeping2.set()
+            return original(instance, seconds)
+
+        with patch.object(
+            BackupOrchestrator, "_sleep_until_cancelled", probe2
+        ):
+            thread2 = threading.Thread(
+                target=lambda: holder.append(
+                    orchestrator2.execute(
+                        task, lambda _: "test-password", "exec-backoff",
+                        recorder=store,
+                    )
+                ),
+                daemon=True,
+            )
+            thread2.start()
+            self.assertTrue(sleeping2.wait(10))
+            adapter2.cancel("sinal de teste")
+            thread2.join(timeout=30)
+        self.assertFalse(thread2.is_alive())
+        store.mark_stale_interrupted(task.id, "2026-10-23T12:00:10+00:00")
+        entries = store.history(task.id)
+        store.close()
+
+        execution = entries[0]
+        self.assertEqual(execution["status"], "interrupted")
+        destinations = {d["destination_id"]: d for d in execution["destinations"]}
+        self.assertEqual(destinations[first.id]["status"], "interrupted")
+        self.assertEqual(len(destinations[first.id]["attempts"]), 1)
+        self.assertEqual(destinations[second.id]["status"], "interrupted")
+        self.assertEqual(destinations[second.id]["attempts"], [])
 
     def test_no_retention_policy_skips_forget(self) -> None:
         first, _ = self._destinations()
