@@ -280,7 +280,7 @@ class BackupOrchestratorUnitTests(unittest.TestCase):
         adapter = ControlledAdapter(
             failures_once={
                 (destination.id, "backup"): ResticCommandError(
-                    "backup", 1, "falha transitória"
+                    "backup", 255, "ssh: connect to host: Connection refused"
                 )
             }
         )
@@ -309,7 +309,7 @@ class BackupOrchestratorUnitTests(unittest.TestCase):
         adapter = ControlledAdapter(
             {
                 (destination.id, "backup"): ResticCommandError(
-                    "backup", 1, "sempre falha"
+                    "backup", 255, "ssh: connect to host: Connection refused"
                 )
             }
         )
@@ -324,7 +324,7 @@ class BackupOrchestratorUnitTests(unittest.TestCase):
             call for call in adapter.calls if call[:2] == (destination.id, "backup")
         ]
         self.assertEqual(len(backup_calls), 2)
-        self.assertIn("sempre falha", result.destinations[0].error or "")
+        self.assertIn("Connection refused", result.destinations[0].error or "")
 
     def test_non_retryable_failure_runs_single_attempt(self) -> None:
         destination = self._destinations()[0]
@@ -344,12 +344,61 @@ class BackupOrchestratorUnitTests(unittest.TestCase):
         self.assertEqual(len(backup_calls), 1)
         self.assertFalse(result.destinations[0].attempts[0].retryable)
 
+    def test_command_errors_classified_by_detail_patterns(self) -> None:
+        # Determinísticos (credencial rejeitada, host key, acesso negado e
+        # erros genéricos desconhecidos) não consomem tentativas.
+        for detail in (
+            "Fatal: wrong password or no key found",
+            "No ED25519 host key is known for 10.0.0.1",
+            "ssh: Permission denied (publickey)",
+            "AccessDenied: access denied",
+            "SignatureDoesNotMatch",
+            "erro genérico desconhecido qualquer",
+        ):
+            destination = self._destinations()[0]
+            adapter = ControlledAdapter(
+                {
+                    (destination.id, "backup"): ResticCommandError(
+                        "backup", 1, detail
+                    )
+                }
+            )
+            with self.subTest(detail=detail):
+                result = BackupOrchestrator(
+                    adapter, StructuredLogger(io.StringIO())
+                ).execute(
+                    self._task(destination, retry=RetryPolicy(attempts=3)),
+                    lambda _: "test-password",
+                )
+                self.assertEqual(result.status, ExecutionStatus.FAILED)
+                attempts = result.destinations[0].attempts
+                self.assertEqual(len(attempts), 1)
+                self.assertFalse(attempts[0].retryable)
+
+    def test_transient_command_error_consumes_retries(self) -> None:
+        destination = self._destinations()[0]
+        adapter = ControlledAdapter(
+            {
+                (destination.id, "backup"): ResticCommandError(
+                    "backup", 255, "ssh: connect to host: Connection timed out"
+                )
+            }
+        )
+
+        result = BackupOrchestrator(adapter, StructuredLogger(io.StringIO())).execute(
+            self._task(destination, retry=RetryPolicy(attempts=3)),
+            lambda _: "test-password",
+        )
+
+        self.assertEqual(result.status, ExecutionStatus.FAILED)
+        self.assertEqual(len(result.destinations[0].attempts), 3)
+
     def test_failure_after_backup_resumes_without_new_snapshot(self) -> None:
         destination = self._destinations()[0]
         adapter = ControlledAdapter(
             failures_once={
                 (destination.id, "check"): ResticCommandError(
-                    "check", 1, "falha transitória de verificação"
+                    "check", 1, "ssh: i/o timeout reading repository"
                 )
             }
         )

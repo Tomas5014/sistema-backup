@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from time import monotonic, sleep
-from typing import Callable
+from typing import Callable, Protocol
 
 from .credentials import credential_from_environment_or_os
 from .logging import StructuredLogger
@@ -92,6 +92,80 @@ def password_from_environment(destination: Destination) -> str:
     return credential_from_environment_or_os(destination.password_environment)
 
 
+class ExecutionRecorder(Protocol):
+    """Gravação incremental de tentativas/resultados durante a execução.
+
+    Implementado por ExecutionStore (agente). Chamadores que não
+    persistem (ex.: `run` sem --store) passam ``None``.
+    """
+
+    def attempt_started(
+        self,
+        execution_id: str,
+        destination_id: str,
+        attempt: int,
+        started_at_utc: str,
+    ) -> None: ...
+
+    def attempt_snapshot(
+        self,
+        execution_id: str,
+        destination_id: str,
+        attempt: int,
+        snapshot_id: str,
+    ) -> None: ...
+
+    def attempt_finished(
+        self,
+        execution_id: str,
+        destination_id: str,
+        attempt: "AttemptResult",
+    ) -> None: ...
+
+    def destination_finished(
+        self, execution_id: str, result: "DestinationResult"
+    ) -> None: ...
+
+
+# Classificação de retry por conteúdo do erro do backend. Restic usa
+# códigos de saída genéricos (quase sempre 1); a classificação usa o
+# texto de erro. Limitação documentada: padrões não reconhecidos são
+# tratados como NÃO repetíveis (conservador — prefere perder uma
+# retentativa a martelar um erro determinístico).
+_NON_RETRYABLE_COMMAND_PATTERNS = (
+    "wrong password",
+    "no key found",
+    "permission denied",
+    "access denied",
+    "accessdenied",
+    "host key",
+    "authentication failed",
+    "invalidaccesskeyid",
+    "signaturedoesnotmatch",
+    "forbidden",
+)
+_TRANSIENT_COMMAND_PATTERNS = (
+    "connection refused",
+    "connection reset",
+    "timed out",
+    "timeout",
+    "no route to host",
+    "network is unreachable",
+    "temporary failure",
+    "service unavailable",
+    "i/o timeout",
+    "unexpected eof",
+    "broken pipe",
+)
+
+
+def _is_retryable_command_error(error: ResticCommandError) -> bool:
+    detail = error.detail.lower()
+    if any(pattern in detail for pattern in _NON_RETRYABLE_COMMAND_PATTERNS):
+        return False
+    return any(pattern in detail for pattern in _TRANSIENT_COMMAND_PATTERNS)
+
+
 class BackupOrchestrator:
     def __init__(self, adapter: ResticAdapter, logger: StructuredLogger | None = None) -> None:
         self._adapter = adapter
@@ -102,6 +176,7 @@ class BackupOrchestrator:
         task: TaskSpec,
         password_resolver: PasswordResolver = password_from_environment,
         execution_id: str | None = None,
+        recorder: ExecutionRecorder | None = None,
     ) -> ExecutionResult:
         task.validate_for_execution()
         execution_id = execution_id or str(uuid.uuid4())
@@ -117,7 +192,9 @@ class BackupOrchestrator:
         )
 
         results = tuple(
-            self._execute_destination(task, execution_id, destination, password_resolver)
+            self._execute_destination(
+                task, execution_id, destination, password_resolver, recorder
+            )
             for destination in task.destinations
         )
         status = _execution_status(results)
@@ -149,6 +226,7 @@ class BackupOrchestrator:
         execution_id: str,
         destination: Destination,
         password_resolver: PasswordResolver,
+        recorder: ExecutionRecorder | None,
     ) -> DestinationResult:
         attempts: list[AttemptResult] = []
         summary: BackupSummary | None = None
@@ -160,6 +238,7 @@ class BackupOrchestrator:
                 password_resolver,
                 attempt,
                 resume_summary=summary,
+                recorder=recorder,
             )
             attempts.append(attempt_result)
             if attempt_result.status is DestinationStatus.SUCCESS:
@@ -179,7 +258,10 @@ class BackupOrchestrator:
                 previous_error=attempt_result.error,
             )
             sleep(task.retry.backoff_seconds)
-        return self._finalize_destination(destination, attempts)
+        final_result = self._finalize_destination(destination, attempts)
+        if recorder is not None:
+            recorder.destination_finished(execution_id, final_result)
+        return final_result
 
     @staticmethod
     def _finalize_destination(
@@ -211,6 +293,7 @@ class BackupOrchestrator:
         password_resolver: PasswordResolver,
         attempt: int,
         resume_summary: BackupSummary | None,
+        recorder: ExecutionRecorder | None,
     ) -> tuple[AttemptResult, BackupSummary | None]:
         started_at = _utc_now()
         started_monotonic = monotonic()
@@ -222,6 +305,10 @@ class BackupOrchestrator:
             "destination_id": destination.id,
             "attempt": attempt,
         }
+        if recorder is not None:
+            recorder.attempt_started(
+                execution_id, destination.id, attempt, started_at
+            )
         self._logger.emit("info", "backup.destination.started", phase="initialize", **common)
         summary = resume_summary
         try:
@@ -241,6 +328,13 @@ class BackupOrchestrator:
                     password,
                     task.timeouts.backup_seconds,
                 )
+                if recorder is not None:
+                    recorder.attempt_snapshot(
+                        execution_id,
+                        destination.id,
+                        attempt,
+                        summary.snapshot_id,
+                    )
             else:
                 self._logger.emit(
                     "info",
@@ -287,6 +381,10 @@ class BackupOrchestrator:
                 bytes_processed=attempt_result.bytes_processed,
                 **common,
             )
+            if recorder is not None:
+                recorder.attempt_finished(
+                    execution_id, destination.id, attempt_result
+                )
             return attempt_result, summary
         except ResticTimeoutError as error:
             exit_code = None
@@ -299,7 +397,7 @@ class BackupOrchestrator:
             detail = error.detail
             failed_operation = error.command_name
             timeout_seconds = None
-            retryable = True
+            retryable = _is_retryable_command_error(error)
         except (ConfigurationError, ValueError) as error:
             # Configuração inválida ou credencial ausente não se resolvem
             # repetindo — exigem correção antes de nova tentativa.
@@ -349,6 +447,10 @@ class BackupOrchestrator:
             timeout_seconds=attempt_result.timeout_seconds,
             **common,
         )
+        if recorder is not None:
+            recorder.attempt_finished(
+                execution_id, destination.id, attempt_result
+            )
         return attempt_result, summary
 
 

@@ -54,7 +54,12 @@ def run_task(config_path: Path, store_path: Path) -> ExecutionResult:
             result = BackupOrchestrator(
                 ResticAdapter(timeouts=task.timeouts),
                 StructuredLogger(log_stream),
-            ).execute(task, password_from_environment, execution_id)
+            ).execute(
+                task,
+                password_from_environment,
+                execution_id,
+                recorder=store,
+            )
         store.record_finish(result)
     finally:
         store.close()

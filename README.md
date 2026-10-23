@@ -261,13 +261,30 @@ até `attempts` tentativas com espera de `backoff_seconds` entre elas
 (padrão: `attempts=1`, sem espera). O log marca `attempt` e emite
 `backup.destination.retry` entre tentativas.
 
-**Falhas repetíveis**: erros de backend restic (`ResticCommandError`),
-timeouts (`ResticTimeoutError`) e erros de transporte/disco (`OSError`).
-**Falhas não repetíveis**: configuração inválida e credencial ausente/ilegível
-(`ConfigurationError`/`CredentialError` — exigem correção), pré-condições
-internas do adaptador (`ResticError`). Se o backup de uma tentativa já gerou
-snapshot e a falha ocorre depois (check, retenção ou listagem), a retentativa
-**não repete o backup** — retoma das fases pendentes com o mesmo snapshot.
+**Falhas repetíveis**: timeouts (`ResticTimeoutError`), erros de
+transporte/disco (`OSError`) e erros de backend cujo detalhe indica falha
+transitória (`connection refused/reset`, `timed out`, `no route to host`,
+`network is unreachable`, `temporary failure`, `service unavailable`,
+`i/o timeout`, `unexpected eof`, `broken pipe`).
+
+**Falhas não repetíveis** (encerram o destino sem consumir tentativas):
+configuração inválida e credencial ausente (`ConfigurationError`/
+`CredentialError`), pré-condições internas do adaptador (`ResticError`) e
+erros de backend cujo detalhe indica credencial rejeitada ou acesso negado
+(`wrong password`, `no key found`, `permission denied`, `access denied`,
+`host key`, `authentication failed`, `InvalidAccessKeyId`,
+`SignatureDoesNotMatch`, `forbidden`).
+
+**Limitação**: o restic usa códigos de saída genéricos (quase sempre 1), por
+isso a classificação usa o texto do erro. Erros de backend que não batem em
+nenhum padrão são tratados como **não repetíveis** — decisão conservadora que
+prefere perder uma retentativa a martelar um erro determinístico; padrões
+novos devem ser adicionados à medida que erros reais forem observados.
+
+Se o backup de uma tentativa já gerou snapshot e a falha ocorre depois
+(check, retenção ou listagem), a retentativa **não repete o backup** —
+retoma das fases pendentes com o mesmo snapshot (evento
+`backup.destination.resume`).
 
 ```bash
 # Executa a tarefa como agente e registra no SQLite local.
@@ -279,10 +296,16 @@ macip-backup-poc history --store /var/lib/macip-backup/agent.db --task tarefa-fi
 
 O banco SQLite guarda execuções, resultados por destino e **cada tentativa**
 (número, horários, duração, operação que falhou, snapshot quando existir) —
-nunca segredos. A execução é gravada como `running` antes de iniciar e
-atualizada na conclusão: uma execução interrompida permanece identificável
-com status `running`. Os eventos estruturados da execução ficam em
-`<store-dir>/logs/<execution_id>.jsonl`.
+nunca segredos. A gravação é **incremental**: a execução nasce `running`
+antes do backup; cada tentativa é gravada ao iniciar, ganha `snapshot_id`
+logo que o backup retorna e é concluída ao terminar; o destino é gravado ao
+terminar. Uma morte abrupta preserva tudo já gravado — `history` mostra
+tentativas mesmo com a execução ainda `running`. Os eventos estruturados da
+execução ficam em `<store-dir>/logs/<execution_id>.jsonl`.
+
+Bancos criados por versões anteriores do agente são **migrados
+transacionalmente** (`PRAGMA user_version`): o esquema inicial vira o atual
+preservando todo o histórico; reabrir não repete a migração.
 
 ### Credenciais do SO
 

@@ -7,9 +7,14 @@ import json
 import os
 import secrets
 import shutil
+import signal
+import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -35,6 +40,27 @@ from macip_backup.orchestrator import (
     ExecutionStatus,
 )
 from macip_backup.store import ExecutionStore
+
+
+def _store_task() -> TaskSpec:
+    return TaskSpec(
+        id="task-store",
+        name="Tarefa",
+        client=Client(id="client-store", name="Cliente"),
+        device_id="device",
+        sources=(Path("/tmp"),),
+        exclusions=(),
+        compression=CompressionMode.AUTO,
+        destinations=(
+            Destination(
+                id="local",
+                name="Local",
+                kind=DestinationKind.LOCAL,
+                repository="/tmp/repo-store",
+                password_environment="X",
+            ),
+        ),
+    )
 
 
 def _fake_result(
@@ -185,6 +211,137 @@ class ExecutionStoreTests(unittest.TestCase):
         self.assertEqual(store.history("nada"), [])
         store.close()
 
+    def test_incremental_writes_visible_while_running(self) -> None:
+        store = ExecutionStore(self.db_path)
+        task = self._task()
+        store.record_start(task, "exec-parcial", "2026-10-22T12:00:00+00:00")
+        store.attempt_started(
+            "exec-parcial", "local", 1, "2026-10-22T12:00:01+00:00"
+        )
+        store.attempt_snapshot("exec-parcial", "local", 1, "snap-parcial")
+
+        entries = store.history("task-store")
+        self.assertEqual(entries[0]["status"], "running")
+        destination = entries[0]["destinations"][0]
+        self.assertEqual(destination["status"], "running")
+        attempt = destination["attempts"][0]
+        self.assertEqual(attempt["status"], "running")
+        self.assertEqual(attempt["snapshot_id"], "snap-parcial")
+        self.assertIsNone(attempt["finished_at_utc"])
+
+        store.attempt_finished(
+            "exec-parcial",
+            "local",
+            AttemptResult(
+                attempt=1,
+                status=DestinationStatus.SUCCESS,
+                started_at_utc="2026-10-22T12:00:01+00:00",
+                finished_at_utc="2026-10-22T12:00:30+00:00",
+                duration_seconds=29.0,
+                retryable=False,
+                snapshot_id="snap-parcial",
+            ),
+        )
+        attempt = store.history("task-store")[0]["destinations"][0]["attempts"][0]
+        store.close()
+        self.assertEqual(attempt["status"], "success")
+        self.assertEqual(attempt["snapshot_id"], "snap-parcial")
+
+    def _task(self) -> TaskSpec:
+        return _store_task()
+
+
+class ExecutionStoreMigrationTests(unittest.TestCase):
+    """Banco criado no esquema legado (v0, finished_at_utc NOT NULL)."""
+
+    LEGACY_SCHEMA = """
+    CREATE TABLE executions (
+        execution_id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL,
+        client_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        started_at_utc TEXT NOT NULL,
+        finished_at_utc TEXT NOT NULL
+    );
+    CREATE TABLE destination_results (
+        execution_id TEXT NOT NULL,
+        destination_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        snapshot_id TEXT,
+        snapshots_available INTEGER,
+        files_processed INTEGER,
+        bytes_processed INTEGER,
+        error TEXT,
+        exit_code INTEGER,
+        failed_operation TEXT,
+        timeout_seconds INTEGER,
+        duration_seconds REAL NOT NULL,
+        PRIMARY KEY (execution_id, destination_id),
+        FOREIGN KEY (execution_id) REFERENCES executions(execution_id)
+    );
+    CREATE INDEX idx_executions_task ON executions(task_id, started_at_utc);
+    """
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory(prefix=".test-migration-", dir=Path.cwd())
+        self.db_path = Path(self.temp_dir.name) / "agent.db"
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def _legacy_database(self) -> None:
+        connection = sqlite3.connect(self.db_path)
+        try:
+            connection.executescript(self.LEGACY_SCHEMA)
+            connection.execute(
+                "INSERT INTO executions VALUES (?, ?, ?, ?, ?, ?)",
+                ("exec-antiga", "task-store", "client-store", "success",
+                 "2026-10-20T09:00:00+00:00", "2026-10-20T09:01:00+00:00"),
+            )
+            connection.execute(
+                "INSERT INTO destination_results VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ("exec-antiga", "local", "success", "snap-antigo", 5, 3,
+                 1000, None, None, None, None, 12.5),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+    def test_migrates_legacy_schema_preserving_history(self) -> None:
+        self._legacy_database()
+
+        store = ExecutionStore(self.db_path)
+        version = store._connection.execute("PRAGMA user_version").fetchone()[0]
+        self.assertEqual(version, 2)
+        entries = store.history("task-store")
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["execution_id"], "exec-antiga")
+        self.assertEqual(
+            entries[0]["destinations"][0]["snapshot_id"], "snap-antigo"
+        )
+
+        # execução running + conclusão funcionam no esquema migrado
+        store.record_start(
+            _store_task(), "exec-nova", "2026-10-22T12:00:00+00:00"
+        )
+        self.assertEqual(
+            store.history("task-store")[0]["status"], "running"
+        )
+        store.record_finish(
+            _fake_result(execution_id="exec-nova", status="partial")
+        )
+        store.close()
+
+        # reabrir não repete nem danifica a migração
+        store = ExecutionStore(self.db_path)
+        version = store._connection.execute("PRAGMA user_version").fetchone()[0]
+        self.assertEqual(version, 2)
+        entries = store.history("task-store")
+        store.close()
+        self.assertEqual(len(entries), 2)
+        self.assertEqual(entries[0]["status"], "partial")
+        self.assertEqual(entries[1]["status"], "success")
+
 
 @unittest.skipUnless(shutil.which("restic"), "restic não está instalado")
 class AgentIntegrationTests(unittest.TestCase):
@@ -322,3 +479,141 @@ class AgentIntegrationTests(unittest.TestCase):
         entries = json.loads(stdout.getvalue())
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0]["task_id"], "task-agent")
+
+    @unittest.skipUnless(
+        shutil.which("restic") and shutil.which("ssh") and shutil.which("ssh-keygen"),
+        "restic/ssh/ssh-keygen ausentes",
+    )
+    def test_killed_agent_keeps_persisted_attempts(self) -> None:
+        """Morte abrupta no meio de uma tentativa: histórico sobrevive.
+
+        Destino 1 (local) conclui com snapshot; destino 2 (SFTP) aponta
+        para um listener TCP que aceita e nunca responde — a tentativa
+        trava no handshake e é morta via SIGKILL no process group.
+        """
+        identity = self.root / "id_teste"
+        subprocess.run(
+            ["ssh-keygen", "-t", "ed25519", "-f", str(identity), "-N", "", "-q"],
+            check=True,
+        )
+        public_key = identity.with_suffix(".pub").read_text().split()[1]
+        known_hosts = self.root / "known_hosts"
+        known_hosts.write_text(f"127.0.0.1 ssh-ed25519 {public_key}\n")
+
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        port = listener.getsockname()[1]
+        held_connections: list[socket.socket] = []
+
+        def _never_respond() -> None:
+            while True:
+                connection, _ = listener.accept()
+                held_connections.append(connection)
+
+        threading.Thread(target=_never_respond, daemon=True).start()
+
+        config = {
+            "id": "task-kill",
+            "name": "Interrupção",
+            "client": {"id": "client-agent", "name": "Cliente"},
+            "device_id": "device-agent",
+            "sources": [str(self.source)],
+            "exclusions": [],
+            "compression": "auto",
+            "timeouts": {"initialize_seconds": 120},
+            "destinations": [
+                {
+                    "id": "local",
+                    "name": "Local",
+                    "kind": "local",
+                    "repository": str(self.root / "repo-local"),
+                    "password_environment": "MACIP_KILL_TEST_PASSWORD",
+                },
+                {
+                    "id": "hung-sftp",
+                    "name": "Travado",
+                    "kind": "sftp",
+                    "password_environment": "MACIP_KILL_TEST_PASSWORD",
+                    "sftp": {
+                        "host": "127.0.0.1",
+                        "port": port,
+                        "user": "backup",
+                        "remote_path": "backups/teste",
+                        "identity_file": str(identity),
+                        "known_hosts_file": str(known_hosts),
+                        "connect_timeout_seconds": 5,
+                    },
+                },
+            ],
+        }
+        self.config_path.write_text(json.dumps(config))
+        environment = {
+            "PYTHONPATH": str(Path(__file__).parents[1] / "src"),
+            "PATH": os.environ.get("PATH", ""),
+            "HOME": os.environ.get("HOME", ""),
+            "MACIP_KILL_TEST_PASSWORD": self.password,
+        }
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import sys; from pathlib import Path; "
+                "from macip_backup.agent import run_task; "
+                "run_task(Path(sys.argv[1]), Path(sys.argv[2]))",
+                str(self.config_path),
+                str(self.db_path),
+            ],
+            env=environment,
+            start_new_session=True,
+        )
+        try:
+            deadline = time.monotonic() + 90
+            hung_attempt_running = False
+            while time.monotonic() < deadline:
+                try:
+                    connection = sqlite3.connect(self.db_path)
+                    row = connection.execute(
+                        "SELECT status FROM attempts "
+                        "WHERE destination_id = 'hung-sftp'"
+                    ).fetchone()
+                    connection.close()
+                except sqlite3.OperationalError:
+                    row = None
+                if row:
+                    hung_attempt_running = row[0] == "running"
+                    break
+                if process.poll() is not None:
+                    break
+                time.sleep(0.05)
+        finally:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=30)
+            listener.close()
+            for connection in held_connections:
+                connection.close()
+
+        self.assertTrue(hung_attempt_running)
+
+        # Banco reaberto após morte abrupta: o que foi gravado sobrevive.
+        entries = history(self.db_path, "task-kill")
+        self.assertEqual(len(entries), 1)
+        execution = entries[0]
+        self.assertEqual(execution["status"], "running")
+        self.assertIsNone(execution["finished_at_utc"])
+
+        destinations = {item["destination_id"]: item for item in execution["destinations"]}
+        local = destinations["local"]
+        self.assertEqual(local["status"], "success")
+        self.assertTrue(local["snapshot_id"])
+        self.assertEqual(local["attempts"][0]["status"], "success")
+
+        hung = destinations["hung-sftp"]
+        self.assertEqual(hung["status"], "running")
+        self.assertEqual(hung["attempts"][0]["status"], "running")
+        self.assertIsNone(hung["attempts"][0]["finished_at_utc"])
+
+        log_files = list((self.db_path.parent / "logs").glob("*.jsonl"))
+        self.assertEqual(len(log_files), 1)
+        self.assertIn("backup.destination.started", log_files[0].read_text())

@@ -3,20 +3,34 @@
 Banco pequeno e autocontido — funciona offline e pode ser sincronizado
 com a API central quando ela existir. Nenhum segredo é persistido.
 
-Ciclo de vida: ``record_start`` grava a execução com status ``running``
-antes de qualquer tentativa — uma execução interrompida permanece
-identificável no histórico. ``record_finish`` atualiza a conclusão e
-grava o resultado final de cada destino e **todas as tentativas**.
+Ciclo de vida incremental:
+
+- ``record_start`` grava a execução como ``running`` antes de qualquer
+  tentativa — uma execução interrompida permanece identificável.
+- ``attempt_started``/``attempt_finished`` gravam cada tentativa quando
+  ela começa e termina; ``attempt_snapshot`` grava ``snapshot_id`` assim
+  que o backup retorna.
+- ``destination_finished`` grava o resultado final do destino.
+- ``record_finish`` apenas conclui a execução — as tentativas já estão
+  persistidas; uma morte abrupta entre gravações não perde histórico.
+
+Migração versionada por ``PRAGMA user_version``: bancos do esquema
+inicial (v0, ``finished_at_utc NOT NULL``, sem ``attempts``) e do esquema
+de consolidação (v1, ``attempts`` com campos ``NOT NULL``) são migrados
+transacionalmente para v2 preservando todo o histórico.
 """
 
 from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from .models import TaskSpec
-from .orchestrator import ExecutionResult
+if TYPE_CHECKING:
+    from .models import TaskSpec
+    from .orchestrator import AttemptResult, DestinationResult, ExecutionResult
+
+_SCHEMA_VERSION = 2
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS executions (
@@ -39,7 +53,7 @@ CREATE TABLE IF NOT EXISTS destination_results (
     exit_code INTEGER,
     failed_operation TEXT,
     timeout_seconds INTEGER,
-    duration_seconds REAL NOT NULL,
+    duration_seconds REAL,
     PRIMARY KEY (execution_id, destination_id),
     FOREIGN KEY (execution_id) REFERENCES executions(execution_id)
 );
@@ -48,10 +62,10 @@ CREATE TABLE IF NOT EXISTS attempts (
     destination_id TEXT NOT NULL,
     attempt INTEGER NOT NULL,
     status TEXT NOT NULL,
-    retryable INTEGER NOT NULL,
+    retryable INTEGER NOT NULL DEFAULT 0,
     started_at_utc TEXT NOT NULL,
-    finished_at_utc TEXT NOT NULL,
-    duration_seconds REAL NOT NULL,
+    finished_at_utc TEXT,
+    duration_seconds REAL,
     failed_operation TEXT,
     snapshot_id TEXT,
     error TEXT,
@@ -69,67 +83,284 @@ class ExecutionStore:
         self._path = Path(path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._connection = sqlite3.connect(str(self._path))
+        self._migrate()
         self._connection.executescript(_SCHEMA)
 
     def close(self) -> None:
         self._connection.close()
 
+    # -- migração versionada -------------------------------------------------
+
+    def _migrate(self) -> None:
+        version = self._connection.execute("PRAGMA user_version").fetchone()[0]
+        with self._connection:
+            if version < 1:
+                self._migrate_v0()
+                version = 1
+            if version < 2:
+                self._migrate_v1()
+                version = 2
+            self._connection.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+
+    def _table_exists(self, name: str) -> bool:
+        return bool(
+            self._connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (name,),
+            ).fetchone()
+        )
+
+    def _migrate_v0(self) -> None:
+        """v0 → v1: executions ganha finished_at_utc anulável.
+
+        Bancos novos não têm a tabela — nada a migrar além de marcar a
+        versão (o esquema atual é criado depois).
+        """
+        if not self._table_exists("executions"):
+            return
+        self._connection.executescript(
+            """
+            CREATE TABLE executions_v1 (
+                execution_id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                client_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                started_at_utc TEXT NOT NULL,
+                finished_at_utc TEXT
+            );
+            INSERT INTO executions_v1 SELECT * FROM executions;
+            DROP TABLE executions;
+            ALTER TABLE executions_v1 RENAME TO executions;
+            DROP INDEX IF EXISTS idx_executions_task;
+            CREATE INDEX idx_executions_task
+                ON executions(task_id, started_at_utc);
+            """
+        )
+
+    def _migrate_v1(self) -> None:
+        """v1 → v2: attempts/destination_results permitem linhas running.
+
+        Tentativa em andamento não tem conclusão nem duração ainda;
+        destino em andamento não tem duração. Linhas existentes são
+        preservadas pelo rebuild transacional.
+        """
+        if self._table_exists("attempts"):
+            self._connection.executescript(
+                """
+                CREATE TABLE attempts_v2 (
+                    execution_id TEXT NOT NULL,
+                    destination_id TEXT NOT NULL,
+                    attempt INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    retryable INTEGER NOT NULL DEFAULT 0,
+                    started_at_utc TEXT NOT NULL,
+                    finished_at_utc TEXT,
+                    duration_seconds REAL,
+                    failed_operation TEXT,
+                    snapshot_id TEXT,
+                    error TEXT,
+                    exit_code INTEGER,
+                    timeout_seconds INTEGER,
+                    PRIMARY KEY (execution_id, destination_id, attempt)
+                );
+                INSERT INTO attempts_v2 SELECT * FROM attempts;
+                DROP TABLE attempts;
+                ALTER TABLE attempts_v2 RENAME TO attempts;
+                """
+            )
+        if self._table_exists("destination_results"):
+            self._connection.executescript(
+                """
+                CREATE TABLE destination_results_v2 (
+                    execution_id TEXT NOT NULL,
+                    destination_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    snapshot_id TEXT,
+                    snapshots_available INTEGER,
+                    files_processed INTEGER,
+                    bytes_processed INTEGER,
+                    error TEXT,
+                    exit_code INTEGER,
+                    failed_operation TEXT,
+                    timeout_seconds INTEGER,
+                    duration_seconds REAL,
+                    PRIMARY KEY (execution_id, destination_id)
+                );
+                INSERT INTO destination_results_v2
+                    SELECT * FROM destination_results;
+                DROP TABLE destination_results;
+                ALTER TABLE destination_results_v2
+                    RENAME TO destination_results;
+                """
+            )
+
+    # -- ciclo de vida da execução -------------------------------------------
+
     def record_start(
-        self, task: TaskSpec, execution_id: str, started_at_utc: str
+        self, task: "TaskSpec", execution_id: str, started_at_utc: str
     ) -> None:
         """Grava a execução como `running` antes de qualquer tentativa."""
         with self._connection:
             self._connection.execute(
-                "INSERT OR REPLACE INTO executions VALUES (?, ?, ?, ?, ?, NULL)",
+                "INSERT OR REPLACE INTO executions "
+                "(execution_id, task_id, client_id, status, started_at_utc, "
+                "finished_at_utc) VALUES (?, ?, ?, ?, ?, NULL)",
                 (execution_id, task.id, task.client.id, "running", started_at_utc),
             )
 
-    def record_finish(self, result: ExecutionResult) -> None:
+    def record_finish(self, result: "ExecutionResult") -> None:
+        """Conclui a execução e garante resultados persistidos.
+
+        Com o recorder incremental as linhas já existem — os INSERT OR
+        REPLACE abaixo são idempotentes e também cobrem gravações feitas
+        sem hooks incrementais.
+        """
         with self._connection:
             self._connection.execute(
                 "UPDATE executions SET status = ?, finished_at_utc = ? "
                 "WHERE execution_id = ?",
                 (result.status.value, result.finished_at_utc, result.execution_id),
             )
-            for destination in result.destinations:
-                self._connection.execute(
-                    "INSERT OR REPLACE INTO destination_results "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        result.execution_id,
-                        destination.destination_id,
-                        destination.status.value,
-                        destination.snapshot_id,
-                        destination.snapshots_available,
-                        destination.files_processed,
-                        destination.bytes_processed,
-                        destination.error,
-                        destination.exit_code,
-                        destination.failed_operation,
-                        destination.timeout_seconds,
-                        destination.duration_seconds,
-                    ),
+        for destination in result.destinations:
+            self.destination_finished(result.execution_id, destination)
+            for attempt in destination.attempts:
+                self._backfill_attempt(
+                    result.execution_id, destination.destination_id, attempt
                 )
-                for attempt in destination.attempts:
-                    self._connection.execute(
-                        "INSERT OR REPLACE INTO attempts "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        (
-                            result.execution_id,
-                            destination.destination_id,
-                            attempt.attempt,
-                            attempt.status.value,
-                            1 if attempt.retryable else 0,
-                            attempt.started_at_utc,
-                            attempt.finished_at_utc,
-                            attempt.duration_seconds,
-                            attempt.failed_operation,
-                            attempt.snapshot_id,
-                            attempt.error,
-                            attempt.exit_code,
-                            attempt.timeout_seconds,
-                        ),
-                    )
+
+    def _backfill_attempt(
+        self,
+        execution_id: str,
+        destination_id: str,
+        attempt: "AttemptResult",
+    ) -> None:
+        with self._connection:
+            self._connection.execute(
+                "INSERT OR REPLACE INTO attempts "
+                "(execution_id, destination_id, attempt, status, retryable, "
+                "started_at_utc, finished_at_utc, duration_seconds, "
+                "failed_operation, snapshot_id, error, exit_code, "
+                "timeout_seconds) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    execution_id,
+                    destination_id,
+                    attempt.attempt,
+                    attempt.status.value,
+                    1 if attempt.retryable else 0,
+                    attempt.started_at_utc,
+                    attempt.finished_at_utc,
+                    attempt.duration_seconds,
+                    attempt.failed_operation,
+                    attempt.snapshot_id,
+                    attempt.error,
+                    attempt.exit_code,
+                    attempt.timeout_seconds,
+                ),
+            )
+
+    # -- gravação incremental por tentativa ----------------------------------
+
+    def attempt_started(
+        self,
+        execution_id: str,
+        destination_id: str,
+        attempt: int,
+        started_at_utc: str,
+    ) -> None:
+        with self._connection:
+            self._connection.execute(
+                "INSERT OR IGNORE INTO destination_results "
+                "(execution_id, destination_id, status) VALUES (?, ?, 'running')",
+                (execution_id, destination_id),
+            )
+            self._connection.execute(
+                "UPDATE destination_results SET status = 'running' "
+                "WHERE execution_id = ? AND destination_id = ?",
+                (execution_id, destination_id),
+            )
+            self._connection.execute(
+                "INSERT OR REPLACE INTO attempts "
+                "(execution_id, destination_id, attempt, status, started_at_utc) "
+                "VALUES (?, ?, ?, 'running', ?)",
+                (execution_id, destination_id, attempt, started_at_utc),
+            )
+
+    def attempt_snapshot(
+        self,
+        execution_id: str,
+        destination_id: str,
+        attempt: int,
+        snapshot_id: str,
+    ) -> None:
+        """Persiste o snapshot assim que o backup retorna sucesso."""
+        with self._connection:
+            self._connection.execute(
+                "UPDATE attempts SET snapshot_id = ? WHERE execution_id = ? "
+                "AND destination_id = ? AND attempt = ?",
+                (snapshot_id, execution_id, destination_id, attempt),
+            )
+            self._connection.execute(
+                "UPDATE destination_results SET snapshot_id = ? "
+                "WHERE execution_id = ? AND destination_id = ?",
+                (snapshot_id, execution_id, destination_id),
+            )
+
+    def attempt_finished(
+        self,
+        execution_id: str,
+        destination_id: str,
+        attempt: "AttemptResult",
+    ) -> None:
+        with self._connection:
+            self._connection.execute(
+                "UPDATE attempts SET status = ?, retryable = ?, "
+                "finished_at_utc = ?, duration_seconds = ?, "
+                "failed_operation = ?, snapshot_id = COALESCE(?, snapshot_id), "
+                "error = ?, exit_code = ?, timeout_seconds = ? "
+                "WHERE execution_id = ? AND destination_id = ? AND attempt = ?",
+                (
+                    attempt.status.value,
+                    1 if attempt.retryable else 0,
+                    attempt.finished_at_utc,
+                    attempt.duration_seconds,
+                    attempt.failed_operation,
+                    attempt.snapshot_id,
+                    attempt.error,
+                    attempt.exit_code,
+                    attempt.timeout_seconds,
+                    execution_id,
+                    destination_id,
+                    attempt.attempt,
+                ),
+            )
+
+    def destination_finished(
+        self, execution_id: str, result: "DestinationResult"
+    ) -> None:
+        with self._connection:
+            self._connection.execute(
+                "INSERT OR REPLACE INTO destination_results "
+                "(execution_id, destination_id, status, snapshot_id, "
+                "snapshots_available, files_processed, bytes_processed, "
+                "error, exit_code, failed_operation, timeout_seconds, "
+                "duration_seconds) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    execution_id,
+                    result.destination_id,
+                    result.status.value,
+                    result.snapshot_id,
+                    result.snapshots_available,
+                    result.files_processed,
+                    result.bytes_processed,
+                    result.error,
+                    result.exit_code,
+                    result.failed_operation,
+                    result.timeout_seconds,
+                    result.duration_seconds,
+                ),
+            )
+
+    # -- consulta -------------------------------------------------------------
 
     def history(self, task_id: str | None = None) -> list[dict[str, Any]]:
         if task_id is not None:
