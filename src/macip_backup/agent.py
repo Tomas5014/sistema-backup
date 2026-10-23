@@ -63,6 +63,14 @@ def task_lock_directory() -> Path:
     return Path.home() / ".local" / "state" / "macip-backup" / "locks"
 
 
+def cache_directory() -> Path:
+    """Cache restic por usuário — MACIP_CACHE_DIR ou ~/.cache/macip-backup."""
+    override = os.environ.get("MACIP_CACHE_DIR")
+    if override:
+        return Path(override)
+    return Path.home() / ".cache" / "macip-backup"
+
+
 def acquire_task_lock(task_id: str) -> IO[str]:
     """flock exclusivo não bloqueante — impede execuções simultâneas."""
     directory = task_lock_directory()
@@ -136,7 +144,9 @@ def run_task(config_path: Path, store_path: Path) -> ExecutionResult:
     store_path.parent.mkdir(parents=True, exist_ok=True)
     execution_id = str(uuid.uuid4())
     lock_file = acquire_task_lock(task.id)
-    adapter = ResticAdapter(timeouts=task.timeouts)
+    adapter = ResticAdapter(
+        timeouts=task.timeouts, cache_directory=cache_directory()
+    )
     try:
         store = ExecutionStore(store_path)
     except Exception:

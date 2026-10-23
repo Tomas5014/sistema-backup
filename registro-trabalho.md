@@ -864,3 +864,56 @@ Suíte: **128 testes** — 110 aprovados, 0 falhos, 18 ignorados
 (SFTP/SMB/S3/combinações — ambientes remotos não preparados).
 
 ---
+
+## 2026-10-23 — Instalação reproduzível e piloto Linux
+
+### Escopo
+
+Instalação, atualização, desinstalação, documentação e validação
+operacional. Windows/API/portal/auto-update fora do escopo; nenhum
+servidor, firewall, mount ou política de AV alterada.
+
+### Artefato e layout
+
+- Wheel `macip_backup_poc-0.2.0-py3-none-any.whl` (versão em
+  `pyproject.toml`; `build_wheel` do setuptools — pip não é requisito).
+- `deploy/install.sh <wheel> [--commit SHA]` — instalação por usuário:
+  `releases/<versão>` + `current` + launcher `~/.local/bin/macip-backup`
+  (shebang `/bin/sh` — funciona com espaços, ao contrário do shebang do
+  script venv). Config 0700, `agent.env` 0600, state/logs/locks/cache
+  por usuário. Manifesto `install.json` com versão + commit.
+- Recusa instalar/atualizar com execução ativa (flock nos locks).
+- Atualização: backup de `agent.db` em `db-backups/` antes de qualquer
+  toque; flip do `current` só no fim — falha mantém a anterior.
+- `deploy/uninstall.sh` — recusa com execução ativa; remove units
+  `macip-backup-*`, launcher próprio e releases; preserva config/creds/
+  SQLite/logs/repos; `--purge` remove também os dados operacionais.
+- `MACIP_CACHE_DIR` → cache restic por usuário (default
+  `~/.cache/macip-backup`).
+
+### Homologação desta sessão (laboratório — HOME isolado)
+
+`tests/test_install.py` — 7 testes:
+- wheel instalado e executado fora do checkout (sem PYTHONPATH);
+- primeira instalação + backup → snapshots → check --read-data →
+  restore + comparação de conteúdo pela CLI instalada;
+- reinstalação preserva config/histórico;
+- HOME com espaços;
+- atualização com falha controlada + instalação anterior utilizável +
+  recuperação;
+- recusa de install/uninstall com lock ativo;
+- desinstalação preservando dados operacionais.
+
+### Pendente (não homologado)
+
+- Segunda máquina Linux real: sem host disponibilizado nesta sessão —
+  guia executável entregue; validação registrada como pendente.
+- Piloto de 7 dias: checklist em `docs/piloto-operacao.md` §7 — ainda
+  não executado; não se declara concluído.
+
+### Suíte
+
+**135 testes** — 117 aprovados, 0 falhos, 18 ignorados
+(SFTP/SMB/S3/combinações — ambientes remotos não preparados).
+
+---

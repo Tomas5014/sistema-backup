@@ -15,15 +15,23 @@ Código legado foi preservado; esta POC não grava no formato legado.
   envia `SIGKILL` e limita a coleta final a 5 s.
 - Senha restic fica somente em `password_environment`. Chave e senha não entram
   em JSON, argumentos, logs ou resultados.
-- Retenção permanece declarativa. `forget` e `prune` não executam nesta entrega.
+- Retenção por tarefa: `retention.keep_last` aciona `restic forget
+  --keep-last N --tag task:<id> --prune` — escopo ao snapshot da tarefa.
 
 `success`: todos os destinos concluídos. `partial`: ao menos um concluído e outro
 falhou. `failed`: nenhum concluiu. Cada destino informa operação, código ou timeout.
 
 ## Instalação
 
+**Operação** (máquina dedicada, sem checkout): wheel + `deploy/install.sh`
+— veja [docs/piloto-operacao.md](docs/piloto-operacao.md) para
+instalação, credenciais persistentes, agenda, linger, atualização,
+reversão, desinstalação e piloto de 7 dias.
+
+**Desenvolvimento**:
+
 ```bash
-sudo apt install python3.14-venv restic openssh-client docker.io
+sudo apt install python3.14-venv restic openssh-client
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install -e .
@@ -31,6 +39,8 @@ restic version
 ```
 
 Python 3.11+ é exigido. Não há dependências Python externas.
+`pip install -e` é só para desenvolvimento — a instalação operacional
+usa o wheel de `deploy/install.sh` (não editable).
 
 ## Formato da tarefa
 
@@ -446,5 +456,5 @@ Backend segue [repositórios SFTP](https://restic.readthedocs.io/en/stable/030_p
   pré-checagem do daemon; isso não é homologação SFTP.
 
 Próximo passo: executar `tests/sftp/run-integration.sh` em host Docker funcional,
-registrar resultado e homologar falhas controladas. SMB, S3, Windows, serviço,
-agenda, API e portal permanecem fora do escopo.
+registrar resultado e homologar falhas controladas. Windows, API e portal
+permanecem fora do escopo; SMB, S3 e agenda systemd --user estão implementados.

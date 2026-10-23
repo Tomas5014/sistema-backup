@@ -138,13 +138,14 @@ def main() -> int:
             return _run_recovery_operation(task, arguments)
         from .agent import (
             acquire_task_lock,
+            cache_directory,
             install_cancel_handlers,
             restore_signal_handlers,
         )
 
         lock_file = acquire_task_lock(task.id)
         try:
-            adapter = ResticAdapter()
+            adapter = ResticAdapter(cache_directory=cache_directory())
             previous_handlers = install_cancel_handlers(adapter)
             try:
                 result = BackupOrchestrator(adapter).execute(task)
