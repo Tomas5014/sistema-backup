@@ -187,34 +187,59 @@ class InterruptedMarkingTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory(prefix=".test-interrupt-", dir=Path.cwd())
         self.db_path = Path(self.temp_dir.name) / "agent.db"
+        self.lock_dir = Path(self.temp_dir.name) / "locks"
+        self._previous_lock_env = os.environ.get("MACIP_LOCK_DIR")
+        os.environ["MACIP_LOCK_DIR"] = str(self.lock_dir)
 
     def tearDown(self) -> None:
+        if self._previous_lock_env is None:
+            os.environ.pop("MACIP_LOCK_DIR", None)
+        else:
+            os.environ["MACIP_LOCK_DIR"] = self._previous_lock_env
         self.temp_dir.cleanup()
 
-    def test_stale_running_marked_interrupted_on_next_run(self) -> None:
-        store = ExecutionStore(self.db_path)
-        store.record_start(_task(), "exec-morta", "2026-10-23T10:00:00+00:00")
-        store.attempt_started("exec-morta", "local", 1, "2026-10-23T10:00:01+00:00")
-        marked = store.mark_stale_interrupted("2026-10-23T11:00:00+00:00")
-        entries = store.history("task-systemd")
-        store.close()
+    def test_sweep_preserves_running_of_locked_task_and_marks_orphan(self) -> None:
+        """A e B no mesmo SQLite: iniciar B preserva A (lock ocupado);
+        execução realmente órfã (lock livre) é identificada."""
+        from macip_backup.agent import _sweep_stale_executions, acquire_task_lock
 
-        self.assertEqual(marked, 1)
-        self.assertEqual(entries[0]["status"], "interrupted")
-        self.assertEqual(
-            entries[0]["destinations"][0]["attempts"][0]["status"], "interrupted"
-        )
+        store = ExecutionStore(self.db_path)
+        task_a = _task("task-A")
+        task_b = _task("task-B")
+        task_c = _task("task-C")
+        store.record_start(task_a, "exec-A", "2026-10-23T10:00:00+00:00")
+        store.record_start(task_b, "exec-B-velha", "2026-10-23T09:00:00+00:00")
+        store.record_start(task_c, "exec-C-orfa", "2026-10-23T09:30:00+00:00")
+
+        # task A está realmente em execução — seu lock está ocupado.
+        lock_a = acquire_task_lock("task-A")
+        try:
+            _sweep_stale_executions(store, "task-B")
+        finally:
+            lock_a.close()
+
+        statuses = {
+            entry["execution_id"]: entry["status"]
+            for entry in store.history()
+            for _ in [entry]
+        }
+        store.close()
+        self.assertEqual(statuses["exec-A"], "running")          # lock ocupado → intacta
+        self.assertEqual(statuses["exec-B-velha"], "interrupted")  # lock próprio → órfã
+        self.assertEqual(statuses["exec-C-orfa"], "interrupted")   # lock livre → órfã
 
     def test_mark_interrupted_scopes_to_one_execution(self) -> None:
         store = ExecutionStore(self.db_path)
         store.record_start(_task(), "exec-a", "2026-10-23T10:00:00+00:00")
         store.record_start(_task(), "exec-b", "2026-10-23T11:00:00+00:00")
-        store.mark_interrupted("exec-a", "2026-10-23T12:00:00+00:00")
+        store.mark_interrupted("exec-a", "2026-10-23T12:00:00+00:00", "sinal 15")
         entries = store.history("task-systemd")
         store.close()
 
         statuses = {entry["execution_id"]: entry["status"] for entry in entries}
         self.assertEqual(statuses, {"exec-a": "interrupted", "exec-b": "running"})
+        details = {entry["execution_id"]: entry["interrupt_detail"] for entry in entries}
+        self.assertEqual(details["exec-a"], "sinal 15")
 
 
 def _systemd_user_running() -> bool:
@@ -591,12 +616,19 @@ class AgentProcessTests(unittest.TestCase):
             env=self._env(),
         )
 
-    def _wait_attempt_running(self, process: subprocess.Popen) -> bool:
+    def _wait_attempt_running(
+        self, process: subprocess.Popen, destination_id: str | None = None
+    ) -> bool:
         deadline = time.monotonic() + 60
+        query = "SELECT status FROM attempts"
+        params: tuple[str, ...] = ()
+        if destination_id is not None:
+            query += " WHERE destination_id = ?"
+            params = (destination_id,)
         while time.monotonic() < deadline:
             try:
                 connection = sqlite3.connect(self.db_path)
-                row = connection.execute("SELECT status FROM attempts").fetchone()
+                row = connection.execute(query, params).fetchone()
                 connection.close()
             except sqlite3.OperationalError:
                 row = None
@@ -676,3 +708,189 @@ class AgentProcessTests(unittest.TestCase):
         ]
         config["id"] = f"{self.task_id}-novo"
         self.config_path.write_text(json.dumps(config))
+
+    def test_sigterm_mid_second_destination_keeps_first_snapshot(self) -> None:
+        """Multi-destino: A conclui → SIGTERM só no PID durante B →
+        interrupted com motivo, snapshot de A preservado, destinos
+        posteriores nem iniciados."""
+        self._write_multi_config()
+        agent = self._start_agent()
+        try:
+            self.assertTrue(self._wait_attempt_running(agent, "hung"))
+            os.kill(agent.pid, signal.SIGTERM)  # só o PID
+            agent.wait(timeout=60)
+        finally:
+            if agent.poll() is None:
+                agent.kill()
+                agent.wait(timeout=30)
+
+        leftovers = subprocess.run(
+            ["pgrep", "-f", f"backups/{self.task_id}"],
+            capture_output=True, text=True,
+        ).stdout.strip()
+        self.assertEqual(leftovers, "")
+
+        store = ExecutionStore(self.db_path)
+        try:
+            entries = store.history(self.task_id)
+        finally:
+            store.close()
+        execution = entries[0]
+        self.assertEqual(execution["status"], "interrupted")
+        self.assertIn("sinal 15", execution["interrupt_detail"] or "")
+
+        destinations = {
+            item["destination_id"]: item for item in execution["destinations"]
+        }
+        self.assertEqual(destinations["primeiro"]["status"], "success")
+        self.assertTrue(destinations["primeiro"]["snapshot_id"])
+        self.assertEqual(destinations["hung"]["status"], "interrupted")
+        hung_attempts = destinations["hung"]["attempts"]
+        self.assertEqual(hung_attempts[0]["status"], "failed")
+        self.assertIn("sinal 15", hung_attempts[0]["error"] or "")
+        # destino posterior nem iniciado — interrupted sem tentativas
+        self.assertEqual(destinations["terceiro"]["status"], "interrupted")
+        self.assertEqual(destinations["terceiro"]["attempts"], [])
+
+    def _write_multi_config(self) -> None:
+        self.config_path.write_text(
+            json.dumps(
+                {
+                    "id": self.task_id,
+                    "name": "Multi-destino",
+                    "client": {"id": "client-cx", "name": "Cliente"},
+                    "device_id": "device-cx",
+                    "sources": [str(self.source)],
+                    "exclusions": [],
+                    "compression": "auto",
+                    "timeouts": {"initialize_seconds": 120},
+                    "destinations": [
+                        {
+                            "id": "primeiro",
+                            "name": "Local",
+                            "kind": "local",
+                            "repository": str(self.root / "repo-um"),
+                            "password_environment": "MACIP_CX_PASSWORD",
+                        },
+                        {
+                            "id": "hung",
+                            "name": "Travado",
+                            "kind": "sftp",
+                            "password_environment": "MACIP_CX_PASSWORD",
+                            "sftp": {
+                                "host": "127.0.0.1",
+                                "port": self.listener.getsockname()[1],
+                                "user": "backup",
+                                "remote_path": f"backups/{self.task_id}",
+                                "identity_file": str(self.identity),
+                                "known_hosts_file": str(self.known_hosts),
+                                "connect_timeout_seconds": 5,
+                            },
+                        },
+                        {
+                            "id": "terceiro",
+                            "name": "Local 2",
+                            "kind": "local",
+                            "repository": str(self.root / "repo-dois"),
+                            "password_environment": "MACIP_CX_PASSWORD",
+                        },
+                    ],
+                }
+            )
+        )
+
+
+class AdapterCancellationTests(unittest.TestCase):
+    """cancel(): confirma encerramento do grupo sem espera cheia e sem
+    cancel_cleanup_error em encerramento limpo — incluindo descendente
+    que ignora SIGTERM."""
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory(prefix=".test-cancel-", dir=Path.cwd())
+        self.root = Path(self.temp_dir.name)
+        self.destination = Destination(
+            id="local",
+            name="Local",
+            kind=DestinationKind.LOCAL,
+            repository=str(self.root / "repo"),
+            password_environment="X",
+        )
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def _fake_restic(self, body: str) -> Path:
+        script = self.root / "fake-restic"
+        script.write_text(f"#!/usr/bin/env python3\n{body}")
+        script.chmod(0o755)
+        return script
+
+    def _spawn(self, script: Path) -> tuple["ResticAdapter", threading.Thread, list[BaseException]]:
+        from macip_backup.restic import ResticAdapter
+
+        adapter = ResticAdapter(binary=str(script))
+        errors: list[BaseException] = []
+        thread = threading.Thread(
+            target=lambda: self._capture(
+                errors, adapter._run, self.destination, "pw", ["backup"], 60
+            ),
+            daemon=True,
+        )
+        thread.start()
+        deadline = time.monotonic() + 10
+        while adapter._current_process is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        return adapter, thread, errors
+
+    @staticmethod
+    def _capture(errors: list[BaseException], fn: object, *args: object) -> None:
+        try:
+            fn(*args)  # type: ignore[operator]
+        except BaseException as error:  # noqa: BLE001
+            errors.append(error)
+
+    def test_clean_sigterm_exit_no_cleanup_error_no_full_wait(self) -> None:
+        script = self._fake_restic(
+            "import time\ntime.sleep(60)\n"
+        )
+        adapter, thread, errors = self._spawn(script)
+        start = time.monotonic()
+        adapter.cancel("teste-sigterm")
+        thread.join(timeout=30)
+        elapsed = time.monotonic() - start
+
+        self.assertLess(elapsed, 10, "limpeza limpa não pode consumir a espera de SIGKILL")
+        self.assertIsNone(adapter.cancel_cleanup_error)
+        self.assertTrue(errors, "_run deveria ter levantado cancelamento")
+        self.assertIsInstance(errors[0], ResticError)
+
+    def test_descendant_ignoring_sigterm_escalates_to_sigkill(self) -> None:
+        marker = f"cx-{secrets.token_hex(4)}"
+        script = self._fake_restic(
+            "import signal, subprocess, sys, time\n"
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            f"subprocess.Popen([sys.executable, '-c', '#{marker}\\n"
+            "import signal,time\\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\\n"
+            "time.sleep(60)'])\n"
+            "time.sleep(60)\n"
+        )
+        adapter, thread, errors = self._spawn(script)
+        time.sleep(0.3)  # descendente iniciado
+        adapter.cancel("teste-sigkill")
+        thread.join(timeout=60)
+
+        self.assertIsNone(adapter.cancel_cleanup_error)
+        leftovers = subprocess.run(
+            ["pgrep", "-f", marker], capture_output=True, text=True
+        ).stdout.strip()
+        self.assertEqual(leftovers, "", "descendente que ignora SIGTERM sobreviveu")
+        self.assertTrue(errors)
+
+    def test_cancel_without_process_is_noop(self) -> None:
+        from macip_backup.restic import ResticAdapter
+
+        adapter = ResticAdapter()
+        adapter.cancel("motivo")
+        self.assertTrue(adapter.cancelled)
+        self.assertEqual(adapter.cancel_reason, "motivo")
+        self.assertIsNone(adapter.cancel_cleanup_error)

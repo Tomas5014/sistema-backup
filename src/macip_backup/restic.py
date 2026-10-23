@@ -80,6 +80,14 @@ class ResticAdapter:
         self._current_process: subprocess.Popen[str] | None = None
         self.cancel_cleanup_error: str | None = None
 
+    @property
+    def cancelled(self) -> bool:
+        return self._cancel_reason is not None
+
+    @property
+    def cancel_reason(self) -> str | None:
+        return self._cancel_reason
+
     def cancel(self, reason: str) -> None:
         """Cancela: registra o motivo e encerra o grupo do restic em andamento.
 
@@ -276,6 +284,8 @@ class ResticAdapter:
                 stdout, stderr = process.communicate(timeout=timeout_seconds)
             except subprocess.TimeoutExpired:
                 stdout, stderr, process_group_terminated = self._stop_timed_out_process(process)
+                if self._cancel_reason is not None:
+                    raise ResticCancelledError(self._cancel_reason, operation)
                 if process_group_terminated:
                     unlock_detail = self._unlock_after_timeout(destination, password)
                     if unlock_detail:
@@ -427,6 +437,8 @@ class ResticAdapter:
         return stdout, stderr, True
 
     def _unlock_after_timeout(self, destination: Destination, password: str) -> str | None:
+        if self._cancel_reason is not None:
+            return None  # cancelado — não vale iniciar um unlock
         command = [
             self._binary,
             "--repo",
@@ -448,6 +460,11 @@ class ResticAdapter:
             env=environment,
             start_new_session=os.name == "posix",
         )
+        # O unlock também é alcançado por cancel(): fica registrado como
+        # processo corrente até encerrar.
+        self._current_process = process
+        if self._cancel_reason is not None:
+            self._stop_for_cancel(process)
         try:
             stdout, stderr = process.communicate(timeout=_UNLOCK_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
@@ -455,6 +472,8 @@ class ResticAdapter:
             return _safe_error_detail(
                 f"tempo limite de {_UNLOCK_TIMEOUT_SECONDS}s excedido: {stderr or stdout}"
             )
+        finally:
+            self._current_process = None
         if process.returncode != 0:
             return _safe_error_detail(
                 f"falhou (código {process.returncode}): {stderr or stdout}"
@@ -478,6 +497,31 @@ class ResticAdapter:
 
     @staticmethod
     def _process_group_exists(pgid: int) -> bool:
+        """Grupo tem membro vivo (não-zumbi)?
+
+        killpg(0) conta zumbis — um líder encerrado por SIGTERM mas ainda
+        não recolhido pela thread principal faria o grupo parecer ativo
+        para sempre. Com /proc disponível, verificamos estado real.
+        """
+        proc_root = Path("/proc")
+        if proc_root.is_dir():
+            for entry in os.listdir(proc_root):
+                if not entry.isdigit():
+                    continue
+                try:
+                    stat = (proc_root / entry / "stat").read_text()
+                except OSError:
+                    continue
+                # stat: pid (comm) state ppid pgrp ... — comm pode ter
+                # espaços/parênteses; os campos começam após o último ')'.
+                fields = stat.rsplit(")", 1)[-1].split()
+                if len(fields) < 3:
+                    continue
+                if fields[0] in ("Z", "X"):
+                    continue
+                if int(fields[2]) == pgid:
+                    return True
+            return False
         try:
             os.killpg(pgid, 0)
         except ProcessLookupError:

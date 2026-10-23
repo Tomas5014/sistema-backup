@@ -748,3 +748,49 @@ Suíte: **122 testes** — 104 aprovados, 0 falhos, 18 ignorados
 (SFTP/SMB/S3/combinações — ambientes remotos não preparados).
 
 ---
+
+## 2026-10-23 — Consolidação systemd (2ª rodada): sweep com posse de lock e cancelamento confirmado
+
+Revisão de b0ae606 — três casos reproduzidos corrigidos.
+
+### 1. Varredura de execuções antigas
+
+- `mark_stale_interrupted` marcava TODAS as execuções `running` — uma
+  tarefa B sobrescrevia uma execução legítima de A. Agora escopo por
+  tarefa: a própria (lock já adquirido) e outras só após prova de lock
+  LIVRE por tentativa de aquisição — lock ocupado → execução intacta.
+- `running_task_ids()` lista tarefas com `running`; `_sweep_stale_executions`
+  faz a sonda por lock antes de tocar em cada uma.
+- Teste A/B no mesmo SQLite: A com lock ocupado permanece `running`;
+  órfã real (lock livre) vira `interrupted`.
+
+### 2. Confirmação do encerramento
+
+- `_process_group_exists` passou a varrer `/proc` ignorando zumbis —
+  killpg(0) conta zumbis e o líder não recolhido (thread presa em
+  communicate) fazia o grupo parecer vivo: consumia toda a espera de
+  SIGKILL e gerava `cancel_cleanup_error` espúrio.
+- Encerramento limpo por SIGTERM agora é confirmado em ~ms; descendente
+  que ignora SIGTERM ainda escala para SIGKILL (testado).
+- `_unlock_after_timeout` também registra o processo como corrente —
+  cancel() alcança o unlock; com cancelamento pendente o unlock nem
+  inicia.
+- Lock do agente mantido durante toda a limpeza.
+
+### 3. Cancelamento multi-destino
+
+- `DestinationStatus.INTERRUPTED` e `ExecutionStatus.INTERRUPTED` novos;
+  destinos não iniciados viram `interrupted` (sem tentativas, sem tocar
+  o adaptador), destino interrompido no meio finaliza `interrupted`
+  quando cancelado; retries não disparam após cancelamento.
+- Consistência: SQLite (`interrupt_detail` + status), evento
+  `backup.execution.interrupted`/`backup.destination.interrupted` e JSON
+  da CLI (`run` também passa por cancel handlers + task lock).
+- Teste real: A (local) conclui → SIGTERM só no PID do agente durante B
+  (SFTP travado) → execução `interrupted` com `sinal 15`, snapshot de A
+  preservado, C registrado `interrupted` sem tentativas.
+
+Suíte: **126 testes** — 108 aprovados, 0 falhos, 18 ignorados
+(SFTP/SMB/S3/combinações — ambientes remotos não preparados).
+
+---

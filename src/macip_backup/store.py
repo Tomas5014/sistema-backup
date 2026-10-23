@@ -326,28 +326,37 @@ class ExecutionStore:
                 ),
             )
 
-    def mark_stale_interrupted(self, finished_at_utc: str) -> int:
-        """Marca toda execução `running` como `interrupted`.
+    def running_task_ids(self) -> list[str]:
+        rows = self._connection.execute(
+            "SELECT DISTINCT task_id FROM executions WHERE status = 'running'"
+        ).fetchall()
+        return [row[0] for row in rows]
 
-        Chamado no início de run_task, já sob o lock — qualquer execução
-        ainda `running` veio de uma morte anterior (kill -9, reboot,
-        OOM) que não teve chance de sinalizar.
+    def mark_stale_interrupted(self, task_id: str, finished_at_utc: str) -> int:
+        """Marca execuções `running` DESTA tarefa como `interrupted`.
+
+        Chamado apenas quando a posse do lock da tarefa está confirmada
+        (próprio lock, ou lock livre provado por tentativa de aquisição)
+        — nunca toca execução de tarefa com lock ocupado.
         """
         with self._connection:
             cursor = self._connection.execute(
                 "UPDATE executions SET status = 'interrupted', finished_at_utc = ? "
-                "WHERE status = 'running'",
-                (finished_at_utc,),
+                "WHERE status = 'running' AND task_id = ?",
+                (finished_at_utc, task_id),
             )
             self._connection.execute(
                 "UPDATE attempts SET status = 'interrupted', "
                 "finished_at_utc = COALESCE(finished_at_utc, ?) "
-                "WHERE status = 'running'",
-                (finished_at_utc,),
+                "WHERE status = 'running' AND execution_id IN "
+                "(SELECT execution_id FROM executions WHERE task_id = ?)",
+                (finished_at_utc, task_id),
             )
             self._connection.execute(
                 "UPDATE destination_results SET status = 'interrupted' "
-                "WHERE status = 'running'"
+                "WHERE status = 'running' AND execution_id IN "
+                "(SELECT execution_id FROM executions WHERE task_id = ?)",
+                (task_id,),
             )
         return cursor.rowcount
 
@@ -366,7 +375,7 @@ class ExecutionStore:
             self._connection.execute(
                 "UPDATE executions SET status = 'interrupted', "
                 "finished_at_utc = ?, interrupt_detail = ? "
-                "WHERE execution_id = ? AND status IN ('running', 'failed')",
+                "WHERE execution_id = ?",
                 (finished_at_utc, detail, execution_id),
             )
             self._connection.execute(

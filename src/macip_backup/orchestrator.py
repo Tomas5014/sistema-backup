@@ -24,12 +24,14 @@ from .restic import (
 class DestinationStatus(StrEnum):
     SUCCESS = "success"
     FAILED = "failed"
+    INTERRUPTED = "interrupted"
 
 
 class ExecutionStatus(StrEnum):
     SUCCESS = "success"
     PARTIAL = "partial"
     FAILED = "failed"
+    INTERRUPTED = "interrupted"
 
 
 @dataclass(frozen=True)
@@ -192,7 +194,9 @@ class BackupOrchestrator:
         )
 
         results = tuple(
-            self._execute_destination(
+            self._cancelled_destination(execution_id, destination, recorder)
+            if self._is_cancelled()
+            else self._execute_destination(
                 task, execution_id, destination, password_resolver, recorder
             )
             for destination in task.destinations
@@ -220,6 +224,39 @@ class BackupOrchestrator:
             destinations=results,
         )
 
+    def _is_cancelled(self) -> bool:
+        return bool(getattr(self._adapter, "cancelled", False))
+
+    def _cancelled_destination(
+        self,
+        execution_id: str,
+        destination: Destination,
+        recorder: ExecutionRecorder | None,
+    ) -> DestinationResult:
+        """Destino nem iniciado após cancelamento — registrado como
+        interrupted, sem tentativas, consistente com SQLite e eventos."""
+        reason = getattr(self._adapter, "cancel_reason", None) or "cancelado"
+        now = _utc_now()
+        self._logger.emit(
+            "warning",
+            "backup.destination.interrupted",
+            execution_id=execution_id,
+            destination_id=destination.id,
+            reason=reason,
+        )
+        result = DestinationResult(
+            destination_id=destination.id,
+            status=DestinationStatus.INTERRUPTED,
+            started_at_utc=now,
+            finished_at_utc=now,
+            duration_seconds=0.0,
+            error=reason,
+            attempts=(),
+        )
+        if recorder is not None:
+            recorder.destination_finished(execution_id, result)
+        return result
+
     def _execute_destination(
         self,
         task: TaskSpec,
@@ -243,7 +280,11 @@ class BackupOrchestrator:
             attempts.append(attempt_result)
             if attempt_result.status is DestinationStatus.SUCCESS:
                 break
-            if not attempt_result.retryable or attempt == task.retry.attempts:
+            if (
+                not attempt_result.retryable
+                or attempt == task.retry.attempts
+                or self._is_cancelled()
+            ):
                 break
             self._logger.emit(
                 "warning",
@@ -263,14 +304,16 @@ class BackupOrchestrator:
             recorder.destination_finished(execution_id, final_result)
         return final_result
 
-    @staticmethod
     def _finalize_destination(
-        destination: Destination, attempts: list[AttemptResult]
+        self, destination: Destination, attempts: list[AttemptResult]
     ) -> DestinationResult:
         last = attempts[-1]
+        status = last.status
+        if status is not DestinationStatus.SUCCESS and self._is_cancelled():
+            status = DestinationStatus.INTERRUPTED
         return DestinationResult(
             destination_id=destination.id,
-            status=last.status,
+            status=status,
             started_at_utc=last.started_at_utc,
             finished_at_utc=last.finished_at_utc,
             duration_seconds=last.duration_seconds,
@@ -455,6 +498,8 @@ class BackupOrchestrator:
 
 
 def _execution_status(results: tuple[DestinationResult, ...]) -> ExecutionStatus:
+    if any(result.status is DestinationStatus.INTERRUPTED for result in results):
+        return ExecutionStatus.INTERRUPTED
     successes = sum(result.status is DestinationStatus.SUCCESS for result in results)
     if successes == len(results):
         return ExecutionStatus.SUCCESS

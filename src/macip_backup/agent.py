@@ -101,6 +101,29 @@ def restore_signal_handlers(previous: dict[int, object]) -> None:
         signal.signal(signum, handler)
 
 
+def _sweep_stale_executions(store: ExecutionStore, own_task_id: str) -> None:
+    """Marca `running` órfãs como `interrupted`, respeitando locks.
+
+    A própria tarefa já está sob lock — suas execuções `running` são
+    necessariamente órfãs. Para outras tarefas, o lock correspondente é
+    provado por tentativa de aquisição: ocupado → execução legítima,
+    preservada; livre → órfã, marcada. Uma execução de outra tarefa com
+    lock ocupado NUNCA é alterada.
+    """
+    for task_id in store.running_task_ids():
+        if task_id == own_task_id:
+            store.mark_stale_interrupted(task_id, _now())
+            continue
+        try:
+            probe = acquire_task_lock(task_id)
+        except ResticError:
+            continue
+        try:
+            store.mark_stale_interrupted(task_id, _now())
+        finally:
+            probe.close()
+
+
 def run_task(config_path: Path, store_path: Path) -> ExecutionResult:
     """Executa uma tarefa como agente local e persiste o resultado.
 
@@ -122,7 +145,7 @@ def run_task(config_path: Path, store_path: Path) -> ExecutionResult:
     interrupted_by: list[int] = []
     previous_handlers: dict[int, object] = {}
     try:
-        store.mark_stale_interrupted(_now())
+        _sweep_stale_executions(store, task.id)
         store.record_start(task, execution_id, _now())
         previous_handlers = install_cancel_handlers(
             adapter, on_signal=interrupted_by.append
