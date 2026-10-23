@@ -447,7 +447,10 @@ class InstallFlowTests(unittest.TestCase):
         foreign.write_text("[Timer]\nOnCalendar=daily\n")  # sem marcador
         other_install = unit_dir / "macip-backup-agent-outro.timer"
         other_install.write_text(
-            "# macip-backup: install=/outra/instalacao\n[Timer]\nOnCalendar=daily\n"
+            # B compartilha PREFIXO com A — substring grep marcaria errado;
+            # só comparação exata distingue.
+            f"# macip-backup: install={self.macip_home}-teste\n"
+            "[Timer]\nOnCalendar=daily\n"
         )
         ours = unit_dir / "macip-backup-agent-task-inst.timer"
         ours.write_text(
@@ -502,7 +505,7 @@ class InstallFlowTests(unittest.TestCase):
 
         refused = self._install()
         self.assertNotEqual(refused.returncode, 0)
-        self.assertIn("não pertence", refused.stderr)
+        self.assertIn("propriedade", refused.stderr)
         self.assertEqual(foreign.read_bytes(), payload)
         self.assertFalse((self.macip_home / "current").exists())
 
@@ -545,3 +548,33 @@ class InstallFlowTests(unittest.TestCase):
             self.assertIn("em andamento", refused.stderr)
         finally:
             lock_file.close()
+
+    def test_install_over_other_install_launcher_refused(self) -> None:
+        """Launcher de B (prefixo compartilhado) no caminho de A →
+        install recusa e o arquivo segue byte a byte igual."""
+        bin_dir = self.home / ".local" / "bin"
+        bin_dir.mkdir(parents=True)
+        b_home = self.root / "b-macip-backup-teste"  # prefixo comum com A
+        payload = (
+            "#!/bin/sh\n"
+            f"# macip-backup: install={b_home}\n"
+            'exec /bin/true\n'
+        ).encode()
+        foreign = bin_dir / "macip-backup"
+        foreign.write_bytes(payload)
+        foreign.chmod(0o755)
+
+        refused = self._install()
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertEqual(foreign.read_bytes(), payload)
+
+    def test_reinstall_over_own_launcher_works(self) -> None:
+        """Reinstalar A sobre seu próprio launcher segue funcionando."""
+        self.assertEqual(self._install().returncode, 0)
+        marker = (
+            f"# macip-backup: install={self.macip_home}"
+        ).encode()
+        self.assertIn(marker, self.bin.read_bytes())
+        again = self._install()
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertIn(marker, self.bin.read_bytes())

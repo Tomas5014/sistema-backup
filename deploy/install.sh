@@ -64,13 +64,12 @@ mkdir -p "$LOCKS"
 exec 9>"$LOCKS/maintenance.lock"
 flock -n 9 || die "execução ou outra manutenção em andamento — tente mais tarde"
 
-# ---- propriedade do binário: nunca sobrescrever executável alheio ----
+# ---- propriedade do binário: marcador exato, nunca substring --------
 BIN_FILE="$MACIP_BIN/macip-backup"
+LAUNCHER_MARKER="# macip-backup: install=$MACIP_HOME"
 if [ -e "$BIN_FILE" ]; then
-  if ! (grep -q "macip_backup.cli" "$BIN_FILE" 2>/dev/null \
-        && grep -qF "$MACIP_HOME" "$BIN_FILE" 2>/dev/null); then
-    die "$BIN_FILE existe e não pertence a esta instalação — conteúdo preservado"
-  fi
+  grep -Fxq -- "$LAUNCHER_MARKER" "$BIN_FILE" 2>/dev/null \
+    || die "$BIN_FILE existe e sua propriedade não é desta instalação — conteúdo preservado"
 fi
 
 # ---- identidade do artefato ------------------------------------------
@@ -148,6 +147,7 @@ mv -T "$MACIP_HOME/.current.tmp" "$CURRENT"
 cat > "$BIN_FILE" <<EOF
 #!/bin/sh
 # macip-backup — launcher instalado por deploy/install.sh
+$LAUNCHER_MARKER
 MACIP_HOME="$MACIP_HOME"; export MACIP_HOME
 MACIP_CONFIG="$MACIP_CONFIG"; export MACIP_CONFIG
 MACIP_STATE="$MACIP_STATE"; export MACIP_STATE

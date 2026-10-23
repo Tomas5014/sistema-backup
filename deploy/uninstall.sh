@@ -37,7 +37,7 @@ marker="# macip-backup: install=$MACIP_HOME"
 declare -a OUR_UNITS=()
 for unit in "$UNIT_DIR"/macip-backup-*.timer "$UNIT_DIR"/macip-backup-*.service; do
   [ -e "$unit" ] || continue
-  if grep -qF "$marker" "$unit" 2>/dev/null; then
+  if grep -Fxq -- "$marker" "$unit" 2>/dev/null; then
     OUR_UNITS+=("$unit")
   else
     PRESERVED+=("unit de outra instalação: $unit")
@@ -54,14 +54,13 @@ for unit in "${OUR_UNITS[@]}"; do
 done
 "$SYSTEMCTL" --user daemon-reload >/dev/null 2>&1 || true
 
-# ---- binário: só launcher com referência à instalação ----------------
+# ---- binário: só launcher com marcador EXATO desta instalação -------
 BIN="$MACIP_BIN/macip-backup"
-if [ -f "$BIN" ] && grep -q "macip_backup.cli" "$BIN" 2>/dev/null \
-   && grep -q "$MACIP_HOME" "$BIN" 2>/dev/null; then
+if [ -f "$BIN" ] && grep -Fxq -- "$marker" "$BIN" 2>/dev/null; then
   rm -f "$BIN"
   REMOVED+=("binário $BIN")
 elif [ -e "$BIN" ]; then
-  warn "$BIN não é o launcher desta instalação — preservado"
+  warn "$BIN sem marcador desta instalação — preservado"
   PRESERVED+=("$BIN")
 fi
 

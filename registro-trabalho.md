@@ -1011,3 +1011,29 @@ Suíte: **146 testes** — 128 aprovados, 0 falhos, 18 ignorados
 (SFTP/SMB/S3/combinações — ambientes remotos não preparados).
 
 ---
+
+## 2026-10-23 — Comparação exata de propriedade
+
+### Correções
+
+- Units: `grep -Fxq -- "$marker"` — linha completa e literal. Com
+  substring, `install=/x/macip-backup` batia em
+  `install=/x/macip-backup-teste` e units de outra instalação seriam
+  removidas.
+- Launcher: marcador explícito `# macip-backup: install=<MACIP_HOME>`
+  gravado na geração e validado com comparação exata — sem busca por
+  substring de MACIP_HOME. Sem marcador exato → preservado.
+- Instalador valida o launcher existente pelo mesmo marcador — instalar
+  A sobre launcher de B recusa sem tocar o arquivo.
+
+### Testes (prefixo compartilhado A=`…/macip-backup`, B=`…/macip-backup-teste`)
+
+- Desinstalar A preserva units de B (marker `-teste`) + units sem
+  marcador + binário alheio.
+- Instalar A sobre launcher de B recusa — bytes intactos.
+- Reinstalar A sobre seu próprio launcher segue idempotente.
+
+Suíte: **148 testes** — 130 aprovados, 0 falhos, 18 ignorados
+(SFTP/SMB/S3/combinações — ambientes remotos não preparados).
+
+---
