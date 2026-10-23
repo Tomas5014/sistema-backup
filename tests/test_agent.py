@@ -319,6 +319,15 @@ class ExecutionStoreMigrationTests(unittest.TestCase):
         self.assertEqual(
             entries[0]["destinations"][0]["snapshot_id"], "snap-antigo"
         )
+        # índice e chaves estrangeiras sobrevivem aos rebuilds
+        indexes = store._connection.execute(
+            "PRAGMA index_list(executions)"
+        ).fetchall()
+        self.assertTrue(any("idx_executions_task" in row for row in indexes))
+        foreign_keys = store._connection.execute(
+            "PRAGMA foreign_key_list(destination_results)"
+        ).fetchall()
+        self.assertTrue(any(row[2] == "executions" for row in foreign_keys))
 
         # execução running + conclusão funcionam no esquema migrado
         store.record_start(
@@ -341,6 +350,94 @@ class ExecutionStoreMigrationTests(unittest.TestCase):
         self.assertEqual(len(entries), 2)
         self.assertEqual(entries[0]["status"], "partial")
         self.assertEqual(entries[1]["status"], "success")
+
+    def test_failed_migration_rolls_back_and_later_retry_succeeds(self) -> None:
+        self._legacy_database()
+        created_connections: list[_FlakyConnection] = []
+        real_connect = sqlite3.connect
+
+        class _FlakyConnection:
+            """Aborta no ALTER...RENAME — depois do DROP TABLE."""
+
+            def __init__(self, path: str) -> None:
+                self._inner = real_connect(path)
+                self.closed = False
+                created_connections.append(self)
+
+            def __getattr__(self, name: str) -> object:
+                return getattr(self._inner, name)
+
+            def execute(self, sql: str, *args: object) -> object:
+                if "RENAME" in str(sql).upper():
+                    raise sqlite3.OperationalError("falha injetada após DROP")
+                return self._inner.execute(sql, *args)
+
+            def close(self) -> None:
+                self.closed = True
+                self._inner.close()
+
+        with patch(
+            "macip_backup.store.sqlite3.connect",
+            side_effect=lambda path, **kw: _FlakyConnection(path),
+        ):
+            with self.assertRaisesRegex(
+                sqlite3.OperationalError, "falha injetada"
+            ):
+                ExecutionStore(self.db_path)
+
+        # store fecha a conexão quando a inicialização falha
+        self.assertTrue(created_connections[0].closed)
+
+        # Reabertura com conexão nova: esquema, versão e histórico intactos.
+        connection = sqlite3.connect(self.db_path)
+        try:
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+            self.assertEqual(version, 0)
+            rows = connection.execute(
+                "SELECT execution_id, status FROM executions"
+            ).fetchall()
+            self.assertEqual(rows, [("exec-antiga", "success")])
+            orphan = connection.execute(
+                "SELECT name FROM sqlite_master WHERE name = 'executions_v1'"
+            ).fetchall()
+            self.assertEqual(orphan, [])
+        finally:
+            connection.close()
+
+        # Após a falha, uma nova migração conclui normalmente.
+        store = ExecutionStore(self.db_path)
+        version = store._connection.execute("PRAGMA user_version").fetchone()[0]
+        self.assertEqual(version, 2)
+        entries = store.history("task-store")
+        store.close()
+        self.assertEqual(entries[0]["execution_id"], "exec-antiga")
+        self.assertEqual(
+            entries[0]["destinations"][0]["snapshot_id"], "snap-antigo"
+        )
+
+    def test_future_schema_version_is_rejected_untouched(self) -> None:
+        connection = sqlite3.connect(self.db_path)
+        connection.executescript(
+            "CREATE TABLE executions (execution_id TEXT PRIMARY KEY);"
+        )
+        connection.execute("INSERT INTO executions VALUES ('x')")
+        connection.execute("PRAGMA user_version = 99")
+        connection.commit()
+        connection.close()
+
+        from macip_backup.models import ConfigurationError
+
+        with self.assertRaisesRegex(ConfigurationError, "não suportado"):
+            ExecutionStore(self.db_path)
+
+        connection = sqlite3.connect(self.db_path)
+        try:
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+            self.assertEqual(version, 99)
+            rows = connection.execute("SELECT * FROM executions").fetchall()
+            self.assertEqual(rows, [("x",)])
+        finally:
+            connection.close()
 
 
 @unittest.skipUnless(shutil.which("restic"), "restic não está instalado")
@@ -507,9 +604,12 @@ class AgentIntegrationTests(unittest.TestCase):
         held_connections: list[socket.socket] = []
 
         def _never_respond() -> None:
-            while True:
-                connection, _ = listener.accept()
-                held_connections.append(connection)
+            try:
+                while True:
+                    connection, _ = listener.accept()
+                    held_connections.append(connection)
+            except OSError:
+                return
 
         threading.Thread(target=_never_respond, daemon=True).start()
 

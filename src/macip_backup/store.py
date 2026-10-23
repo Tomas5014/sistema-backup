@@ -26,6 +26,8 @@ import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .models import ConfigurationError
+
 if TYPE_CHECKING:
     from .models import TaskSpec
     from .orchestrator import AttemptResult, DestinationResult, ExecutionResult
@@ -83,24 +85,47 @@ class ExecutionStore:
         self._path = Path(path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._connection = sqlite3.connect(str(self._path))
-        self._migrate()
-        self._connection.executescript(_SCHEMA)
+        try:
+            self._migrate()
+            self._connection.executescript(_SCHEMA)
+        except Exception:
+            self._connection.close()
+            raise
 
     def close(self) -> None:
         self._connection.close()
 
     # -- migração versionada -------------------------------------------------
+    #
+    # Toda a migração roda numa ÚNICA transação explícita: BEGIN, DDL por
+    # execute() (executescript comitaria no meio e deixaria o banco
+    # quebrado), atualização de user_version e COMMIT. Qualquer erro faz
+    # ROLLBACK e o banco permanece exatamente como estava.
 
     def _migrate(self) -> None:
         version = self._connection.execute("PRAGMA user_version").fetchone()[0]
-        with self._connection:
+        if version > _SCHEMA_VERSION:
+            raise ConfigurationError(
+                f"banco do agente tem esquema v{version} — não suportado "
+                f"por esta versão (máx. v{_SCHEMA_VERSION}); o banco não "
+                "foi modificado"
+            )
+        if version == _SCHEMA_VERSION:
+            return
+        # foreign_keys deve ficar off durante rebuilds; o pragma só vale
+        # fora de transação, por isso vem antes do BEGIN.
+        self._connection.execute("PRAGMA foreign_keys = OFF")
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
             if version < 1:
                 self._migrate_v0()
-                version = 1
             if version < 2:
                 self._migrate_v1()
-                version = 2
             self._connection.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+            self._connection.execute("COMMIT")
+        except Exception:
+            self._connection.execute("ROLLBACK")
+            raise
 
     def _table_exists(self, name: str) -> bool:
         return bool(
@@ -113,12 +138,22 @@ class ExecutionStore:
     def _migrate_v0(self) -> None:
         """v0 → v1: executions ganha finished_at_utc anulável.
 
-        Bancos novos não têm a tabela — nada a migrar além de marcar a
-        versão (o esquema atual é criado depois).
+        Resíduos de uma migração antiga não atômica (executions_v1 sem
+        executions, ou as duas) são saneados antes do rebuild — nunca
+        assumem o lugar de executions se ela existir.
         """
         if not self._table_exists("executions"):
+            if self._table_exists("executions_v1"):
+                # Único vestígio: a tabela nova já estava completa.
+                self._connection.execute(
+                    "ALTER TABLE executions_v1 RENAME TO executions"
+                )
             return
-        self._connection.executescript(
+        if self._table_exists("executions_v1"):
+            # Resíduo de crash entre CREATE e DROP da migração antiga —
+            # a tabela original é a fonte de verdade.
+            self._connection.execute("DROP TABLE executions_v1")
+        for statement in (
             """
             CREATE TABLE executions_v1 (
                 execution_id TEXT PRIMARY KEY,
@@ -127,25 +162,30 @@ class ExecutionStore:
                 status TEXT NOT NULL,
                 started_at_utc TEXT NOT NULL,
                 finished_at_utc TEXT
-            );
-            INSERT INTO executions_v1 SELECT * FROM executions;
-            DROP TABLE executions;
-            ALTER TABLE executions_v1 RENAME TO executions;
-            DROP INDEX IF EXISTS idx_executions_task;
-            CREATE INDEX idx_executions_task
-                ON executions(task_id, started_at_utc);
-            """
-        )
+            )
+            """,
+            "INSERT INTO executions_v1 SELECT * FROM executions",
+            "DROP TABLE executions",
+            "ALTER TABLE executions_v1 RENAME TO executions",
+            # O índice morre junto com a tabela — recriado após o rename.
+            "CREATE INDEX IF NOT EXISTS idx_executions_task "
+            "ON executions(task_id, started_at_utc)",
+        ):
+            self._connection.execute(statement)
 
     def _migrate_v1(self) -> None:
         """v1 → v2: attempts/destination_results permitem linhas running.
 
         Tentativa em andamento não tem conclusão nem duração ainda;
-        destino em andamento não tem duração. Linhas existentes são
-        preservadas pelo rebuild transacional.
+        destino em andamento não tem duração. Linhas e chaves
+        estrangeiras são preservadas pelo rebuild transacional.
         """
-        if self._table_exists("attempts"):
-            self._connection.executescript(
+        if self._table_exists("attempts_v2") and not self._table_exists("attempts"):
+            self._connection.execute("ALTER TABLE attempts_v2 RENAME TO attempts")
+        elif self._table_exists("attempts"):
+            if self._table_exists("attempts_v2"):
+                self._connection.execute("DROP TABLE attempts_v2")
+            for statement in (
                 """
                 CREATE TABLE attempts_v2 (
                     execution_id TEXT NOT NULL,
@@ -161,15 +201,25 @@ class ExecutionStore:
                     error TEXT,
                     exit_code INTEGER,
                     timeout_seconds INTEGER,
-                    PRIMARY KEY (execution_id, destination_id, attempt)
-                );
-                INSERT INTO attempts_v2 SELECT * FROM attempts;
-                DROP TABLE attempts;
-                ALTER TABLE attempts_v2 RENAME TO attempts;
-                """
+                    PRIMARY KEY (execution_id, destination_id, attempt),
+                    FOREIGN KEY (execution_id) REFERENCES executions(execution_id)
+                )
+                """,
+                "INSERT INTO attempts_v2 SELECT * FROM attempts",
+                "DROP TABLE attempts",
+                "ALTER TABLE attempts_v2 RENAME TO attempts",
+            ):
+                self._connection.execute(statement)
+        if self._table_exists("destination_results_v2") and not self._table_exists(
+            "destination_results"
+        ):
+            self._connection.execute(
+                "ALTER TABLE destination_results_v2 RENAME TO destination_results"
             )
-        if self._table_exists("destination_results"):
-            self._connection.executescript(
+        elif self._table_exists("destination_results"):
+            if self._table_exists("destination_results_v2"):
+                self._connection.execute("DROP TABLE destination_results_v2")
+            for statement in (
                 """
                 CREATE TABLE destination_results_v2 (
                     execution_id TEXT NOT NULL,
@@ -184,15 +234,16 @@ class ExecutionStore:
                     failed_operation TEXT,
                     timeout_seconds INTEGER,
                     duration_seconds REAL,
-                    PRIMARY KEY (execution_id, destination_id)
-                );
-                INSERT INTO destination_results_v2
-                    SELECT * FROM destination_results;
-                DROP TABLE destination_results;
-                ALTER TABLE destination_results_v2
-                    RENAME TO destination_results;
-                """
-            )
+                    PRIMARY KEY (execution_id, destination_id),
+                    FOREIGN KEY (execution_id) REFERENCES executions(execution_id)
+                )
+                """,
+                "INSERT INTO destination_results_v2 "
+                "SELECT * FROM destination_results",
+                "DROP TABLE destination_results",
+                "ALTER TABLE destination_results_v2 RENAME TO destination_results",
+            ):
+                self._connection.execute(statement)
 
     # -- ciclo de vida da execução -------------------------------------------
 
