@@ -67,6 +67,28 @@ def main() -> int:
         help="banco SQLite do histórico local",
     )
     history_parser.add_argument("--task", dest="task_id", help="filtra por task id")
+    schedule_parser = subcommands.add_parser(
+        "schedule",
+        help="instala par service+timer systemd --user para a tarefa",
+    )
+    schedule_parser.add_argument("config", type=Path)
+    schedule_parser.add_argument(
+        "--store", type=Path, default=Path("/var/lib/macip-backup/agent.db"),
+        help="banco SQLite do agente gravado na unit",
+    )
+    schedule_parser.add_argument(
+        "--calendar",
+        required=True,
+        help="expressão OnCalendar (ex.: 'daily', '*-*-* 02:30:00')",
+    )
+    schedule_parser.add_argument(
+        "--enable", action="store_true",
+        help="roda daemon-reload + enable --now no timer",
+    )
+    unschedule_parser = subcommands.add_parser(
+        "unschedule", help="remove service+timer systemd --user da tarefa"
+    )
+    unschedule_parser.add_argument("task_id")
     arguments = parser.parse_args()
 
     try:
@@ -76,6 +98,11 @@ def main() -> int:
             return verify_sftp_integration()
         if arguments.command == "verify-s3-integration":
             return verify_s3_integration()
+        if arguments.command == "unschedule":
+            from .systemd import schedule_json, uninstall_schedule
+
+            print(schedule_json(uninstall_schedule(arguments.task_id)))
+            return 0
         if arguments.command == "history":
             from .agent import history_json
 
@@ -91,6 +118,21 @@ def main() -> int:
         if arguments.command == "validate":
             task.validate_for_execution()
             print(json.dumps({"status": "valid", "task_id": task.id}))
+            return 0
+        if arguments.command == "schedule":
+            from .systemd import install_schedule, schedule_json
+
+            print(
+                schedule_json(
+                    install_schedule(
+                        task,
+                        arguments.config,
+                        arguments.store,
+                        arguments.calendar,
+                        enable=arguments.enable,
+                    )
+                )
+            )
             return 0
         if arguments.command in {"snapshots", "check", "restore", "forget"}:
             return _run_recovery_operation(task, arguments)

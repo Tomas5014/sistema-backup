@@ -332,6 +332,38 @@ persistente por usuário existe `@u` (keyring do usuário, requer
 Segredo ausente em ambos os lugares falha com erro controlado — nunca sai em
 log — e não é repetido automaticamente.
 
+### Agendamento systemd --user
+
+`schedule` gera um par service+timer por tarefa em
+`~/.config/systemd/user/` — sem root:
+
+```bash
+# Gera macip-backup-agent-<task>.service + .timer (Persistent, AccuracySec=1s)
+macip-backup-poc schedule examples/tarefa-smb.json \
+  --store ~/.local/share/macip-backup/agent.db \
+  --calendar 'daily' --enable
+
+# Remove as units da tarefa
+macip-backup-poc unschedule <task_id>
+```
+
+O service é `Type=oneshot` rodando o mesmo `agent` da CLI — compartilha lock,
+histórico e resolução de credenciais.
+
+**Bloqueio de simultâneas**: `flock` em `<store>.lock` — uma segunda execução
+(CLI ou serviço) falha imediatamente com erro controlado. O kernel libera o
+lock mesmo em morte abrupta.
+
+**Credenciais sem terminal**: duas vias — `EnvironmentFile` no service lê
+`~/.config/macip-backup/agent.env` (opcional, modo 600) com `MACIP_*=valor`;
+ou kernel keyring do usuário (`keyctl padd user macip.<nome> @u`), que
+persiste logout mas não reboot. A resolução `%user:` cobre @s e @u.
+
+**Encerramento controlado**: SIGTERM/SIGINT marcam a execução `interrupted`
+antes de sair; execuções órfãs de mortes anteriores (kill -9, reboot) são
+marcadas `interrupted` na próxima execução — o histórico nunca confunde
+"parou" com "está rodando".
+
 ## Testes
 
 ```bash

@@ -309,6 +309,51 @@ class ExecutionStore:
                 ),
             )
 
+    def mark_stale_interrupted(self, finished_at_utc: str) -> int:
+        """Marca toda execução `running` como `interrupted`.
+
+        Chamado no início de run_task, já sob o lock — qualquer execução
+        ainda `running` veio de uma morte anterior (kill -9, reboot,
+        OOM) que não teve chance de sinalizar.
+        """
+        with self._connection:
+            cursor = self._connection.execute(
+                "UPDATE executions SET status = 'interrupted', finished_at_utc = ? "
+                "WHERE status = 'running'",
+                (finished_at_utc,),
+            )
+            self._connection.execute(
+                "UPDATE attempts SET status = 'interrupted', "
+                "finished_at_utc = COALESCE(finished_at_utc, ?) "
+                "WHERE status = 'running'",
+                (finished_at_utc,),
+            )
+            self._connection.execute(
+                "UPDATE destination_results SET status = 'interrupted' "
+                "WHERE status = 'running'"
+            )
+        return cursor.rowcount
+
+    def mark_interrupted(self, execution_id: str, finished_at_utc: str) -> None:
+        """Marca UMA execução como interrompida (sinal recebido)."""
+        with self._connection:
+            self._connection.execute(
+                "UPDATE executions SET status = 'interrupted', finished_at_utc = ? "
+                "WHERE execution_id = ? AND status = 'running'",
+                (finished_at_utc, execution_id),
+            )
+            self._connection.execute(
+                "UPDATE attempts SET status = 'interrupted', "
+                "finished_at_utc = COALESCE(finished_at_utc, ?) "
+                "WHERE execution_id = ? AND status = 'running'",
+                (finished_at_utc, execution_id),
+            )
+            self._connection.execute(
+                "UPDATE destination_results SET status = 'interrupted' "
+                "WHERE execution_id = ? AND status = 'running'",
+                (execution_id,),
+            )
+
     # -- gravação incremental por tentativa ----------------------------------
 
     def attempt_started(
