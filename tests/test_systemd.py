@@ -212,11 +212,12 @@ class InterruptedMarkingTests(unittest.TestCase):
         store.record_start(task_c, "exec-C-orfa", "2026-10-23T09:30:00+00:00")
 
         # task A está realmente em execução — seu lock está ocupado.
-        lock_a = acquire_task_lock("task-A")
+        locks_a = acquire_task_lock("task-A")
         try:
             _sweep_stale_executions(store, "task-B")
         finally:
-            lock_a.close()
+            for lock_fd in locks_a:
+                lock_fd.close()
 
         statuses = {
             entry["execution_id"]: entry["status"]

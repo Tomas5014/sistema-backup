@@ -48,16 +48,24 @@ Reexecutar o instalador preserva tudo que é do operador.
 
 O service carrega `EnvironmentFile=-%h/.config/macip-backup/agent.env`
 — segredos em arquivo 0600 sobrevivem a reboot (o keyring `%user` é
-temporário; `@s` depende de sessão):
+temporário; `@s` depende de sessão). **Sem sobrescrever um agent.env
+existente** — acrescente linhas:
 
 ```bash
-install -m 600 /dev/null ~/.config/macip-backup/agent.env
 printf 'MACIP_RESTIC_PASSWORD_LOCAL=<segredo>\n' >> ~/.config/macip-backup/agent.env
+chmod 600 ~/.config/macip-backup/agent.env
 ```
 
-Sem imprimir o segredo: `read -rs MACIP_RESTIC_PASSWORD_LOCAL &&
-keyctl padd user macip.MACIP_RESTIC_PASSWORD_LOCAL @u; unset
-MACIP_RESTIC_PASSWORD_LOCAL` (complemento para sessão atual).
+Sem imprimir o segredo — por stdin, nunca por argumento:
+
+```bash
+read -rs MACIP_RESTIC_PASSWORD_LOCAL
+printf '%s' "$MACIP_RESTIC_PASSWORD_LOCAL" \
+  | keyctl padd user macip.MACIP_RESTIC_PASSWORD_LOCAL @u
+unset MACIP_RESTIC_PASSWORD_LOCAL
+```
+
+(complemento para a sessão atual — o keyring `@u` não sobrevive reboot)
 
 Host key estrita SFTP: `known_hosts_file` obrigatório — o restic/ssh
 recusa host desconhecido.
@@ -106,9 +114,10 @@ item removido e cada item preservado.
 Pré-requisito: agente instalado + `agent.env` preenchido + tarefa com
 origem pequena e sintética + destino local (repo exclusivo do piloto).
 
-- [ ] **Dia 0** — `macip-backup run tarefa.json` manual; `history`
-      mostra execução; `schedule ... --enable`; timer listado em
-      `systemctl --user list-timers`.
+- [ ] **Dia 0** — `macip-backup agent tarefa.json --store
+      ~/.local/state/macip-backup/agent.db` manual (`run` não grava
+      histórico); `history` mostra execução; `schedule ... --enable`;
+      timer listado em `systemctl --user list-timers`.
 - [ ] **Dias 1–6** — conferir `history` e `logs/*.jsonl` diariamente;
       uma `check --read-data` por semana.
 - [ ] **Reboot** — após reboot SEM abrir terminal: `systemctl --user

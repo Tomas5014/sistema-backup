@@ -12,6 +12,7 @@ até reboot). O timer usa `OnCalendar` informado pelo operador com
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -38,6 +39,15 @@ def _escape_unit(value: object) -> str:
 
 def _unit_value(value: object) -> str:
     return f'"{_escape_unit(value)}"'
+
+
+def _installed_launcher() -> Path | None:
+    """Launcher do deploy/install.sh — presente só na instalação operacional."""
+    bin_dir = Path(
+        os.environ.get("MACIP_BIN", Path.home() / ".local" / "bin")
+    )
+    launcher = bin_dir / "macip-backup"
+    return launcher if launcher.is_file() else None
 
 
 def _validate_calendar(calendar: str) -> None:
@@ -89,29 +99,46 @@ def install_schedule(
     _validate_calendar(calendar)  # antes de sobrescrever units existentes
     config_path = Path(config_path).resolve()
     store_path = Path(store_path).resolve()
-    src_root = Path(__file__).resolve().parents[1]
     unit_dir = unit_directory()
     unit_dir.mkdir(parents=True, exist_ok=True)
     name = f"{_UNIT_PREFIX}{task.id}"
 
+    launcher = _installed_launcher()
+    if launcher is not None:
+        # Instalado: ExecStart no launcher — resolve `current` a cada
+        # invocação, então a unit gerada continua servindo após update.
+        exec_line = (
+            f"ExecStart={_unit_value(launcher)} agent "
+            f"{_unit_value(config_path)} --store {_unit_value(store_path)}"
+        )
+        pythonpath_line = ""
+    else:
+        src_root = Path(__file__).resolve().parents[1]
+        exec_line = (
+            f"ExecStart={_unit_value(sys.executable)} -m macip_backup.cli agent "
+            f"{_unit_value(config_path)} --store {_unit_value(store_path)}"
+        )
+        pythonpath_line = f'Environment="PYTHONPATH={_escape_unit(src_root)}"\n'
+
     service_path = unit_dir / f"{name}.service"
     service_path.write_text(
-        f"""[Unit]
+        f"""# macip-backup: unidade gerida pela instalação
+[Unit]
 Description=MAC IP Backup agent — tarefa {_unit_value(task.id)}
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
-Environment="PYTHONPATH={_escape_unit(src_root)}"
-EnvironmentFile=-%h/.config/macip-backup/agent.env
-ExecStart={_unit_value(sys.executable)} -m macip_backup.cli agent {_unit_value(config_path)} --store {_unit_value(store_path)}
+{pythonpath_line}EnvironmentFile=-%h/.config/macip-backup/agent.env
+{exec_line}
 """,
         encoding="utf-8",
     )
     timer_path = unit_dir / f"{name}.timer"
     timer_path.write_text(
-        f"""[Unit]
+        f"""# macip-backup: unidade gerida pela instalação
+[Unit]
 Description=Agendamento do backup {task.id}
 
 [Timer]

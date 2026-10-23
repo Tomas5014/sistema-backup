@@ -15,7 +15,10 @@ from .restic import ResticAdapter, ResticError
 
 
 def main() -> int:
+    from . import __version__
+
     parser = argparse.ArgumentParser(description="POC de backup MAC IP")
+    parser.add_argument("--version", action="version", version=f"macip-backup {__version__}")
     subcommands = parser.add_subparsers(dest="command", required=True)
     for command in ("validate", "run"):
         command_parser = subcommands.add_parser(command)
@@ -143,7 +146,7 @@ def main() -> int:
             restore_signal_handlers,
         )
 
-        lock_file = acquire_task_lock(task.id)
+        locks = acquire_task_lock(task.id)
         try:
             adapter = ResticAdapter(cache_directory=cache_directory())
             previous_handlers = install_cancel_handlers(adapter)
@@ -152,7 +155,8 @@ def main() -> int:
             finally:
                 restore_signal_handlers(previous_handlers)
         finally:
-            lock_file.close()
+            for lock_fd in locks:
+                lock_fd.close()
         print(json.dumps(result.as_dict(), ensure_ascii=False))
         return 0 if result.status is ExecutionStatus.SUCCESS else 2
     except (ConfigurationError, ResticError, OSError, json.JSONDecodeError) as error:

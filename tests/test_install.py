@@ -11,12 +11,14 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
+import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
@@ -45,6 +47,42 @@ def _build_wheel(directory: Path) -> Path:
     wheels = list(directory.glob("macip_backup_poc-*.whl"))
     if len(wheels) != 1:
         raise RuntimeError(f"wheel único não produzido: {wheels}")
+    return wheels[0]
+
+
+def _build_variant_wheel(work_dir: Path, dist_dir: Path, version: str) -> Path:
+    """Wheel de outra release: copia src+pyproject, injeta a versão
+    em ambos — distinguível por __version__."""
+    dist_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(ROOT / "src", work_dir / "src")
+    (work_dir / "pyproject.toml").write_text(
+        (ROOT / "pyproject.toml")
+        .read_text()
+        .replace('version = "0.2.0"', f'version = "{version}"')
+    )
+    init = work_dir / "src" / "macip_backup" / "__init__.py"
+    init.write_text(
+        init.read_text().replace(
+            '__version__ = "0.2.0"', f'__version__ = "{version}"'
+        )
+    )
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import os; "
+                f"os.chdir({str(work_dir)!r}); "
+                "from setuptools.build_meta import build_wheel; "
+                f"build_wheel({str(dist_dir)!r})"
+            ),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    wheels = list(dist_dir.glob("macip_backup_poc-*.whl"))
+    if len(wheels) != 1:
+        raise RuntimeError(f"wheel variante não produzido: {wheels}")
     return wheels[0]
 
 
@@ -189,13 +227,22 @@ class InstallFlowTests(unittest.TestCase):
         marker = self.config_dir / "marcador.txt"
         marker.write_text("não apagar")
         db = self.state_dir / "agent.db"
-        db.write_bytes(b"historico-fake")
+        connection = sqlite3.connect(db)
+        connection.execute("CREATE TABLE t (x TEXT)")
+        connection.execute("INSERT INTO t VALUES ('historico')")
+        connection.commit()
+        connection.close()
 
         again = self._install("--commit", "bbb")
         self.assertEqual(again.returncode, 0, again.stderr)
 
         self.assertEqual(marker.read_text(), "não apagar")
-        self.assertEqual(db.read_bytes(), b"historico-fake")
+        connection = sqlite3.connect(db)
+        row = connection.execute("SELECT x FROM t").fetchone()
+        connection.close()
+        self.assertEqual(row[0], "historico")
+        # update criou backup consistente do banco
+        self.assertTrue(list((self.state_dir / "db-backups").iterdir()))
         manifest = json.loads(
             (self.macip_home / "install.json").read_text()
         )
@@ -214,26 +261,60 @@ class InstallFlowTests(unittest.TestCase):
         # Instalação anterior continua utilizável.
         still = self._run_cli("run", str(config))
         self.assertEqual(still.returncode, 0, still.stderr + still.stdout)
-        self.assertEqual(
-            self.macip_home.joinpath("current").resolve().name, "0.2.0"
+        self.assertTrue(
+            self.macip_home.joinpath("current")
+            .resolve()
+            .name.startswith("0.2.0-")
         )
 
         recovered = self._install("--commit", "v2")
         self.assertEqual(recovered.returncode, 0, recovered.stderr)
         self.assertEqual(self._run_cli("validate", str(config)).returncode, 0)
 
-    def test_install_refuses_during_active_execution(self) -> None:
+    def test_install_refused_during_active_task(self) -> None:
+        """Executor segura SH em maintenance.lock → install recusa."""
         self.assertEqual(self._install().returncode, 0)
         locks = self.state_dir / "locks"
         locks.mkdir(parents=True, exist_ok=True)
-        lock_file = (locks / "task-inst.lock").open("a")
+        lock_file = (locks / "maintenance.lock").open("a")
         try:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
             refused = self._install()
             self.assertNotEqual(refused.returncode, 0)
-            self.assertIn("execução ativa", refused.stderr)
+            self.assertIn("em andamento", refused.stderr)
         finally:
             lock_file.close()
+
+    def test_run_refused_during_maintenance(self) -> None:
+        """Manutenção com EX → `run` da mesma instalação recusa."""
+        self.assertEqual(self._install().returncode, 0)
+        _, config = self._write_task()
+        locks = self.state_dir / "locks"
+        lock_file = (locks / "maintenance.lock").open("a")
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            refused = self._run_cli("run", str(config))
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertIn("manutenção", refused.stderr + refused.stdout)
+        finally:
+            lock_file.close()
+
+    def test_two_tasks_share_maintenance_outside_it(self) -> None:
+        """Dois locks SH de tarefas diferentes coexistem fora de manutenção."""
+        self.assertEqual(self._install().returncode, 0)
+        locks = self.state_dir / "locks"
+        a = (locks / "task-a.lock").open("a")
+        b = (locks / "task-b.lock").open("a")
+        m1 = (locks / "maintenance.lock").open("a")
+        m2 = (locks / "maintenance.lock").open("a")
+        try:
+            for lock in (a, b, m1, m2):
+                fcntl.flock(lock.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+            fcntl.flock(a.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(b.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            for lock in (a, b, m1, m2):
+                lock.close()
 
     def test_home_with_spaces_installs_and_runs(self) -> None:
         spaced_home = self.root / "dir com espaços" / "home"
@@ -264,15 +345,136 @@ class InstallFlowTests(unittest.TestCase):
         self.assertTrue((self.state_dir / "logs" / "registro.jsonl").exists())
         self.assertIn("Preservado", removed.stdout)
 
-    def test_uninstall_refuses_during_active_execution(self) -> None:
+    def test_uninstall_refuses_during_active_task(self) -> None:
         self.assertEqual(self._install().returncode, 0)
         locks = self.state_dir / "locks"
         locks.mkdir(parents=True, exist_ok=True)
-        lock_file = (locks / "task-inst.lock").open("a")
+        lock_file = (locks / "maintenance.lock").open("a")
         try:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
             refused = self._uninstall()
             self.assertNotEqual(refused.returncode, 0)
-            self.assertIn("execução ativa", refused.stderr)
+            self.assertIn("em andamento", refused.stderr)
         finally:
             lock_file.close()
+
+    def test_invalid_wheel_same_version_preserves_previous(self) -> None:
+        """Wheel quebrado da MESMA versão: falha antes da ativação e a
+        CLI anterior continua funcionando."""
+        self.assertEqual(self._install().returncode, 0)
+        _, config = self._write_task()
+        self.assertEqual(self._run_cli("run", str(config)).returncode, 0)
+
+        broken = self.root / "macip_backup_poc-0.2.0-py3-none-any.whl"
+        broken.write_bytes(b"zip corrompido, mesmo nome")
+        failed = self._install(broken)
+        self.assertNotEqual(failed.returncode, 0)
+
+        still = self._run_cli("run", str(config))
+        self.assertEqual(still.returncode, 0, still.stderr + still.stdout)
+
+    def test_same_artifact_reinstall_is_idempotent(self) -> None:
+        self.assertEqual(self._install().returncode, 0)
+        release = self.macip_home.joinpath("current").resolve()
+        again = self._install()
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertEqual(
+            self.macip_home.joinpath("current").resolve(), release
+        )
+        self.assertIn("reutilizando", again.stdout)
+
+    def test_same_version_different_artifact_distinguished(self) -> None:
+        """Mesmo nome de wheel, conteúdo diferente → releases distintos."""
+        self.assertEqual(self._install().returncode, 0)
+        first = self.macip_home.joinpath("current").resolve()
+
+        variant = self.root / "macip_backup_poc-0.2.0-py3-none-any.whl"
+        with zipfile.ZipFile(self.wheel) as zin, zipfile.ZipFile(
+            variant, "w", zipfile.ZIP_DEFLATED
+        ) as zout:
+            for item in zin.namelist():
+                zout.writestr(item, zin.read(item))
+            zout.writestr("macip_backup/_variant.txt", "distinto")
+        updated = self._install(variant)
+        self.assertEqual(updated.returncode, 0, updated.stderr)
+        second = self.macip_home.joinpath("current").resolve()
+
+        self.assertNotEqual(first, second)
+        self.assertTrue(first.name.startswith("0.2.0-"))
+        self.assertTrue(second.name.startswith("0.2.0-"))
+        self.assertTrue(first.exists(), "release anterior preservada")
+
+    def test_service_generated_by_old_release_runs_new_code(self) -> None:
+        """Unit gerada na release A executa a release B após update —
+        ExecStart no launcher, sem PYTHONPATH preso."""
+        self.assertEqual(self._install().returncode, 0)
+        _, config = self._write_task()
+        scheduled = self._run_cli(
+            "schedule", str(config),
+            "--store", str(self.state_dir / "agent.db"),
+            "--calendar", "daily",
+        )
+        self.assertEqual(scheduled.returncode, 0, scheduled.stderr + scheduled.stdout)
+        service = (
+            self.home / ".config" / "systemd" / "user"
+            / "macip-backup-agent-task-inst.service"
+        ).read_text()
+        self.assertIn(str(self.bin), service)          # ExecStart = launcher
+        self.assertNotIn("PYTHONPATH", service)         # sem pin de release
+        self.assertIn("# macip-backup:", service)       # marcador próprio
+
+        before = self._run_cli("--version")
+        self.assertIn("0.2.0", before.stdout)
+
+        wheel_021 = _build_variant_wheel(
+            self.root / "pkg-021", self.dist_dir / "v021", "0.2.1"
+        )
+        updated = self._install(wheel_021)
+        self.assertEqual(updated.returncode, 0, updated.stderr)
+
+        after = self._run_cli("--version")
+        self.assertIn("0.2.1", after.stdout)  # o que o service vai executar
+
+    def test_uninstall_preserves_foreign_and_unmanaged(self) -> None:
+        """Unit com prefixo semelhante mas sem marcador + binário alheio:
+        tudo permanece."""
+        self.assertEqual(self._install().returncode, 0)
+        unit_dir = self.home / ".config" / "systemd" / "user"
+        unit_dir.mkdir(parents=True)
+        foreign = unit_dir / "macip-backup-alien.timer"
+        foreign.write_text("[Timer]\nOnCalendar=daily\n")  # sem marcador
+        ours = unit_dir / "macip-backup-task-inst.timer"
+        ours.write_text(
+            "# macip-backup: unidade gerida pela instalação\n[Timer]\nOnCalendar=daily\n"
+        )
+        self.env["MACIP_SYSTEMCTL"] = str(self._stub_systemctl(0))
+
+        removed = self._uninstall()
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        self.assertTrue(foreign.exists())
+        self.assertFalse(ours.exists())
+        self.assertIn("macip-backup-alien.timer", removed.stdout)
+
+    def test_uninstall_aborts_on_systemctl_failure(self) -> None:
+        """Falha ao desativar unit nossa → aborta ANTES de remover programa."""
+        self.assertEqual(self._install().returncode, 0)
+        unit_dir = self.home / ".config" / "systemd" / "user"
+        unit_dir.mkdir(parents=True)
+        ours = unit_dir / "macip-backup-task-inst.service"
+        ours.write_text(
+            "# macip-backup: unidade gerida pela instalação\n[Service]\nType=oneshot\n"
+        )
+        self.env["MACIP_SYSTEMCTL"] = str(self._stub_systemctl(1))
+
+        refused = self._uninstall()
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertTrue(
+            (self.macip_home / "releases").exists(),
+            "programa removido apesar da falha do systemctl",
+        )
+
+    def _stub_systemctl(self, returncode: int) -> Path:
+        stub = self.root / f"systemctl-stub-{returncode}"
+        stub.write_text(f"#!/bin/sh\nexit {returncode}\n")
+        stub.chmod(0o755)
+        return stub

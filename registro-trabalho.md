@@ -917,3 +917,57 @@ servidor, firewall, mount ou política de AV alterada.
 (SFTP/SMB/S3/combinações — ambientes remotos não preparados).
 
 ---
+
+## 2026-10-23 — Ciclo install/update/uninstall consolidado
+
+### 1. Releases imutáveis
+
+- Release nomeada `<versão>-<sha256[:12]>` — artefato distinto →
+  diretório distinto; mesmo artefato → `.ok` reutilizado (idempotente).
+- Candidato montado em `.candidate-*`, validado (venv + pip + smoke),
+  promovido por `mv -T`; flip de `current` por symlink temporário +
+  `mv -T` — nunca apagamos a release apontada por current.
+- `install.json` registra versão + wheel + sha256 + commit.
+
+### 2. Serviço sobrevive à atualização
+
+- Units geradas na instalação operacional usam o launcher
+  `~/.local/bin/macip-backup` como ExecStart (resolve `current` a cada
+  chamada) e NÃO carregam PYTHONPATH — geradas uma vez, executam o
+  código novo após update. Dev (sem launcher) segue `python -m` +
+  PYTHONPATH.
+- `--version` expõe a release realmente executada.
+
+### 3. Exclusão de manutenção
+
+- `maintenance.lock` compartilhado: executores (run/agent/service)
+  seguram SH; install/uninstall seguram EX|NB — corrida recusada nos
+  dois sentidos, tarefas diferentes seguem paralelas.
+
+### 4. Preservação na desinstalação
+
+- Só units com marcador `# macip-backup:` são removidas — prefixo
+  semelhante alheio preservado. Falha ao desativar uma unit nossa
+  ABORTA antes de remover o programa. `--purge` removido — dados
+  operacionais sempre preservados.
+
+### 5. Histórico e guia
+
+- Backup do `agent.db` via `sqlite3.Connection.backup` (Python) — sem
+  fallback de `cp`.
+- Guia: `history` vem de `agent` (não `run`); agent.env acrescentado,
+  nunca sobrescrito; `keyctl padd` alimentado por stdin.
+
+### Homologação desta sessão (isolada, HOME fake + systemctl stub)
+
+15 testes em `tests/test_install.py`: wheel inválido da mesma versão
+→ CLI anterior intacta; reinstalação idempotente; mesmo nome +
+conteúdo distinto → releases distintos; unit gerada em A executa B
+(--version); corrida de manutenção nos dois sentidos; unit alheia +
+systemctl falhando preservados. Validação real de systemd (timer
+disparando código novo) segue pendente com a segunda máquina.
+
+Suíte: **143 testes** — 125 aprovados, 0 falhos, 18 ignorados
+(SFTP/SMB/S3/combinações — ambientes remotos não preparados).
+
+---

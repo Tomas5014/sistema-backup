@@ -71,19 +71,32 @@ def cache_directory() -> Path:
     return Path.home() / ".cache" / "macip-backup"
 
 
-def acquire_task_lock(task_id: str) -> IO[str]:
-    """flock exclusivo não bloqueante — impede execuções simultâneas."""
+def acquire_task_lock(task_id: str) -> tuple[IO[str], IO[str]]:
+    """Lock de manutenção (SH) + lock de tarefa (EX), ambos NB.
+
+    SH em ``maintenance.lock``: muitas tarefas correm juntas fora de
+    manutenção, mas install/update/uninstall (EX) são recusados enquanto
+    houver execução — e execução recusa iniciar durante manutenção.
+    Devolve (manutenção, tarefa) — ambos precisam ser fechados.
+    """
     directory = task_lock_directory()
     directory.mkdir(parents=True, exist_ok=True)
+    maintenance = (directory / "maintenance.lock").open("a")
+    try:
+        fcntl.flock(maintenance.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+    except BlockingIOError as error:
+        maintenance.close()
+        raise ResticError("manutenção em andamento — tente mais tarde") from error
     lock_file = (directory / f"{task_id}.lock").open("a")
     try:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError as error:
         lock_file.close()
+        maintenance.close()
         raise ResticError(
             f"já existe execução da tarefa '{task_id}' em andamento"
         ) from error
-    return lock_file
+    return maintenance, lock_file
 
 
 def install_cancel_handlers(
@@ -129,7 +142,8 @@ def _sweep_stale_executions(store: ExecutionStore, own_task_id: str) -> None:
         try:
             store.mark_stale_interrupted(task_id, _now())
         finally:
-            probe.close()
+            for lock_fd in probe:
+                lock_fd.close()
 
 
 def run_task(config_path: Path, store_path: Path) -> ExecutionResult:
@@ -143,7 +157,7 @@ def run_task(config_path: Path, store_path: Path) -> ExecutionResult:
     # O diretório de estado existe antes de qualquer toque no lock/DB.
     store_path.parent.mkdir(parents=True, exist_ok=True)
     execution_id = str(uuid.uuid4())
-    lock_file = acquire_task_lock(task.id)
+    maintenance_file, lock_file = acquire_task_lock(task.id)
     adapter = ResticAdapter(
         timeouts=task.timeouts, cache_directory=cache_directory()
     )
@@ -151,6 +165,7 @@ def run_task(config_path: Path, store_path: Path) -> ExecutionResult:
         store = ExecutionStore(store_path)
     except Exception:
         lock_file.close()
+        maintenance_file.close()
         raise
     interrupted_by: list[int] = []
     previous_handlers: dict[int, object] = {}
@@ -197,6 +212,7 @@ def run_task(config_path: Path, store_path: Path) -> ExecutionResult:
         restore_signal_handlers(previous_handlers)
         store.close()
         lock_file.close()
+        maintenance_file.close()
 
 
 def history(store_path: Path, task_id: str | None = None) -> list[dict[str, object]]:
