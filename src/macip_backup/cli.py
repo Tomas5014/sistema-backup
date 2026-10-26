@@ -61,6 +61,10 @@ def main() -> int:
         "--store", type=Path, default=Path("/var/lib/macip-backup/agent.db"),
         help="banco SQLite do histórico local (padrão: /var/lib/macip-backup/agent.db)",
     )
+    agent_parser.add_argument(
+        "--central", type=Path, default=None,
+        help="configuração da API central — ativa enfileiramento dos resultados",
+    )
     history_parser = subcommands.add_parser(
         "history",
         help="lista execuções registradas no banco do agente",
@@ -70,6 +74,25 @@ def main() -> int:
         help="banco SQLite do histórico local",
     )
     history_parser.add_argument("--task", dest="task_id", help="filtra por task id")
+    history_parser.add_argument(
+        "--outbox", action="store_true", help="mostra a fila de envio à central"
+    )
+    sync_parser = subcommands.add_parser(
+        "sync",
+        help="envia resultados pendentes da outbox à API central (uma rodada)",
+    )
+    sync_parser.add_argument(
+        "--store", type=Path, default=Path("/var/lib/macip-backup/agent.db"),
+        help="banco SQLite do histórico local",
+    )
+    sync_parser.add_argument(
+        "--central", type=Path, required=True,
+        help="configuração da API central (url, agent_id, token_environment)",
+    )
+    sync_parser.add_argument(
+        "--limit", type=int, default=50,
+        help="máximo de itens enviados nesta rodada (padrão: 50)",
+    )
     schedule_parser = subcommands.add_parser(
         "schedule",
         help="instala par service+timer systemd --user para a tarefa",
@@ -107,14 +130,24 @@ def main() -> int:
             print(schedule_json(uninstall_schedule(arguments.task_id)))
             return 0
         if arguments.command == "history":
+            if arguments.outbox:
+                from .sync import outbox_json
+
+                print(outbox_json(arguments.store))
+                return 0
             from .agent import history_json
 
             print(history_json(arguments.store, arguments.task_id))
             return 0
+        if arguments.command == "sync":
+            from .sync import run_sync
+
+            print(json.dumps(run_sync(arguments.store, arguments.central, arguments.limit), ensure_ascii=False))
+            return 0
         if arguments.command == "agent":
             from .agent import run_task
 
-            result = run_task(arguments.config, arguments.store)
+            result = run_task(arguments.config, arguments.store, arguments.central)
             print(json.dumps(result.as_dict(), ensure_ascii=False))
             return 0 if result.status is ExecutionStatus.SUCCESS else 2
         task = _load_task(arguments.config)

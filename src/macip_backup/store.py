@@ -23,16 +23,21 @@ transacionalmente para v2 preservando todo o histórico.
 from __future__ import annotations
 
 import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .models import ConfigurationError
 
+
+def _utcnow() -> str:
+    return datetime.now(UTC).isoformat()
+
 if TYPE_CHECKING:
     from .models import TaskSpec
     from .orchestrator import AttemptResult, DestinationResult, ExecutionResult
 
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS executions (
@@ -78,11 +83,34 @@ CREATE TABLE IF NOT EXISTS attempts (
     FOREIGN KEY (execution_id) REFERENCES executions(execution_id)
 );
 CREATE INDEX IF NOT EXISTS idx_executions_task ON executions(task_id, started_at_utc);
+CREATE TABLE IF NOT EXISTS outbox (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    execution_id TEXT NOT NULL UNIQUE,
+    endpoint TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT,
+    last_error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 
 class ExecutionStore:
-    def __init__(self, path: Path, check_same_thread: bool = True) -> None:
+    def __init__(
+        self,
+        path: Path,
+        check_same_thread: bool = True,
+        outbox: tuple[str, str] | None = None,
+    ) -> None:
+        """outbox=(endpoint, agent_id_central) habilita enfileiramento
+        de resultados na mesma transação da conclusão da execução.
+        Cada item fica vinculado ao endpoint/agente do enfileiramento —
+        mudança de configuração não redireciona itens antigos."""
+        self._outbox = outbox
         self._path = Path(path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._connection = sqlite3.connect(
@@ -126,6 +154,8 @@ class ExecutionStore:
                 self._migrate_v1()
             if version < 3:
                 self._migrate_v2()
+            if version < 4:
+                self._migrate_v3()
             self._connection.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             self._connection.execute("COMMIT")
         except Exception:
@@ -264,6 +294,200 @@ class ExecutionStore:
                 "ALTER TABLE executions ADD COLUMN interrupt_detail TEXT"
             )
 
+    def _migrate_v3(self) -> None:
+        """v3 → v4: outbox persistente para envio dos resultados."""
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS outbox (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                execution_id TEXT NOT NULL UNIQUE,
+                endpoint TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at TEXT,
+                last_error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+
+    # -- outbox: vinculado à identidade/endpoint do enfileiramento -----------
+
+    def _enqueue_locked(self, execution_id: str) -> None:
+        """INSERT dentro da transação da conclusão — nunca órfão."""
+        if self._outbox is None:
+            return
+        payload = self._payload_from_rows(execution_id)
+        now = _utcnow()
+        self._connection.execute(
+            "INSERT OR IGNORE INTO outbox "
+            "(execution_id, endpoint, agent_id, payload, status, "
+            "attempts, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, 'pending', 0, ?, ?)",
+            (
+                execution_id,
+                self._outbox[0],
+                self._outbox[1],
+                payload,
+                now,
+                now,
+            ),
+        )
+
+    def _payload_from_rows(self, execution_id: str) -> str:
+        """Metadados no contrato da API — client_id LOCAL não é enviado
+        (não é a identidade central); agent_id é o UUID central da
+        configuração. Nenhum segredo nem tarefa completa."""
+        import json as _json
+
+        execution = self._connection.execute(
+            "SELECT status, task_id, started_at_utc, finished_at_utc "
+            "FROM executions WHERE execution_id = ?",
+            (execution_id,),
+        ).fetchone()
+        if execution is None:
+            return _json.dumps({"execution_id": execution_id, "error": "missing"})
+        destinations = []
+        for row in self._connection.execute(
+            "SELECT destination_id, status, duration_seconds, snapshot_id, "
+            "snapshots_available, files_processed, bytes_processed, error, "
+            "exit_code, failed_operation, timeout_seconds "
+            "FROM destination_results WHERE execution_id = ? "
+            "ORDER BY destination_id",
+            (execution_id,),
+        ):
+            attempts = [
+                {
+                    "attempt": a[0],
+                    "status": a[1],
+                    "started_at_utc": a[2],
+                    "finished_at_utc": a[3],
+                    "duration_seconds": a[4],
+                    "retryable": bool(a[5]),
+                    "snapshot_id": a[6],
+                    "error": a[7],
+                    "exit_code": a[8],
+                    "failed_operation": a[9],
+                    "timeout_seconds": a[10],
+                }
+                for a in self._connection.execute(
+                    "SELECT attempt, status, started_at_utc, finished_at_utc, "
+                    "duration_seconds, retryable, snapshot_id, error, "
+                    "exit_code, failed_operation, timeout_seconds "
+                    "FROM attempts WHERE execution_id = ? AND destination_id = ? "
+                    "ORDER BY attempt",
+                    (execution_id, row[0]),
+                )
+            ]
+            # o destino não grava timestamps próprios — derivam das
+            # tentativas (fallback para o intervalo da execução)
+            started = attempts[0]["started_at_utc"] if attempts else execution[2]
+            finished = (
+                attempts[-1]["finished_at_utc"] if attempts else execution[3]
+            )
+            destinations.append(
+                {
+                    "destination_id": row[0],
+                    "status": row[1],
+                    "started_at_utc": started,
+                    "finished_at_utc": finished,
+                    "duration_seconds": row[2],
+                    "snapshot_id": row[3],
+                    "snapshots_available": row[4],
+                    "files_processed": row[5],
+                    "bytes_processed": row[6],
+                    "error": row[7],
+                    "exit_code": row[8],
+                    "failed_operation": row[9],
+                    "timeout_seconds": row[10],
+                    "attempts": attempts,
+                }
+            )
+        return _json.dumps(
+            {
+                "execution_id": execution_id,
+                "task_id": execution[1],
+                "agent_id": self._outbox[1],
+                "status": execution[0],
+                "started_at_utc": execution[2],
+                "finished_at_utc": execution[3],
+                "destinations": destinations,
+            },
+            ensure_ascii=False,
+        )
+
+    def pending_outbox(
+        self, endpoint: str, agent_id: str, now: str, limit: int
+    ) -> list[dict]:
+        """Itens pendentes DESTE endpoint/agente — a fila fica vinculada
+        à identidade do enfileiramento; outra configuração não os toca."""
+        rows = self._connection.execute(
+            "SELECT id, execution_id, payload FROM outbox "
+            "WHERE status = 'pending' AND endpoint = ? AND agent_id = ? "
+            "AND (next_attempt_at IS NULL OR next_attempt_at <= ?) "
+            "ORDER BY id LIMIT ?",
+            (endpoint, agent_id, now, limit),
+        ).fetchall()
+        return [{"id": r[0], "execution_id": r[1], "payload": r[2]} for r in rows]
+
+    def outbox_state(self) -> list[dict]:
+        """Fila consultável: pendentes, bloqueados, permanentes, enviados."""
+        rows = self._connection.execute(
+            "SELECT id, execution_id, endpoint, agent_id, payload, status, "
+            "attempts, next_attempt_at, last_error, created_at, updated_at "
+            "FROM outbox ORDER BY id"
+        ).fetchall()
+        return [
+            {
+                "id": r[0],
+                "execution_id": r[1],
+                "endpoint": r[2],
+                "agent_id": r[3],
+                "payload": r[4],
+                "status": r[5],
+                "attempts": r[6],
+                "next_attempt_at": r[7],
+                "last_error": r[8],
+                "created_at": r[9],
+                "updated_at": r[10],
+            }
+            for r in rows
+        ]
+
+    def _outbox_update(
+        self,
+        row_id: int,
+        status: str,
+        attempts: int | None = None,
+        next_attempt_at: str | None = None,
+        last_error: str | None = None,
+    ) -> None:
+        with self._connection:
+            self._connection.execute(
+                "UPDATE outbox SET status = ?, attempts = COALESCE(?, attempts), "
+                "next_attempt_at = ?, last_error = ?, updated_at = ? "
+                "WHERE id = ?",
+                (status, attempts, next_attempt_at, last_error, _utcnow(), row_id),
+            )
+
+    def outbox_sent(self, row_id: int) -> None:
+        self._outbox_update(row_id, "sent")
+
+    def outbox_retry(self, row_id: int, error: str, next_attempt_at: str) -> None:
+        with self._connection:
+            self._connection.execute(
+                "UPDATE outbox SET attempts = attempts + 1, next_attempt_at = ?, "
+                "last_error = ?, updated_at = ? WHERE id = ?",
+                (next_attempt_at, error[:500], _utcnow(), row_id),
+            )
+
+    def outbox_blocked(self, row_id: int, kind: str, error: str) -> None:
+        """auth_blocked | failed_permanent — consultável, sem reenvio."""
+        self._outbox_update(row_id, kind, last_error=error[:500])
+
     # -- ciclo de vida da execução -------------------------------------------
 
     def record_start(
@@ -283,7 +507,8 @@ class ExecutionStore:
 
         Com o recorder incremental as linhas já existem — os INSERT OR
         REPLACE abaixo são idempotentes e também cobrem gravações feitas
-        sem hooks incrementais.
+        sem hooks incrementais. A conclusão da execução e o item da
+        outbox acontecem NA MESMA transação — nunca órfãos.
         """
         with self._connection:
             self._connection.execute(
@@ -291,21 +516,21 @@ class ExecutionStore:
                 "WHERE execution_id = ?",
                 (result.status.value, result.finished_at_utc, result.execution_id),
             )
-        for destination in result.destinations:
-            self.destination_finished(result.execution_id, destination)
-            for attempt in destination.attempts:
-                self._backfill_attempt(
-                    result.execution_id, destination.destination_id, attempt
-                )
+            for destination in result.destinations:
+                self._destination_upsert(result.execution_id, destination)
+                for attempt in destination.attempts:
+                    self._attempt_upsert(
+                        result.execution_id, destination.destination_id, attempt
+                    )
+            self._enqueue_locked(result.execution_id)
 
-    def _backfill_attempt(
+    def _attempt_upsert(
         self,
         execution_id: str,
         destination_id: str,
         attempt: "AttemptResult",
     ) -> None:
-        with self._connection:
-            self._connection.execute(
+        self._connection.execute(
                 "INSERT OR REPLACE INTO attempts "
                 "(execution_id, destination_id, attempt, status, retryable, "
                 "started_at_utc, finished_at_utc, duration_seconds, "
@@ -342,6 +567,14 @@ class ExecutionStore:
         — nunca toca execução de tarefa com lock ocupado.
         """
         with self._connection:
+            stale_ids = [
+                row[0]
+                for row in self._connection.execute(
+                    "SELECT execution_id FROM executions "
+                    "WHERE status = 'running' AND task_id = ?",
+                    (task_id,),
+                ).fetchall()
+            ]
             cursor = self._connection.execute(
                 "UPDATE executions SET status = 'interrupted', finished_at_utc = ? "
                 "WHERE status = 'running' AND task_id = ?",
@@ -360,6 +593,8 @@ class ExecutionStore:
                 "(SELECT execution_id FROM executions WHERE task_id = ?)",
                 (task_id,),
             )
+            for execution_id in stale_ids:
+                self._enqueue_locked(execution_id)
         return cursor.rowcount
 
     def mark_interrupted(
@@ -391,6 +626,7 @@ class ExecutionStore:
                 "WHERE execution_id = ? AND status = 'running'",
                 (execution_id,),
             )
+            self._enqueue_locked(execution_id)
 
     # -- gravação incremental por tentativa ----------------------------------
 
@@ -472,27 +708,32 @@ class ExecutionStore:
         self, execution_id: str, result: "DestinationResult"
     ) -> None:
         with self._connection:
-            self._connection.execute(
-                "INSERT OR REPLACE INTO destination_results "
-                "(execution_id, destination_id, status, snapshot_id, "
-                "snapshots_available, files_processed, bytes_processed, "
-                "error, exit_code, failed_operation, timeout_seconds, "
-                "duration_seconds) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    execution_id,
-                    result.destination_id,
-                    result.status.value,
-                    result.snapshot_id,
-                    result.snapshots_available,
-                    result.files_processed,
-                    result.bytes_processed,
-                    result.error,
-                    result.exit_code,
-                    result.failed_operation,
-                    result.timeout_seconds,
-                    result.duration_seconds,
-                ),
-            )
+            self._destination_upsert(execution_id, result)
+
+    def _destination_upsert(
+        self, execution_id: str, result: "DestinationResult"
+    ) -> None:
+        self._connection.execute(
+            "INSERT OR REPLACE INTO destination_results "
+            "(execution_id, destination_id, status, snapshot_id, "
+            "snapshots_available, files_processed, bytes_processed, "
+            "error, exit_code, failed_operation, timeout_seconds, "
+            "duration_seconds) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                execution_id,
+                result.destination_id,
+                result.status.value,
+                result.snapshot_id,
+                result.snapshots_available,
+                result.files_processed,
+                result.bytes_processed,
+                result.error,
+                result.exit_code,
+                result.failed_operation,
+                result.timeout_seconds,
+                result.duration_seconds,
+            ),
+        )
 
     # -- consulta -------------------------------------------------------------
 

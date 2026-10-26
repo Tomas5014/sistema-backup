@@ -458,3 +458,62 @@ Backend segue [repositórios SFTP](https://restic.readthedocs.io/en/stable/030_p
 Próximo passo: executar `tests/sftp/run-integration.sh` em host Docker funcional,
 registrar resultado e homologar falhas controladas. Windows, API e portal
 permanecem fora do escopo; SMB, S3 e agenda systemd --user estão implementados.
+
+## Integração com a central (opcional)
+
+O agente funciona 100% offline; a sincronização é opt-in via configuração
+local separada — **nunca** no JSON da tarefa e sem segredos em disco:
+
+```json
+// ~/.config/macip-backup/central.json
+{
+  "url": "https://backup-central.exemplo.local",
+  "agent_id": "<uuid-central-do-agente>",
+  "token_environment": "MACIP_API_TOKEN",
+  "connect_timeout_seconds": 10,
+  "request_timeout_seconds": 30
+}
+```
+
+- `agent_id`: UUID **central** do agente (provisionado via API admin) —
+  o `client_id` local da tarefa (`macip-laboratorio`) NÃO é enviado.
+- Token: somente por ambiente ou kernel keyring
+  (`keyctl add user macip.MACIP_API_TOKEN <TOKEN> @s`) — resolvido
+  apenas no envio; ausência não impede backup nem enfileiramento.
+- HTTPS obrigatório fora de localhost; TLS sempre verificado;
+  redirecionamentos nunca seguidos.
+
+### Fluxo
+
+```bash
+# 1) backup com enfileiramento — resultado vira item pendente da outbox
+macip-backup agent tarefa.json --store ~/.local/state/macip-backup/agent.db \
+  --central ~/.config/macip-backup/central.json
+
+# 2) consulta a fila (pendentes, bloqueados, permanentes, enviados)
+macip-backup history --store ~/.local/state/macip-backup/agent.db --outbox
+
+# 3) uma rodada de envio (agendamento automático: incremento posterior)
+macip-backup sync --store ~/.local/state/macip-backup/agent.db \
+  --central ~/.config/macip-backup/central.json --limit 50
+```
+
+A conclusão da execução e o item da outbox são **a mesma transação
+SQLite** — nunca uma execução concluída sem item correspondente.
+O `execution_id` local é estável entre reenvios; aceitação perdida ou
+morte do processo mantém o item reenviável e a idempotência da API
+(`UNIQUE(agent_id, execution_id)`) impede duplicidade.
+
+### Estados da outbox
+
+| status | significado | comportamento |
+|---|---|---|
+| `pending` | aguardando envio | reenvia com backoff (30s→1h, máx. 10) |
+| `sent` | entregue (`created`/`duplicate`) | consultável |
+| `auth_blocked` | credencial inválida/revogada | aguarda correção — sem retry |
+| `failed_permanent` | 409/413/422 ou tentativas esgotadas | consultável — sem retry |
+
+Cada item fica vinculado ao endpoint/agente do enfileiramento — mudar a
+configuração não redireciona resultados antigos para outro servidor.
+O `sync` respeita o lock de manutenção e não disputa a fila com outro
+sincronizador. Erros registrados nunca contêm token/`Authorization`.

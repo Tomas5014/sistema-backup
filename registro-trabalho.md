@@ -1256,3 +1256,49 @@ Agente/VM: código do agente intocado — regressão coberta pela suíte
 anterior (150 testes verdes em 0f08607). Piloto em acompanhamento.
 
 ---
+
+## 2026-10-26 — Outbox durável do agente + sync à API central
+
+Branch `feature/agent-outbox` (base: 50eda22 em feature/control-api).
+VM srvdev1 intocada — piloto em acompanhamento.
+
+### Implementado
+
+- `central.py` — CentralSpec (url/agent_id UUID/token_environment/
+  timeouts); HTTPS fora de localhost; `token` no arquivo é recusado;
+  client_id local da tarefa NÃO é a identidade central.
+- `store.py` v3→v4 (migração transacional, histórico preservado):
+  `outbox` (execution_id único, endpoint+agent_id vinculados ao
+  enfileiramento, payload estável, status/attempts/next_attempt_at/
+  last_error sanitizado). Enfileira NA MESMA transação de
+  `record_finish`, `mark_interrupted` e `mark_stale_interrupted` —
+  cobre success/partial/failed/interrupted e órfãs; `running` nunca.
+- `sync.py` — `macip-backup sync --store X --central Y --limit N`:
+  urllib stdlib (sem deps novas no agente), sem redirects, TLS
+  verificado, nenhuma txn SQLite aberta durante HTTP, locks
+  maintenance-SH + sync-EX. Classificação: 200/201 created/duplicate
+  → sent; 401/403 → auth_blocked; 409/413/422 → failed_permanent;
+  5xx/rede/timeout/inesperado → retry com backoff (30s→1h, 10 máx).
+- `history --outbox` — fila consultável.
+- `agent --central` — opt-in; sem a flag, comportamento idêntico.
+
+### Testes (reais, não mockados)
+
+`tests/test_outbox.py` — **14/14**: backup real com API fora →
+pendente; reabertura preserva fila; envio OK; resposta perdida →
+reenvio sem duplicar; 500→retry; sem token→skip; 403→auth_blocked sem
+retry; 409/422→permanente; mudança de endpoint/agente não redireciona;
+lock de manutenção; migração v3→v4; HTTPS e token-no-arquivo.
+
+`tests/test_integration_outbox.py` — **1/1 REAL**: API uvicorn +
+PostgreSQL 17 (podman, banco descartável) → provisiona via admin HTTP
+→ backup local → sync → admin consulta destinos/tentativas → reenvio =
+1 execução central.
+
+### Pendente
+
+Agendamento automático do sync (timer systemd), outbox para tarefas
+legadas anteriores à v4, distribuição de tarefas — incrementos
+posteriores. Piloto em acompanhamento (término 02/11).
+
+---

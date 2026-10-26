@@ -150,13 +150,25 @@ def _sweep_stale_executions(store: ExecutionStore, own_task_id: str) -> None:
                 lock_fd.close()
 
 
-def run_task(config_path: Path, store_path: Path) -> ExecutionResult:
+def run_task(
+    config_path: Path, store_path: Path, central_path: Path | None = None
+) -> ExecutionResult:
     """Executa uma tarefa como agente local e persiste o resultado.
 
     Credenciais resolvem pelo mesmo mecanismo dos demais comandos:
     variável de ambiente → kernel keyring (`macip.<nome>`).
+
+    ``central_path`` é OPCIONAL — com a configuração central presente,
+    o resultado é enfileirado na outbox na mesma transação da
+    conclusão; sem ela o agente trabalha exatamente como antes.
     """
     task = _load_task(config_path)
+    outbox = None
+    if central_path is not None:
+        from .central import load_central
+
+        spec = load_central(central_path)
+        outbox = (spec.url, spec.agent_id)
     store_path = Path(store_path)
     # O diretório de estado existe antes de qualquer toque no lock/DB.
     store_path.parent.mkdir(parents=True, exist_ok=True)
@@ -166,7 +178,7 @@ def run_task(config_path: Path, store_path: Path) -> ExecutionResult:
         timeouts=task.timeouts, cache_directory=cache_directory()
     )
     try:
-        store = ExecutionStore(store_path)
+        store = ExecutionStore(store_path, outbox=outbox)
     except Exception:
         lock_file.close()
         maintenance_file.close()
