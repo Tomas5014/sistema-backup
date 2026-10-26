@@ -1108,3 +1108,55 @@ A unit da VM (corrigida manualmente) segue válida — marcador
 `install=` preservado; atualização por `install.sh` não toca units.
 
 ---
+
+## 2026-10-26 — API central: cadastro + recebimento autenticado (etapa 1)
+
+Branch `feature/control-api`. Pacote separado `api/` (`macip-backup-api`)
+— o agente Linux NÃO exige FastAPI/PostgreSQL. Piloto de 7 dias segue
+em acompanhamento (iniciado 26/10, término previsto 02/11) — a VM não
+foi alterada.
+
+### Entregue
+
+- `api/` FastAPI + SQLAlchemy + psycopg + PostgreSQL:
+  - clients / agents / agent_credentials (token só como SHA-256,
+    entregue uma vez, revogação imediata);
+  - executions / destination_results / attempt_results — espelho do
+    ExecutionResult do agente (success/partial/failed/interrupted e
+    success/failed/interrupted preservados);
+  - `last_seen_at` atualizado em horário do servidor a cada chamada
+    autenticada; `received_at`/`started/finished_at_utc` separados;
+  - migrações versionadas + transacionais + `pg_advisory_lock` —
+    nunca apagam histórico;
+  - admin Bearer de ambiente (sem default) × token de agente — auth
+    separadas; identidade vem da credencial, corpo contraditório → 403;
+  - `/healthz` + `/readyz` (SELECT 1); paginação + filtros cliente/
+    agente/tarefa/status/período; limites de corpo e itens; timezone
+    obrigatória;
+  - idempotência: `UNIQUE(agent_id, execution_id)` +
+    `ON CONFLICT DO NOTHING` + hash do payload → created / duplicate /
+    409 conflict — corrida coberta por constraint, não por consulta.
+
+### Homologação real desta sessão
+
+PostgreSQL 17 (podman, banco exclusivo :55432) — **17/17 testes**:
+cadastro/vínculos, admin+agente auth, token inválido e revogado
+(imediato), cruzamento de clientes → 403, envio completo com
+destinos+tentativas, 4 estados preservados, heartbeat + last_seen,
+reenvio idêntico sem duplicação, conflito de conteúdo, **duas
+requisições simultâneas com o mesmo execution_id → 1 linha**,
+paginação/filtros/validações (timezone naive → 422, >32 destinos →
+422), token ausente de logs/respostas e armazenado só como hash,
+migração reaplicada sem perda de dados.
+
+Suíte do agente (regressão): **150 testes — 132 aprovados, 0 falhos, 18 ignorados** — zero regressão.
+
+### Pendente (não alegado)
+
+- Sincronização/outbox do agente (incremento posterior);
+- distribuição de tarefas, comandos remotos, portal, Windows;
+- HTTPS: documentado como exigência fora de localhost — não há proxy
+  configurado nesta etapa;
+- piloto de 7 dias: segue em acompanhamento (não concluído).
+
+---
