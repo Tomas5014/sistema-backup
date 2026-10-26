@@ -40,6 +40,49 @@ class RecoveryAdapter:
 
 
 class IntegrationValidationCommandTests(unittest.TestCase):
+    def test_schedule_sync_forwards_store_central_calendar_and_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = root / "agent.db"
+            central = root / "central.json"
+            output = io.StringIO()
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "macip-backup-poc", "schedule-sync", "--store", str(store),
+                    "--central", str(central), "--calendar", "hourly",
+                    "--limit", "7", "--enable",
+                ],
+            ), patch(
+                "macip_backup.systemd.install_sync_schedule",
+                return_value={"timer_name": "macip-backup-sync-test.timer"},
+            ) as install, patch("sys.stdout", output):
+                self.assertEqual(main(), 0)
+        install.assert_called_once_with(
+            store, central, "hourly", limit=7, enable=True
+        )
+        self.assertIn("macip-backup-sync-test.timer", output.getvalue())
+
+    def test_schedule_forwards_optional_central(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = self._write_recovery_config(root)
+            central = root / "central.json"
+            output = io.StringIO()
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "macip-backup-poc", "schedule", str(config_path), "--store",
+                    str(root / "agent.db"), "--calendar", "daily", "--central", str(central),
+                ],
+            ), patch(
+                "macip_backup.systemd.install_schedule", return_value={"timer_name": "x"}
+            ) as install, patch("sys.stdout", output):
+                self.assertEqual(main(), 0)
+        self.assertEqual(install.call_args.kwargs["central_path"], central)
+
     def test_returns_failure_when_restic_is_absent(self) -> None:
         output = io.StringIO()
         with patch("macip_backup.cli.shutil.which", return_value=None), patch("sys.stdout", output):

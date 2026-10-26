@@ -74,8 +74,12 @@ class _FakeApi(BaseHTTPRequestHandler):
             while hold_file.exists() and not release_file.exists() and time.time() < deadline:
                 time.sleep(0.05)
             _FakeApi.accepted_execution_ids.add(accepted)
-        if _FakeApi.delay_before_close:
-            time.sleep(_FakeApi.delay_before_close)
+        delay_before_close = _FakeApi.delay_before_close
+        if delay_before_close:
+            # Captura o valor antes do cliente expirar. O tearDown da prova
+            # seguinte não pode trocar a decisão deste handler atrasado.
+            _FakeApi.delay_before_close = 0.0
+            time.sleep(delay_before_close)
             self.close_connection = True
             return
         if _FakeApi.disconnect_after_accept:

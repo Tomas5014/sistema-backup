@@ -127,10 +127,29 @@ def main() -> int:
         "--enable", action="store_true",
         help="roda daemon-reload + enable --now no timer",
     )
+    schedule_parser.add_argument(
+        "--central", type=Path, default=None,
+        help="configuração central opcional; enfileira resultados do backup",
+    )
     unschedule_parser = subcommands.add_parser(
         "unschedule", help="remove service+timer systemd --user da tarefa"
     )
     unschedule_parser.add_argument("task_id")
+    sync_schedule_parser = subcommands.add_parser(
+        "schedule-sync",
+        help="instala timer systemd --user independente para sync da outbox",
+    )
+    sync_schedule_parser.add_argument("--store", type=Path, required=True)
+    sync_schedule_parser.add_argument("--central", type=Path, required=True)
+    sync_schedule_parser.add_argument("--calendar", required=True)
+    sync_schedule_parser.add_argument("--limit", type=int, default=50)
+    sync_schedule_parser.add_argument("--enable", action="store_true")
+    unsync_schedule_parser = subcommands.add_parser(
+        "unschedule-sync",
+        help="remove somente o timer de sync do banco e central informados",
+    )
+    unsync_schedule_parser.add_argument("--store", type=Path, required=True)
+    unsync_schedule_parser.add_argument("--central", type=Path, required=True)
     arguments = parser.parse_args()
 
     try:
@@ -144,6 +163,15 @@ def main() -> int:
             from .systemd import schedule_json, uninstall_schedule
 
             print(schedule_json(uninstall_schedule(arguments.task_id)))
+            return 0
+        if arguments.command == "unschedule-sync":
+            from .systemd import schedule_json, uninstall_sync_schedule
+
+            print(
+                schedule_json(
+                    uninstall_sync_schedule(arguments.store, arguments.central)
+                )
+            )
             return 0
         if arguments.command == "history":
             if arguments.outbox:
@@ -180,6 +208,21 @@ def main() -> int:
             result = run_task(arguments.config, arguments.store, arguments.central)
             print(json.dumps(result.as_dict(), ensure_ascii=False))
             return 0 if result.status is ExecutionStatus.SUCCESS else 2
+        if arguments.command == "schedule-sync":
+            from .systemd import install_sync_schedule, schedule_json
+
+            print(
+                schedule_json(
+                    install_sync_schedule(
+                        arguments.store,
+                        arguments.central,
+                        arguments.calendar,
+                        limit=arguments.limit,
+                        enable=arguments.enable,
+                    )
+                )
+            )
+            return 0
         task = _load_task(arguments.config)
         if arguments.command == "validate":
             task.validate_for_execution()
@@ -196,6 +239,7 @@ def main() -> int:
                         arguments.store,
                         arguments.calendar,
                         enable=arguments.enable,
+                        central_path=arguments.central,
                     )
                 )
             )

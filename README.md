@@ -353,6 +353,12 @@ macip-backup-poc schedule examples/tarefa-smb.json \
   --store ~/.local/share/macip-backup/agent.db \
   --calendar 'daily' --enable
 
+# Inclui a intenção de entrega central nos backups agendados.
+macip-backup-poc schedule tarefa.json \
+  --store ~/.local/state/macip-backup/agent.db \
+  --central ~/.config/macip-backup/central.json \
+  --calendar 'daily' --enable
+
 # Remove as units da tarefa
 macip-backup-poc unschedule <task_id>
 ```
@@ -380,7 +386,9 @@ Execuções órfãs (kill -9, reboot) viram `interrupted` na próxima execução
 **Units**: `ExecStart` e `Environment` usam escape próprio de systemd
 (`"..."` com `\\` e `\"`), não shlex — caminhos com espaços funcionam.
 `OnCalendar` é validado via `systemd-analyze calendar` antes de sobrescrever
-units existentes.
+units existentes. Cada unit tem marcador exato da instalação; geração e remoção
+recusam arquivos de outra instalação ou sem marcador. `unschedule` desativa o
+timer antes de apagar arquivos; se a desativação falhar, nada é removido.
 
 ## Testes
 
@@ -496,7 +504,7 @@ macip-backup agent tarefa.json --store ~/.local/state/macip-backup/agent.db \
 # 2) consulta a fila (pendentes, bloqueados, permanentes, enviados)
 macip-backup history --store ~/.local/state/macip-backup/agent.db --outbox
 
-# 3) uma rodada de envio (agendamento automático: incremento posterior)
+# 3) uma rodada manual de envio
 macip-backup sync --store ~/.local/state/macip-backup/agent.db \
   --central ~/.config/macip-backup/central.json --limit 50
 
@@ -508,6 +516,49 @@ macip-backup outbox-rearm --store ~/.local/state/macip-backup/agent.db \
 macip-backup outbox-rearm --store ~/.local/state/macip-backup/agent.db \
   --central ~/.config/macip-backup/central.json --include-permanent
 ```
+
+### Timer independente de sync
+
+`schedule-sync` cria outro par `Type=oneshot` para executar somente `sync`.
+Ele não inicia backup, não rearma bloqueios e não mantém daemon ou loop. O nome
+da unit deriva de banco + caminho da configuração central: agendamentos de
+vínculos diferentes coexistem e nunca se substituem.
+
+```bash
+# Instala e habilita rodadas independentes, no máximo 50 itens por rodada.
+macip-backup schedule-sync \
+  --store ~/.local/state/macip-backup/agent.db \
+  --central ~/.config/macip-backup/central.json \
+  --calendar 'hourly' --limit 50 --enable
+
+# Inspeção e diagnóstico.
+systemctl --user list-timers 'macip-backup-sync-*'
+systemctl --user status macip-backup-sync-<identidade>.timer
+journalctl --user -u 'macip-backup-sync-*.service' --no-pager
+macip-backup history --store ~/.local/state/macip-backup/agent.db --outbox
+
+# Desativa e remove somente o vínculo selecionado.
+macip-backup unschedule-sync \
+  --store ~/.local/state/macip-backup/agent.db \
+  --central ~/.config/macip-backup/central.json
+```
+
+`--enable` é sempre explícito. Sem ele, a unit é apenas gerada; execute
+`systemctl --user daemon-reload` e `enable --now` quando for a decisão do
+operador. Para rodar sem login ativo, habilite linger para o usuário uma vez:
+`loginctl enable-linger "$USER"` (requer permissão administrativa).
+
+O serviço lê o mesmo `EnvironmentFile` opcional do agente
+(`$MACIP_CONFIG/agent.env` ou `~/.config/macip-backup/agent.env`) e usa a
+mesma resolução de keyring. O token nunca entra em `ExecStart`, argumentos,
+unit, JSON central ou journal. Para `agent --central`, o backup apenas grava a
+outbox: API indisponível não altera o resultado do backup.
+
+Uma execução do timer significa que a rodada começou e terminou com código 0;
+não significa que todos os itens foram confirmados. Itens em backoff não são
+elegíveis, e cada rodada respeita `--limit`. `pending` pode continuar após
+timeout/rede; `auth_blocked` e `failed_permanent` só voltam por
+`outbox-rearm` explícito.
 
 No início de cada execução, o banco grava se há intenção de envio e, nesse
 caso, o endpoint e UUID central. Recuperações usam somente esse vínculo:

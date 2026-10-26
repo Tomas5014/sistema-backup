@@ -18,6 +18,8 @@ import tempfile
 import threading
 import time
 import unittest
+import uuid
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
@@ -35,7 +37,12 @@ from macip_backup.orchestrator import ExecutionStatus
 from macip_backup.restic import ResticAdapter, ResticError
 from macip_backup.store import ExecutionStore
 from macip_backup.models import ConfigurationError
-from macip_backup.systemd import install_schedule, uninstall_schedule
+from macip_backup.systemd import (
+    install_schedule,
+    install_sync_schedule,
+    uninstall_schedule,
+    uninstall_sync_schedule,
+)
 
 
 def _lock_config(task_id: str, root: Path | None = None) -> dict[str, object]:
@@ -87,6 +94,16 @@ class UnitGenerationTests(unittest.TestCase):
         self.unit_dir = Path(self.temp_dir.name) / "units"
         self.store_path = Path(self.temp_dir.name) / "agent.db"
         self.config_path = Path(self.temp_dir.name) / "tarefa.json"
+        self.central_path = Path(self.temp_dir.name) / "central.json"
+        self.central_path.write_text(
+            json.dumps(
+                {
+                    "url": "http://127.0.0.1:18080",
+                    "agent_id": str(uuid.uuid4()),
+                    "token_environment": "MACIP_TEST_TOKEN",
+                }
+            )
+        )
         self.lock_dir = Path(self.temp_dir.name) / "locks"
         self._previous_lock_env = os.environ.get("MACIP_LOCK_DIR")
         os.environ["MACIP_LOCK_DIR"] = str(self.lock_dir)
@@ -121,6 +138,49 @@ class UnitGenerationTests(unittest.TestCase):
         self.assertIn("OnCalendar=daily", timer)
         self.assertIn("Persistent=true", timer)
         self.assertIn("WantedBy=timers.target", timer)
+
+    def test_backup_schedule_propagates_optional_central(self) -> None:
+        with patch("macip_backup.systemd.unit_directory", return_value=self.unit_dir):
+            result = install_schedule(
+                _task(), self.config_path, self.store_path, "daily",
+                central_path=self.central_path,
+            )
+        service = Path(result["service"]).read_text()
+        self.assertIn(f'--central "{self.central_path.resolve()}"', service)
+
+    def test_sync_schedule_writes_independent_oneshot_with_limit(self) -> None:
+        with patch("macip_backup.systemd.unit_directory", return_value=self.unit_dir):
+            result = install_sync_schedule(
+                self.store_path, self.central_path, "hourly", limit=7
+            )
+        service = Path(result["service"]).read_text()
+        timer = Path(result["timer"]).read_text()
+        self.assertIn("Type=oneshot", service)
+        self.assertIn(" sync --store ", service)
+        self.assertIn(f'--central "{self.central_path.resolve()}"', service)
+        self.assertIn("--limit 7", service)
+        self.assertIn("Persistent=true", timer)
+        self.assertNotIn(" agent ", service)
+
+    def test_sync_schedule_uses_distinct_stable_identity_per_binding(self) -> None:
+        with patch("macip_backup.systemd.unit_directory", return_value=self.unit_dir):
+            first = install_sync_schedule(self.store_path, self.central_path, "daily")
+            second = install_sync_schedule(
+                self.store_path.with_name("outro.db"), self.central_path, "daily"
+            )
+        self.assertNotEqual(first["timer_name"], second["timer_name"])
+        self.assertTrue(Path(first["service"]).exists())
+        self.assertTrue(Path(second["service"]).exists())
+
+    def test_sync_invalid_calendar_preserves_existing_units(self) -> None:
+        with patch("macip_backup.systemd.unit_directory", return_value=self.unit_dir):
+            result = install_sync_schedule(self.store_path, self.central_path, "daily")
+            original = Path(result["service"]).read_text()
+            with self.assertRaisesRegex(ConfigurationError, "OnCalendar"):
+                install_sync_schedule(
+                    self.store_path, self.central_path, "isto nao eh calendario"
+                )
+        self.assertEqual(Path(result["service"]).read_text(), original)
 
     def test_environment_file_with_spaced_config_dir_is_unquoted(self) -> None:
         """EnvironmentFile trata a linha inteira como filename: o caminho
@@ -172,12 +232,46 @@ class UnitGenerationTests(unittest.TestCase):
     def test_uninstall_removes_units(self) -> None:
         with patch(
             "macip_backup.systemd.unit_directory", return_value=self.unit_dir
-        ):
+        ), patch("macip_backup.systemd._systemctl"):
             self._install()
             result = uninstall_schedule("task-systemd")
 
         self.assertEqual(len(result["removed"]), 2)
         self.assertFalse((self.unit_dir / "macip-backup-agent-task-systemd.service").exists())
+
+    def test_uninstall_refuses_foreign_unit_and_disable_failure_preserves_files(self) -> None:
+        service = self.unit_dir / "macip-backup-agent-task-systemd.service"
+        timer = self.unit_dir / "macip-backup-agent-task-systemd.timer"
+        self.unit_dir.mkdir()
+        service.write_text("[Service]\n")
+        timer.write_text("[Timer]\n")
+        with patch("macip_backup.systemd.unit_directory", return_value=self.unit_dir):
+            with self.assertRaisesRegex(ConfigurationError, "propriedade"):
+                uninstall_schedule("task-systemd")
+        service.unlink()
+        timer.unlink()
+        with patch("macip_backup.systemd.unit_directory", return_value=self.unit_dir), patch(
+            "macip_backup.systemd._systemctl", side_effect=ConfigurationError("disable falhou")
+        ):
+            self._install()
+            with self.assertRaisesRegex(ConfigurationError, "disable falhou"):
+                uninstall_schedule("task-systemd")
+        self.assertTrue((self.unit_dir / "macip-backup-agent-task-systemd.service").exists())
+
+    def test_unschedule_sync_is_selective(self) -> None:
+        with patch("macip_backup.systemd.unit_directory", return_value=self.unit_dir), patch(
+            "macip_backup.systemd._systemctl"
+        ):
+            self._install()
+            first = install_sync_schedule(self.store_path, self.central_path, "daily")
+            second = install_sync_schedule(
+                self.store_path.with_name("outro.db"), self.central_path, "daily"
+            )
+            result = uninstall_sync_schedule(self.store_path, self.central_path)
+        self.assertEqual(len(result["removed"]), 2)
+        self.assertTrue((self.unit_dir / "macip-backup-agent-task-systemd.service").exists())
+        self.assertFalse(Path(first["service"]).exists())
+        self.assertTrue(Path(second["service"]).exists())
 
     def test_first_run_creates_state_directories(self) -> None:
         """Store em diretório inexistente: lock e DB criados na ordem."""
@@ -500,6 +594,99 @@ class SystemdUserIntegrationTests(unittest.TestCase):
             self.assertEqual(entries[0]["status"], "success")
         finally:
             self._systemctl("stop", f"{self.unit_name}.timer")
+
+    def test_backup_with_central_enqueues_and_sync_timer_delivers(self) -> None:
+        """Prova real: backup service → outbox → timer sync → HTTP aceito.
+
+        Token existe somente no EnvironmentFile da unit. O servidor é local e
+        controlado; a idempotência API+PostgreSQL permanece coberta em teste
+        de integração separado quando o ambiente PostgreSQL é disponibilizado.
+        """
+        received: list[dict[str, object]] = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:  # noqa: N802
+                payload = json.loads(
+                    self.rfile.read(int(self.headers["Content-Length"]))
+                )
+                received.append(payload)
+                response = json.dumps(
+                    {"status": "created", "execution_id": payload["execution_id"]}
+                ).encode()
+                self.send_response(201)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(response)))
+                self.end_headers()
+                self.wfile.write(response)
+
+            def log_message(self, *args: object) -> None:
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        token_name = f"MACIP_SD_SYNC_TOKEN_{self.suffix}"
+        central = self.root / "central.json"
+        central.write_text(
+            json.dumps(
+                {
+                    "url": f"http://127.0.0.1:{server.server_address[1]}",
+                    "agent_id": str(uuid.uuid4()),
+                    "token_environment": token_name,
+                }
+            )
+        )
+        config_dir = self.root / "cfg"
+        config_dir.mkdir()
+        (config_dir / "agent.env").write_text(f"{token_name}=sync-token\n")
+        sync_installation: dict[str, str] | None = None
+        try:
+            self.assertNotIn(token_name, os.environ)
+            with patch.dict(os.environ, {"MACIP_CONFIG": str(config_dir)}):
+                install_schedule(
+                    TaskSpec.from_dict(json.loads(self.config_path.read_text())),
+                    self.config_path,
+                    self.db_path,
+                    "daily",
+                    central_path=central,
+                )
+            self._systemctl("daemon-reload")
+            backup = self._systemctl("start", f"{self.unit_name}.service")
+            self.assertEqual(backup.returncode, 0, backup.stdout + backup.stderr)
+            pending = ExecutionStore(self.db_path)
+            try:
+                items = pending.outbox_state()
+            finally:
+                pending.close()
+            self.assertEqual(len(items), 1)
+            self.assertEqual(items[0]["status"], "pending")
+
+            with patch.dict(os.environ, {"MACIP_CONFIG": str(config_dir)}):
+                sync_installation = install_sync_schedule(
+                    self.db_path,
+                    central,
+                    "*-*-* *:*:0/10",
+                    enable=True,
+                )
+            deadline = time.monotonic() + 70
+            while time.monotonic() < deadline:
+                current = ExecutionStore(self.db_path)
+                try:
+                    state = current.outbox_state()[0]["status"]
+                finally:
+                    current.close()
+                if state == "sent":
+                    break
+                time.sleep(1)
+            self.assertEqual(state, "sent", "timer sync não confirmou a outbox")
+            self.assertEqual(len(received), 1)
+            self.assertEqual(received[0]["execution_id"], items[0]["execution_id"])
+        finally:
+            if sync_installation is not None:
+                self._systemctl("stop", sync_installation["timer_name"])
+                uninstall_sync_schedule(self.db_path, central)
+            server.shutdown()
+            server.server_close()
 
     def test_sigterm_marks_execution_interrupted(self) -> None:
         # destino SFTP travado em listener mudo → tentativa fica running
