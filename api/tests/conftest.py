@@ -1,7 +1,10 @@
 """PostgreSQL REAL exclusivo para testes — sem SQLite.
 
-MACIP_API_TEST_DATABASE_URL aponta um banco descartável (podman).
-Sem ele → módulo inteiro pulado (integração registrada como pendente).
+MACIP_API_TEST_DATABASE_URL aponta um banco descartável.
+- env ausente → testes de integração pulados explicitamente;
+- env presente mas inacessível/inválida → FALHA clara (não skip);
+- o nome do banco deve conter "test" — guarda contra apontar um
+  banco operacional para a limpeza destrutiva entre testes.
 """
 
 from __future__ import annotations
@@ -13,32 +16,40 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 
-TEST_URL = os.environ.get(
-    "MACIP_API_TEST_DATABASE_URL",
-    "postgresql+psycopg://postgres:pgtest@localhost:55432/macip_api_test",
-)
+TEST_URL = os.environ.get("MACIP_API_TEST_DATABASE_URL")
 ADMIN_TOKEN = "test-admin-9f8e7d6c5b4a3210"
 
+# sem URL → pula explicitamente; com URL morta → fixture falha claro
+requires_db = pytest.mark.skipif(
+    TEST_URL is None,
+    reason="MACIP_API_TEST_DATABASE_URL não definido — integração PostgreSQL pendente",
+)
 
-def _reachable() -> bool:
+
+def _connect():
+    engine = create_engine(TEST_URL, connect_args={"connect_timeout": 3})
     try:
-        engine = create_engine(TEST_URL, connect_args={"connect_timeout": 3})
         with engine.connect() as connection:
             connection.execute(text("SELECT 1"))
+    finally:
         engine.dispose()
-        return True
-    except Exception:
-        return False
-
-
-pytestmark = pytest.mark.skipif(
-    not _reachable(),
-    reason="PostgreSQL de teste inacessível — integração pendente",
-)
 
 
 @pytest.fixture
 def client():
+    if TEST_URL is None:
+        pytest.skip("MACIP_API_TEST_DATABASE_URL não definido")
+    db_name = TEST_URL.rsplit("/", 1)[-1].split("?")[0].lower()
+    if "test" not in db_name:
+        pytest.fail(
+            f"banco '{db_name}' não parece descartável — recusando limpeza; "
+            "aponte MACIP_API_TEST_DATABASE_URL para um banco de teste"
+        )
+    try:
+        _connect()
+    except Exception as error:
+        pytest.fail(f"PostgreSQL de teste inacessível: {error}")
+
     os.environ["MACIP_API_DATABASE_URL"] = TEST_URL
     os.environ["MACIP_API_ADMIN_TOKEN"] = ADMIN_TOKEN
     from macip_backup_api import app as app_module
@@ -84,6 +95,33 @@ def agent(client, admin_headers):
     credential = client.post(
         f"/api/v1/agents/{agent_id}/credentials",
         json={"label": "teste"},
+        headers=admin_headers,
+    )
+    return {
+        "client_id": client_id,
+        "agent_id": agent_id,
+        "credential_id": credential.json()["credential_id"],
+        "token": credential.json()["token"],
+        "headers": {"Authorization": f"Bearer {credential.json()['token']}"},
+    }
+
+
+def second_agent(client, admin_headers):
+    """Agente de OUTRO cliente — para colisão de execution_id."""
+    created = client.post(
+        "/api/v1/clients", json={"name": f"outro-{uuid.uuid4().hex[:8]}"},
+        headers=admin_headers,
+    )
+    client_id = created.json()["id"]
+    created = client.post(
+        f"/api/v1/clients/{client_id}/agents",
+        json={"name": "agente-outro"},
+        headers=admin_headers,
+    )
+    agent_id = created.json()["id"]
+    credential = client.post(
+        f"/api/v1/agents/{agent_id}/credentials",
+        json={},
         headers=admin_headers,
     )
     return {

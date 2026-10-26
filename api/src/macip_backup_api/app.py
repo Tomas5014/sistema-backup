@@ -88,9 +88,35 @@ def create_app() -> FastAPI:
 
     @app.middleware("http")
     async def limit_body(request: Request, call_next):
+        """Limite pelos bytes REALMENTE recebidos — cobre chunked e
+        ausência de Content-Length; interrompe a leitura no limite."""
+        from fastapi.responses import JSONResponse
+
+        limit = config.max_body_bytes()
         length = request.headers.get("content-length")
-        if length is not None and int(length) > config.max_body_bytes():
-            raise HTTPException(413, "corpo acima do limite")
+        if length is not None:
+            try:
+                declared = int(length)
+            except ValueError:
+                return JSONResponse(
+                    {"detail": "Content-Length inválido"}, status_code=400
+                )
+            if declared < 0:
+                return JSONResponse(
+                    {"detail": "Content-Length inválido"}, status_code=400
+                )
+            if declared > limit:
+                return JSONResponse(
+                    {"detail": "corpo acima do limite"}, status_code=413
+                )
+        body = bytearray()
+        async for chunk in request.stream():
+            body.extend(chunk)
+            if len(body) > limit:
+                return JSONResponse(
+                    {"detail": "corpo acima do limite"}, status_code=413
+                )
+        request._body = bytes(body)  # corpo já consumido — repassa ao handler
         return await call_next(request)
 
     # ---- health ------------------------------------------------------
@@ -242,6 +268,11 @@ def create_app() -> FastAPI:
         offset: int = Query(0, ge=0),
         db: Session = Depends(session),
     ) -> list[ExecutionSummary]:
+        for value in (since, until):
+            if value is not None and value.tzinfo is None:
+                raise HTTPException(422, "filtro temporal exige timezone")
+        if since is not None and until is not None and since > until:
+            raise HTTPException(422, "intervalo inválido: since > until")
         query = (
             select(Execution)
             .join(Agent, Execution.agent_id == Agent.id)
@@ -261,13 +292,11 @@ def create_app() -> FastAPI:
             query = query.where(Execution.started_at_utc <= until)
         return [_out_execution(e) for e in db.execute(query.limit(limit).offset(offset)).scalars()]
 
-    @app.get("/api/v1/executions/{execution_id}", dependencies=[Depends(require_admin)])
+    @app.get("/api/v1/executions/{execution_row_id}", dependencies=[Depends(require_admin)])
     def get_execution(
-        execution_id: str, db: Session = Depends(session)
+        execution_row_id: uuid.UUID, db: Session = Depends(session)
     ) -> ExecutionDetail:
-        row = db.execute(
-            select(Execution).where(Execution.execution_id == execution_id)
-        ).scalar_one_or_none()
+        row = db.get(Execution, execution_row_id)
         if row is None:
             raise HTTPException(404, "execução inexistente")
         destinations = db.execute(

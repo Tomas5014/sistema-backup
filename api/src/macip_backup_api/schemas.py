@@ -10,11 +10,18 @@ import uuid
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import AfterValidator, BaseModel, Field
+from pydantic import AfterValidator, BaseModel, Field, model_validator
 
 Name = Annotated[str, Field(min_length=1, max_length=200)]
 Short = Annotated[str | None, Field(default=None, max_length=200)]
 Error = Annotated[str | None, Field(default=None, max_length=4000)]
+
+# limites compatíveis com os tipos das colunas PostgreSQL
+_BIGINT_MAX = 9_223_372_036_854_775_807
+_INT_MAX = 2_147_483_647
+
+BigCount = Annotated[int | None, Field(default=None, ge=0, le=_BIGINT_MAX)]
+IntCount = Annotated[int | None, Field(default=None, ge=0, le=_INT_MAX)]
 
 EXECUTION_STATUSES = {"success", "partial", "failed", "interrupted"}
 DESTINATION_STATUSES = {"success", "failed", "interrupted"}
@@ -36,15 +43,23 @@ class _ResultBase(BaseModel):
     status: Literal["success", "failed", "interrupted"]
     started_at_utc: Aware
     finished_at_utc: Aware
-    duration_seconds: float | None = Field(default=None, ge=0)
+    duration_seconds: float | None = Field(
+        default=None, ge=0, le=_BIGINT_MAX, allow_inf_nan=False
+    )
     snapshot_id: Annotated[str | None, Field(default=None, max_length=128)]
-    snapshots_available: int | None = Field(default=None, ge=0)
-    files_processed: int | None = Field(default=None, ge=0)
-    bytes_processed: int | None = Field(default=None, ge=0)
+    snapshots_available: IntCount
+    files_processed: BigCount
+    bytes_processed: BigCount
     error: Error
-    exit_code: int | None = None
+    exit_code: int | None = Field(default=None, ge=-_INT_MAX - 1, le=_INT_MAX)
     failed_operation: Short
-    timeout_seconds: int | None = Field(default=None, ge=0)
+    timeout_seconds: IntCount
+
+    @model_validator(mode="after")
+    def _ordered(self):
+        if self.finished_at_utc < self.started_at_utc:
+            raise ValueError("finished_at_utc anterior a started_at_utc")
+        return self
 
 
 class AttemptIn(_ResultBase):
@@ -69,6 +84,12 @@ class ExecutionIn(BaseModel):
     started_at_utc: Aware
     finished_at_utc: Aware
     destinations: list[DestinationIn] = Field(max_length=MAX_DESTINATIONS)
+
+    @model_validator(mode="after")
+    def _ordered(self):
+        if self.finished_at_utc < self.started_at_utc:
+            raise ValueError("finished_at_utc anterior a started_at_utc")
+        return self
 
 
 class ClientIn(BaseModel):

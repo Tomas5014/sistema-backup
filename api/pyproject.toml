@@ -15,6 +15,12 @@ dependencies = [
     "psycopg[binary]>=3.2",
 ]
 
+[project.optional-dependencies]
+test = [
+    "pytest>=8",
+    "httpx>=0.27",
+]
+
 [project.scripts]
 macip-backup-api = "macip_backup_api.app:run"
 

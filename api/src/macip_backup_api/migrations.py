@@ -96,6 +96,10 @@ MIGRATIONS: list[tuple[int, str, str]] = [
 _ADVISORY_KEY = 727_203_001
 
 
+class MigrationError(RuntimeError):
+    pass
+
+
 def run_migrations(connection: Connection) -> list[int]:
     """Aplica migrações pendentes; devolve versões aplicadas agora."""
     applied: list[int] = []
@@ -110,6 +114,13 @@ def run_migrations(connection: Connection) -> list[int]:
         row[0]
         for row in connection.execute(text("SELECT version FROM schema_migrations"))
     }
+    max_supported = MIGRATIONS[-1][0]
+    unknown = sorted(v for v in done if v > max_supported or v < 1)
+    if unknown:
+        raise MigrationError(
+            f"schema em versão não suportada por este código: {unknown} "
+            f"(suportadas: 1..{max_supported}) — banco preservado"
+        )
     for version, name, ddl in MIGRATIONS:
         if version in done:
             continue

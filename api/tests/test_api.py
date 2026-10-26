@@ -5,7 +5,11 @@ from __future__ import annotations
 import threading
 import uuid
 
-from conftest import ADMIN_TOKEN, execution_payload
+import pytest
+
+from conftest import ADMIN_TOKEN, execution_payload, requires_db, second_agent
+
+pytestmark = requires_db
 
 
 def test_healthz(client):
@@ -101,12 +105,41 @@ def test_execution_submission_full(client, agent):
     assert created.status_code == 200, created.text
     assert created.json()["status"] == "created"
 
+    # detalhe usa o UUID central — inequívoco entre agentes
     detail = client.get(
-        f"/api/v1/executions/{created.json()['execution_id']}",
+        f"/api/v1/executions/{created.json()['id']}",
         headers={"Authorization": f"Bearer {ADMIN_TOKEN}"},
     ).json()
     assert detail["status"] == "success"
     assert detail["destinations"][0]["attempts"][0]["snapshot_id"] == "abc123"
+
+
+def test_same_execution_id_across_agents_and_clients(client, agent, admin_headers):
+    """Unicidade é (agent_id, execution_id) — nunca global. Dois agentes
+    com o mesmo execution_id permanecem consultáveis separadamente."""
+    shared = str(uuid.uuid4())
+    first = client.post(
+        "/api/v1/agent/executions",
+        json=execution_payload(execution_id=shared),
+        headers=agent["headers"],
+    )
+    other = second_agent(client, admin_headers)
+    second = client.post(
+        "/api/v1/agent/executions",
+        json=execution_payload(execution_id=shared, status="failed"),
+        headers=other["headers"],
+    )
+    assert first.json()["status"] == second.json()["status"] == "created"
+    assert first.json()["id"] != second.json()["id"]
+
+    headers = {"Authorization": f"Bearer {ADMIN_TOKEN}"}
+    detail_a = client.get(f"/api/v1/executions/{first.json()['id']}", headers=headers).json()
+    detail_b = client.get(f"/api/v1/executions/{second.json()['id']}", headers=headers).json()
+    assert detail_a["status"] == "success"
+    assert detail_b["status"] == "failed"
+    assert detail_a["client_id"] != detail_b["client_id"]
+    listed = client.get("/api/v1/executions", headers=headers).json()
+    assert len(listed) == 2
 
 
 def test_statuses_preserved(client, agent):
@@ -261,15 +294,31 @@ def test_validation_rejects_bad_input(client, agent):
     ).status_code == 422
 
 
-def test_token_never_in_logs_or_body_echo(client, agent):
-    """O token não aparece na listagem de credenciais nem em erro."""
-    response = client.post(
-        "/api/v1/agent/executions",
-        json={"invalid": True},
-        headers=agent["headers"],
+def test_tokens_never_logged(client, agent, admin_headers, caplog):
+    """Nem token admin, nem token de agente, nem Authorization aparecem
+    nos logs — em cenários de sucesso e de erro."""
+    import logging
+
+    with caplog.at_level(logging.DEBUG):
+        client.post("/api/v1/agent/heartbeat", headers=agent["headers"])           # ok
+        client.post("/api/v1/agent/heartbeat",
+                    headers={"Authorization": "Bearer errado"})                   # 403
+        client.post("/api/v1/clients", json={"name": "log-t"},
+                    headers=admin_headers)                                        # ok admin
+        client.post("/api/v1/agent/executions", json={"bad": 1},
+                    headers=agent["headers"])                                     # 422
+        client.post("/api/v1/agent/executions", json={"bad": 1},
+                    headers={"Authorization": f"Bearer {ADMIN_TOKEN}"})           # admin token no canal errado
+
+    leaked = " ".join(
+        record.getMessage() for record in caplog.records
     )
-    assert response.status_code == 422
-    assert agent["token"] not in response.text
+    assert agent["token"] not in leaked
+    assert ADMIN_TOKEN not in leaked
+    assert "Bearer" not in leaked or "errado" not in leaked
+
+    # a entrega intencional do token no provisionamento segue funcionando
+    assert agent["token"]  # fixture provisionou — única exposição do segredo
 
 
 def test_migration_preserves_data(client, agent):
@@ -285,3 +334,138 @@ def test_migration_preserves_data(client, agent):
         "/api/v1/executions", headers={"Authorization": f"Bearer {ADMIN_TOKEN}"}
     ).json()
     assert len(executions) == 1
+
+
+# ---- limite de corpo: por bytes recebidos, não pelo cabeçalho --------
+
+import os
+
+
+def _set_limit(bytes_: int) -> None:
+    os.environ["MACIP_API_MAX_BODY_BYTES"] = str(bytes_)
+
+
+def test_body_limits_below_exact_and_above(client, agent):
+    payload = execution_payload()
+    import json as _json
+
+    raw = _json.dumps(payload).encode()
+    _set_limit(len(raw) + 10)
+    below = client.post(
+        "/api/v1/agent/executions",
+        content=raw[:-15],
+        headers={**agent["headers"], "Content-Type": "application/json"},
+    )
+    assert below.status_code == 422  # JSON truncado — mas abaixo do limite
+
+    _set_limit(len(raw))
+    exact = client.post(
+        "/api/v1/agent/executions",
+        content=raw,
+        headers={**agent["headers"], "Content-Type": "application/json"},
+    )
+    assert exact.status_code == 200, exact.text
+
+    _set_limit(len(raw) - 1)
+    over = client.post(
+        "/api/v1/agent/executions",
+        content=raw,
+        headers={**agent["headers"], "Content-Type": "application/json"},
+    )
+    assert over.status_code == 413
+    assert over.json()["detail"] == "corpo acima do limite"
+    executions = client.get(
+        "/api/v1/executions", headers={"Authorization": f"Bearer {ADMIN_TOKEN}"}
+    ).json()
+    assert len(executions) == 1  # só a do limite exato — nada gravado no 413
+
+
+def test_body_limit_without_content_length(client, agent):
+    """Envio chunked (sem Content-Length) — o limite mede bytes reais."""
+    _set_limit(50)
+    payload = execution_payload()
+    import json as _json
+
+    raw = _json.dumps(payload).encode()
+
+    def chunks():
+        yield raw[:40]
+        yield raw[40:]
+
+    response = client.post(
+        "/api/v1/agent/executions",
+        content=chunks(),
+        headers={**agent["headers"], "Content-Type": "application/json"},
+    )
+    assert response.status_code == 413
+    assert response.json()["detail"] == "corpo acima do limite"
+
+
+def test_body_limit_many_small_chunks(client, agent):
+    """Vários blocos pequenos cuja soma ultrapassa — leitura interrompida."""
+    _set_limit(100)
+    block = b" " * 20
+    sent = []
+
+    def chunks():
+        for _ in range(50):
+            sent.append(len(block))
+            yield block
+
+    response = client.post(
+        "/api/v1/agent/executions",
+        content=chunks(),
+        headers={**agent["headers"], "Content-Type": "application/json"},
+    )
+    assert response.status_code == 413
+    # TestClient serializa o generator no cliente — o corte de leitura
+    # no servidor não é observável aqui; o observável é 413 + nada gravado
+    executions = client.get(
+        "/api/v1/executions", headers={"Authorization": f"Bearer {ADMIN_TOKEN}"}
+    ).json()
+    assert executions == []
+
+
+def test_invalid_content_length_returns_400(client, agent):
+    response = client.post(
+        "/api/v1/agent/executions",
+        content=b"{}",
+        headers={
+            **agent["headers"],
+            "Content-Type": "application/json",
+            "Content-Length": "nao-e-numero",
+        },
+    )
+    assert response.status_code == 400
+
+
+def test_declared_smaller_than_sent_still_capped(client, agent):
+    """Content-Length declarado menor que o corpo real → mede os bytes."""
+    _set_limit(100)
+    response = client.post(
+        "/api/v1/agent/executions",
+        content=b"x" * 500,
+        headers={
+            **agent["headers"],
+            "Content-Type": "application/json",
+            "Content-Length": "10",
+        },
+    )
+    # httpx pode impor o header ou enviar 500 bytes — o servidor deve
+    # cortar pelo real (413) ou rejeitar (400/422), nunca 500/gravar
+    assert response.status_code in (400, 413, 422)
+    assert response.status_code != 500
+
+
+def test_rejected_request_persists_nothing(client, agent, admin_headers):
+    _set_limit(10)
+    response = client.post(
+        "/api/v1/agent/executions",
+        content=b"_" * 100,
+        headers={**agent["headers"], "Content-Type": "application/json"},
+    )
+    assert response.status_code == 413
+    executions = client.get(
+        "/api/v1/executions", headers=admin_headers
+    ).json()
+    assert executions == []

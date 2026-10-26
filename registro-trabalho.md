@@ -1160,3 +1160,60 @@ Suíte do agente (regressão): **150 testes — 132 aprovados, 0 falhos, 18 igno
 - piloto de 7 dias: segue em acompanhamento (não concluído).
 
 ---
+
+## 2026-10-26 — Consolidação da API central (5 correções)
+
+### 1. Limite de corpo por bytes efetivos
+
+Middleware media só `Content-Length` → `int(header inválido)` quebrava
+em 500 e envios chunked passavam ilimitados. Agora: header inválido →
+400 JSON; corpo medido por `request.stream()` com corte ao ultrapassar
+→ 413 JSON; corpo re-injetado no request. Testes: abaixo/exato/acima,
+sem Content-Length, soma de blocos pequenos, header inválido,
+declarado < real, rejeitado não grava.
+
+### 2. Detalhe por UUID central
+
+`GET /api/v1/executions/{id}` usa o `id` (UUID central da listagem) —
+unicidade continua `(agent_id, execution_id)`. Dois agentes (clientes
+diferentes) com mesmo `execution_id` consultáveis separadamente —
+`scalar_one_or_none` no filtro ambíguo dava 500.
+
+### 3. Validação completa
+
+Bigint ≤ 2⁶³-1, int ≤ 2³¹-1, `duration_seconds` `allow_inf_nan=False`,
+`finished ≥ started` em execução/destino/tentativa (422 antes de
+gravar), filtros `since`/`until` exigem timezone e `since ≤ until`.
+Nulos legítimos, contadores zero e destino interrompido sem tentativas
+preservados — testados nos dois sentidos.
+
+### 4. Migrações comprovadas
+
+`schema_migrations` com versão futura/desconhecida → `MigrationError`
+sem tocar no banco. Testes PG real: falha pós-DDL → rollback + versão
+não registrada + histórico intacto + retry após unlock; inicialização
+concorrente aplica uma vez e libera o advisory lock em sucesso e falha.
+
+### 5. Execução e alegações
+
+`conftest`: env ausente → integração pulada explicitamente; env
+presente mas inacessível → `pytest.fail` claro; nome do banco deve
+conter `test` (guarda de banco descartável). `test_schemas.py` roda
+sempre (9 testes sem banco). Captura de logs (`caplog`) comprova
+ausência de token admin, token de agente e `Bearer` em sucesso e erro.
+`api[test]` declara pytest+httpx.
+
+### Homologação real (PostgreSQL 17, banco exclusivo)
+
+**36/36** testes passam com `MACIP_API_TEST_DATABASE_URL`; sem a env:
+9 passam + 27 pulam explicitamente.
+
+Regressão do agente: **150 testes — 132 aprovados, 0 falhos, 18
+ignorados** (SFTP/SMB/S3/combinações — ambientes remotos).
+
+### Pendente
+
+Outbox/sincronização, distribuição de tarefas, portal — próximos
+incrementos. Piloto de 7 dias em acompanhamento (término 02/11).
+
+---

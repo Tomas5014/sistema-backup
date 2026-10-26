@@ -107,8 +107,10 @@ simultâneas:
 
 `GET /api/v1/executions` — paginação `limit`/`offset` (≤500), filtros
 `client_id`, `agent_id`, `task_id`, `status`, `since`/`until`
-(em `started_at_utc`). `GET /api/v1/executions/{id}` traz destinos e
-tentativas. `GET /api/v1/agents` mostra `last_seen_at`.
+(em `started_at_utc`, exigem timezone). Detalhes por **UUID central**:
+`GET /api/v1/executions/{id}` (a unicidade é `(agent_id, execution_id)` —
+`execution_id` NÃO é identificador global; agentes diferentes podem
+enviar o mesmo). `GET /api/v1/agents` mostra `last_seen_at`.
 
 `received_at`/`last_seen_at` usam **horário do servidor**; os horários
 `started/finished_at_utc` informados pelo agente são preservados
@@ -124,15 +126,23 @@ separadamente (exigem timezone — naive é rejeitado).
 
 ## Testes
 
-PostgreSQL real exclusivo (`MACIP_API_TEST_DATABASE_URL`):
+PostgreSQL real exclusivo — `MACIP_API_TEST_DATABASE_URL` obrigatório
+e o nome do banco deve conter `test` (guarda contra limpeza destrutiva
+em banco operacional):
 
 ```bash
 podman run -d --name macip-api-test-pg \
   -e POSTGRES_PASSWORD=<senha-teste> -e POSTGRES_DB=macip_api_test \
   -p 55432:5432 docker.io/library/postgres:17-alpine
 
-cd api && ../.venv-api/bin/python -m pytest tests/ -v
+python3 -m venv .venv-api && . .venv-api/bin/activate
+pip install -e 'api[test]'
+MACIP_API_TEST_DATABASE_URL='postgresql://postgres:<senha-teste>@localhost:55432/macip_api_test' \
+  python -m pytest api/tests/ -v
 ```
 
-Sem o banco → módulo inteiro pulado (integração registrada como pendente).
-SQLite não substitui — `ON CONFLICT`/`advisory lock` são específicos de PG.
+- Sem `MACIP_API_TEST_DATABASE_URL` → testes de integração **pulam
+  explicitamente**; testes de schema rodam sempre.
+- URL configurada mas inacessível → **falha clara** (não skip).
+- SQLite não substitui — `ON CONFLICT`/`advisory lock` são específicos
+  de PostgreSQL.
