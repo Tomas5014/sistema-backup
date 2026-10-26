@@ -1217,3 +1217,42 @@ Outbox/sincronização, distribuição de tarefas, portal — próximos
 incrementos. Piloto de 7 dias em acompanhamento (término 02/11).
 
 ---
+
+## 2026-10-26 — Correção pontual: 422 seguro + provas de migração
+
+### 1. Serialização da resposta de validação
+
+Reproduzido por HTTP: `duration_seconds` com `1e309`, `NaN`,
+`Infinity`, `-Infinity` → `500` (o detalhe do erro carregava o valor
+não finito → `json.dumps` falhava). Correção: handler próprio de
+`RequestValidationError` — `jsonable_encoder` (serializa `ctx`) +
+sanitização recursiva de floats não finitos → sempre `422` JSON válido,
+sem vazar token/`Authorization`. Valores inválidos nunca são
+convertidos em zero/nulo — são rejeitados.
+
+`test_http_validation.py` (sem banco, deps substituídas): 4 literais,
+não finito em campo inteiro, erros comuns, payload válido, sem 500.
+`test_api.py` (PG real): 422 + **nada gravado**.
+
+### 2. Provas de migração reforçadas
+
+- Rollback com histórico POVOADO (cliente+agente+execução+destino+
+  tentativa via API): DDL revertida, versão ausente, snapshot de todas
+  as linhas byte a byte igual — não só contagem.
+- Retentativa com a MESMA versão pendente e SQL válido: aplicada de
+  fato (`mig_probe` existe), versão registrada uma vez, próxima
+  execução sem pendências.
+- Concorrência com migração realmente pendente em sessões
+  independentes: aplicada uma vez, lock liberado — comprovado por
+  `pg_locks` em conexão terceira (após sucesso e após falha).
+- Cleanup autouse: versões de teste não contaminam o próximo start.
+
+### Homologação real
+
+PostgreSQL 17 exclusivo: **41/41**. Sem `MACIP_API_TEST_DATABASE_URL`:
+13 passam (schemas + http) + 28 pulam explicitamente.
+
+Agente/VM: código do agente intocado — regressão coberta pela suíte
+anterior (150 testes verdes em 0f08607). Piloto em acompanhamento.
+
+---

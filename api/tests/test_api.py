@@ -277,6 +277,30 @@ def test_pagination_and_filters(client, agent, admin_headers):
     )
 
 
+def test_non_finite_values_422_and_nothing_persisted(client, agent, admin_headers):
+    """PG real: 422 para não finitos — e nada escrito no banco."""
+    for literal in ("1e309", "NaN", "Infinity", "-Infinity"):
+        body = (
+            b'{"execution_id":"nf-' + literal.encode() + b'",'
+            b'"task_id":"t","status":"success",'
+            b'"started_at_utc":"2026-10-26T10:00:00Z",'
+            b'"finished_at_utc":"2026-10-26T10:05:00Z",'
+            b'"destinations":[{"destination_id":"d","status":"success",'
+            b'"started_at_utc":"2026-10-26T10:00:00Z",'
+            b'"finished_at_utc":"2026-10-26T10:05:00Z",'
+            b'"duration_seconds":' + literal.encode() + b"}]}"
+        )
+        response = client.post(
+            "/api/v1/agent/executions",
+            content=body,
+            headers={**agent["headers"], "Content-Type": "application/json"},
+        )
+        assert response.status_code == 422, literal
+        assert "detail" in response.json()
+    executions = client.get("/api/v1/executions", headers=admin_headers).json()
+    assert executions == []
+
+
 def test_validation_rejects_bad_input(client, agent):
     naive = execution_payload(started_at_utc="2026-10-26T10:00:00")  # sem tz
     assert client.post(

@@ -14,9 +14,13 @@ import json
 import uuid
 from datetime import UTC, datetime
 
+import math
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
@@ -45,6 +49,18 @@ from .schemas import (
     ExecutionIn,
     ExecutionSummary,
 )
+
+
+def _json_safe(value: object) -> object:
+    """Erros de validação podem carregar o valor ofensor (NaN/inf) —
+    sanitiza recursivamente para a resposta sair como JSON válido."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return str(value)
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
 
 
 def _canonical_hash(payload: ExecutionIn) -> str:
@@ -86,11 +102,19 @@ def create_app() -> FastAPI:
 
     app = FastAPI(title="MAC IP Backup API", version="0.1.0", lifespan=lifespan)
 
+    @app.exception_handler(RequestValidationError)
+    async def validation_handler(_: Request, exc: RequestValidationError):
+        # jsonable_encoder serializa ctx (ValueError etc.) e _json_safe
+        # limpa floats não finitos carregados do valor ofensor
+        return JSONResponse(
+            {"detail": _json_safe(jsonable_encoder(exc.errors()))},
+            status_code=422,
+        )
+
     @app.middleware("http")
     async def limit_body(request: Request, call_next):
         """Limite pelos bytes REALMENTE recebidos — cobre chunked e
         ausência de Content-Length; interrompe a leitura no limite."""
-        from fastapi.responses import JSONResponse
 
         limit = config.max_body_bytes()
         length = request.headers.get("content-length")
