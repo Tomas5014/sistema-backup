@@ -58,12 +58,12 @@ def _build_variant_wheel(work_dir: Path, dist_dir: Path, version: str) -> Path:
     (work_dir / "pyproject.toml").write_text(
         (ROOT / "pyproject.toml")
         .read_text()
-        .replace('version = "0.2.0"', f'version = "{version}"')
+        .replace('version = "0.2.1"', f'version = "{version}"')
     )
     init = work_dir / "src" / "macip_backup" / "__init__.py"
     init.write_text(
         init.read_text().replace(
-            '__version__ = "0.2.0"', f'__version__ = "{version}"'
+            '__version__ = "0.2.1"', f'__version__ = "{version}"'
         )
     )
     subprocess.run(
@@ -264,7 +264,7 @@ class InstallFlowTests(unittest.TestCase):
         self.assertTrue(
             self.macip_home.joinpath("current")
             .resolve()
-            .name.startswith("0.2.0-")
+            .name.startswith("0.2.1-")
         )
 
         recovered = self._install("--commit", "v2")
@@ -365,7 +365,7 @@ class InstallFlowTests(unittest.TestCase):
         _, config = self._write_task()
         self.assertEqual(self._run_cli("run", str(config)).returncode, 0)
 
-        broken = self.root / "macip_backup_poc-0.2.0-py3-none-any.whl"
+        broken = self.root / "macip_backup_poc-0.2.1-py3-none-any.whl"
         broken.write_bytes(b"zip corrompido, mesmo nome")
         failed = self._install(broken)
         self.assertNotEqual(failed.returncode, 0)
@@ -388,7 +388,7 @@ class InstallFlowTests(unittest.TestCase):
         self.assertEqual(self._install().returncode, 0)
         first = self.macip_home.joinpath("current").resolve()
 
-        variant = self.root / "macip_backup_poc-0.2.0-py3-none-any.whl"
+        variant = self.root / "macip_backup_poc-0.2.1-py3-none-any.whl"
         with zipfile.ZipFile(self.wheel) as zin, zipfile.ZipFile(
             variant, "w", zipfile.ZIP_DEFLATED
         ) as zout:
@@ -400,8 +400,8 @@ class InstallFlowTests(unittest.TestCase):
         second = self.macip_home.joinpath("current").resolve()
 
         self.assertNotEqual(first, second)
-        self.assertTrue(first.name.startswith("0.2.0-"))
-        self.assertTrue(second.name.startswith("0.2.0-"))
+        self.assertTrue(first.name.startswith("0.2.1-"))
+        self.assertTrue(second.name.startswith("0.2.1-"))
         self.assertTrue(first.exists(), "release anterior preservada")
 
     def test_service_generated_by_old_release_runs_new_code(self) -> None:
@@ -426,16 +426,16 @@ class InstallFlowTests(unittest.TestCase):
         )                                              # identidade persistida
 
         before = self._run_cli("--version")
-        self.assertIn("0.2.0", before.stdout)
+        self.assertIn("0.2.1", before.stdout)
 
         wheel_021 = _build_variant_wheel(
-            self.root / "pkg-021", self.dist_dir / "v021", "0.2.1"
+            self.root / "pkg-021", self.dist_dir / "v021", "0.2.2"
         )
         updated = self._install(wheel_021)
         self.assertEqual(updated.returncode, 0, updated.stderr)
 
         after = self._run_cli("--version")
-        self.assertIn("0.2.1", after.stdout)  # o que o service vai executar
+        self.assertIn("0.2.2", after.stdout)  # o que o service vai executar
 
     def test_uninstall_preserves_foreign_and_unmanaged(self) -> None:
         """Unit com prefixo semelhante mas sem marcador + binário alheio:

@@ -122,6 +122,28 @@ class UnitGenerationTests(unittest.TestCase):
         self.assertIn("Persistent=true", timer)
         self.assertIn("WantedBy=timers.target", timer)
 
+    def test_environment_file_with_spaced_config_dir_is_unquoted(self) -> None:
+        """EnvironmentFile trata a linha inteira como filename: o caminho
+        vai literal, SEM aspas — `-"<path>"` era ignorado pelo systemd
+        (bug homologado na VM do piloto)."""
+        config_dir = Path(self.temp_dir.name) / "cfg com espaços"
+        with patch.dict(os.environ, {"MACIP_CONFIG": str(config_dir)}):
+            result = self._install()
+        service = Path(result["service"]).read_text()
+        line = next(
+            l for l in service.splitlines() if l.startswith("EnvironmentFile")
+        )
+        self.assertEqual(line, f"EnvironmentFile=-{config_dir}/agent.env")
+        self.assertNotIn('"', line)
+
+        # systemd-analyze verify não pode acusar o caminho.
+        verify = subprocess.run(
+            ["systemd-analyze", "verify", result["service"]],
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotIn("path is not absolute", verify.stderr + verify.stdout)
+
     def test_paths_with_spaces_are_escaped(self) -> None:
         spaced = Path(self.temp_dir.name) / "dir com espaços"
         spaced.mkdir()
@@ -376,6 +398,62 @@ class SystemdUserIntegrationTests(unittest.TestCase):
         restored_files = list(restored.rglob("f.txt"))
         self.assertEqual(len(restored_files), 1)
         self.assertEqual(restored_files[0].read_text(), "dados via systemd\n")
+
+    def test_service_loads_credential_from_environment_file(self) -> None:
+        """Credencial SOMENTE em agent.env (dir com espaços) — sem
+        variável herdada, sem keyring. Homologa a correção do
+        EnvironmentFile: backup deve ter sucesso e o journal não pode
+        acusar 'path is not absolute'."""
+        env_name = f"MACIP_ENVFILE_PW_{self.suffix}"
+        config_dir = self.root / "cfg com espaços"
+        config_dir.mkdir()
+        env_file = config_dir / "agent.env"
+        env_file.write_text(f"{env_name}={self.password}\n")
+        env_file.chmod(0o600)
+
+        task_dict = json.loads(self.config_path.read_text())
+        task_dict["destinations"][0]["password_environment"] = env_name
+        self.config_path.write_text(json.dumps(task_dict))
+
+        # garante ausência no keyring — a única fonte é o arquivo
+        self.assertNotIn(env_name, os.environ)
+        search = subprocess.run(
+            ["keyctl", "search", "@u", "user", f"macip.{env_name}"],
+            capture_output=True, text=True,
+        )
+        self.assertNotEqual(search.returncode, 0)
+
+        with patch.dict(os.environ, {"MACIP_CONFIG": str(config_dir)}):
+            install_schedule(
+                TaskSpec.from_dict(json.loads(self.config_path.read_text())),
+                self.config_path,
+                self.db_path,
+                "daily",
+            )
+        service_text = (
+            Path.home() / ".config" / "systemd" / "user"
+            / f"{self.unit_name}.service"
+        ).read_text()
+        envfile_line = next(
+            l for l in service_text.splitlines() if l.startswith("EnvironmentFile")
+        )
+        self.assertEqual(envfile_line, f"EnvironmentFile=-{env_file}")
+
+        self._systemctl("daemon-reload")
+        completed = self._systemctl("start", f"{self.unit_name}.service")
+        self.assertEqual(
+            completed.returncode, 0, f"{completed.stdout}{completed.stderr}"
+        )
+        entries = self._history()
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["status"], "success")
+
+        journal = subprocess.run(
+            ["journalctl", "--user", "--user-unit", f"{self.unit_name}.service",
+             "--no-pager", "-q"],
+            capture_output=True, text=True, timeout=60,
+        )
+        self.assertNotIn("path is not absolute", journal.stdout + journal.stderr)
 
     def test_service_with_spaced_paths_receives_correct_arguments(self) -> None:
         """ExecStart escapado: o service recebe exatamente os caminhos gerados."""

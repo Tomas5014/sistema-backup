@@ -70,3 +70,31 @@ macip-backup history --store ~/.local/state/macip-backup/agent.db
 ## Piloto de 7 dias (segue o checklist de docs/piloto-operacao.md §7)
 
 Não iniciado — aguarda a máquina de destino. Não declarar concluído.
+
+## Correção 0.2.1 — EnvironmentFile (defeito encontrado na VM)
+
+Bug real em 0.2.0: `EnvironmentFile=-"/path/agent.env"` era ignorado
+pelo systemd (`path is not absolute`) → serviço sem credencial.
+Em 0.2.1 a diretiva sai literal: `EnvironmentFile=-/path` — incluindo
+caminhos com espaço (a linha inteira é o filename; aspas não são
+aceitas nessa diretiva).
+
+### Atualizar a VM (a unit já corrigida manualmente segue funcionando)
+
+```bash
+scp dist/macip_backup_poc-0.2.1-py3-none-any.whl deploy/install.sh \
+    estagio01@<vm>:/tmp/
+
+# na VM — sem execução ativa:
+sha256sum /tmp/macip_backup_poc-0.2.1-py3-none-any.whl
+# conferir: ac7ba45455453bf2312762ccf613ac983ec898e55e8cab5a3b2f40134a1a2136
+bash /tmp/install.sh /tmp/macip_backup_poc-0.2.1-py3-none-any.whl --commit <sha>
+macip-backup --version   # → 0.2.1
+
+# opcional: regenerar units já agendadas com a sintaxe corrigida
+macip-backup schedule tarefa.json --store ~/.local/state/macip-backup/agent.db \
+  --calendar '<mesmo-calendário>'
+```
+
+A unit corrigida manualmente na VM permanece válida e reconhecida
+pelo marcador `install=` — a atualização não a toca.

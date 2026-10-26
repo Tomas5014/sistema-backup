@@ -127,8 +127,10 @@ def install_schedule(
         install_root = str(src_root)
 
     config_dir = os.environ.get("MACIP_CONFIG")
+    # EnvironmentFile: '-' literal + caminho SEM aspas — a diretiva trata
+    # a linha inteira como filename; aspas virariam parte do nome.
     env_file = (
-        f"EnvironmentFile=-{_unit_value(Path(config_dir) / 'agent.env')}"
+        f"EnvironmentFile=-{Path(config_dir) / 'agent.env'}"
         if config_dir
         else "EnvironmentFile=-%h/.config/macip-backup/agent.env"
     )

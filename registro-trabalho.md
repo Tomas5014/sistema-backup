@@ -1068,3 +1068,43 @@ entregue runbook executável (`docs/homologacao-segunda-maquina.md`).
 Suíte: 148 testes — 130 aprovados, 0 falhos, 18 ignorados.
 
 ---
+
+## 2026-10-23 — Correção de EnvironmentFile (defeito real da VM do piloto)
+
+### Defeito
+
+Unit gerada em `0.2.0` (f4b624c) emitia
+`EnvironmentFile=-"/path/agent.env"` — o `-` antes das aspas faz o
+systemd tratar `"..."` como parte do filename → journal:
+`EnvironmentFile= path is not absolute, ignoring` → serviço sem
+credencial → backup falhou na VM do piloto (Ubuntu 26.04, estagio01).
+
+### Correção
+
+`systemd.py`: EnvironmentFile usa a sintaxe própria — `-` literal
+seguido do caminho bruto; a linha inteira é o filename, aspas NÃO são
+suportadas nessa diretiva (verificado com `systemd-analyze verify` —
+`-"path"` e `"-path"` ignoram; `-/path com espaços` é aceito literal).
+Caminho padrão `-%h/...` e `MACIP_CONFIG` personalizado com espaços
+cobertos. Versão → 0.2.1 (pyproject + `__version__`).
+
+### Homologação real desta sessão
+
+- `test_service_loads_credential_from_environment_file` (systemd real):
+  credencial existia SÓ em `agent.env` dentro de `cfg com espaços/` —
+  sem variável herdada, sem entrada no keyring. Service → sucesso;
+  journal sem `path is not absolute`.
+- `test_environment_file_with_spaced_config_dir_is_unquoted`: linha
+  gerada bate literalmente + `systemd-analyze verify` limpo.
+
+Suíte: **150 testes** — 132 aprovados, 0 falhos, 18 ignorados
+(SFTP/SMB/S3/combinações — ambientes remotos não preparados).
+
+### Artefato para a VM
+
+`dist/macip_backup_poc-0.2.1-py3-none-any.whl` —
+SHA-256 `ac7ba45455453bf2312762ccf613ac983ec898e55e8cab5a3b2f40134a1a2136`.
+A unit da VM (corrigida manualmente) segue válida — marcador
+`install=` preservado; atualização por `install.sh` não toca units.
+
+---
