@@ -65,6 +65,15 @@ class _FakeApi(BaseHTTPRequestHandler):
         )
         _FakeApi.posts.append(body)
         accepted = body["execution_id"]
+        if getattr(_FakeApi, "hold_marker", None):
+            # POST já aceito — sinaliza e segura a resposta até o teste
+            # liberar (ou até 30s, para não travar em falha do pai)
+            marker, hold_file, release_file = _FakeApi.hold_marker
+            marker.write_text("x")
+            deadline = time.time() + 30
+            while hold_file.exists() and not release_file.exists() and time.time() < deadline:
+                time.sleep(0.05)
+            _FakeApi.accepted_execution_ids.add(accepted)
         if _FakeApi.delay_before_close:
             time.sleep(_FakeApi.delay_before_close)
             self.close_connection = True
@@ -100,7 +109,7 @@ class _FakeApi(BaseHTTPRequestHandler):
         pass
 
 
-class OutboxTestCase(unittest.TestCase):
+class OutboxBase(unittest.TestCase):
     def setUp(self):
         self.tempdir = Path(tempfile.mkdtemp())
         self.db = self.tempdir / "agent.db"
@@ -139,6 +148,7 @@ class OutboxTestCase(unittest.TestCase):
         _FakeApi.accepted_execution_ids = set()
         _FakeApi.disconnect_after_accept = 0
         _FakeApi.delay_before_close = 0.0
+        _FakeApi.hold_marker = None
 
     def tearDown(self):
         self.server.shutdown()
@@ -157,6 +167,9 @@ class OutboxTestCase(unittest.TestCase):
         finally:
             store.close()
 
+
+
+class OutboxTestCase(OutboxBase):
     # ---- enfileiramento ------------------------------------------------
 
     def test_backup_sem_api_enfileira_pendente(self):
@@ -562,3 +575,169 @@ class OutboxTestCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---- locks do outbox-rearm ------------------------------------------------
+
+
+class RearmLockTestCase(OutboxBase):
+    """outbox-rearm compartilha maintenance-SH + sync-EX com o sync."""
+
+    def _auth_blocked_item(self) -> dict:
+        _central(self.central_file, f"http://127.0.0.1:{self.port}")
+        run_task(self.task_file, self.db, self.central_file)
+        _FakeApi.responses = [(401, {})]
+        run_sync(self.db, self.central_file)
+        return self._outbox()[0]
+
+    def test_rearm_recusado_com_manutencao_ativa(self):
+        import fcntl
+
+        self._auth_blocked_item()
+        before = self._outbox()[0].copy()
+        maintenance = (
+            self.tempdir / "locks" / "maintenance.lock"
+        ).open("a")
+        fcntl.flock(maintenance.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            with self.assertRaises(Exception):
+                from macip_backup.sync import run_rearm
+
+                run_rearm(self.db, self.central_file)
+        finally:
+            maintenance.close()
+        # banco intocado — nem migração nem status alterado
+        self.assertEqual(self._outbox()[0], before)
+
+    def test_rearm_recusado_com_sync_ativo(self):
+        import fcntl
+
+        self._auth_blocked_item()
+        sync_lock = (self.tempdir / "locks" / "sync.lock").open("a")
+        fcntl.flock(sync_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            with self.assertRaises(Exception):
+                from macip_backup.sync import run_rearm
+
+                run_rearm(self.db, self.central_file)
+        finally:
+            sync_lock.close()
+
+    def test_sync_recusado_com_rearm_ativo(self):
+        import fcntl
+
+        self._auth_blocked_item()
+        # ocupa o sync.lock como faria um outbox-rearm em curso
+        held = (self.tempdir / "locks" / "sync.lock").open("a")
+        fcntl.flock(held.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            with self.assertRaises(Exception):
+                run_sync(self.db, self.central_file)
+        finally:
+            held.close()
+
+    def test_rearm_funciona_apos_liberacao_dos_locks(self):
+        self._auth_blocked_item()
+        from macip_backup.sync import run_rearm
+
+        result = run_rearm(self.db, self.central_file)
+        self.assertEqual(len(result["rearmed"]), 1)
+        self.assertEqual(self._outbox()[0]["status"], "pending")
+
+    def test_falha_no_rearm_nao_deixa_lock_preso(self):
+        self._auth_blocked_item()
+        from macip_backup.sync import run_rearm
+
+        # caminho que É um diretório → ExecutionStore falha ao abrir
+        with self.assertRaises(Exception):
+            run_rearm(self.tempdir, self.central_file)
+        # sync.lock liberado → uma nova operação funciona
+        result = run_rearm(self.db, self.central_file)
+        self.assertEqual(len(result["rearmed"]), 1)
+
+    def test_rearm_preserva_sent_e_identidade(self):
+        _central(self.central_file, f"http://127.0.0.1:{self.port}")
+        run_task(self.task_file, self.db, self.central_file)
+        run_sync(self.db, self.central_file)           # sent
+        _FakeApi.responses = [(401, {})]
+        sqlite3.connect(self.db).execute(
+            "UPDATE outbox SET status='auth_blocked' WHERE status='sent'"
+        ).connection.commit()
+        item = self._outbox()[0]
+        # rearme manualmente marcado como auth_blocked com vínculo exato
+        sqlite3.connect(self.db).execute(
+            "UPDATE outbox SET status='sent' WHERE id=?", (item["id"],)
+        ).connection.commit()
+        from macip_backup.sync import run_rearm
+
+        result = run_rearm(self.db, self.central_file)
+        # 'sent' nunca é rearmado — reverter para auth_blocked não conta
+        self.assertEqual(result["rearmed"], [])
+        self.assertEqual(self._outbox()[0]["status"], "sent")
+
+
+# ---- SIGKILL real entre aceite e confirmação -------------------------------
+
+
+class KillRecoveryTestCase(OutboxBase):
+    """Subprocesso recebe SIGKILL depois do servidor aceitar e antes
+    de confirmar `sent` no SQLite."""
+
+    def test_sigkill_apos_aceite_servidor_item_permance_reenviavel(self):
+        import subprocess
+        import fcntl
+
+        _central(self.central_file, f"http://127.0.0.1:{self.port}")
+        run_task(self.task_file, self.db, self.central_file)
+        execution_id = self._outbox()[0]["execution_id"]
+
+        # o servidor aceita, registra e trava a resposta até 'release'
+        hold = self.tempdir / "hold"
+        release = self.tempdir / "release"
+        hold.write_text("x")
+        _FakeApi.hold_marker = (self.tempdir / "accepted", hold, release)
+
+        env = dict(
+            os.environ,
+            PYTHONPATH=str(Path(__file__).parents[1] / "src"),
+            MACIP_LOCK_DIR=str(self.tempdir / "locks"),
+            MACIP_TEST_TOKEN=os.environ["MACIP_TEST_TOKEN"],
+        )
+        process = subprocess.Popen(
+            [
+                sys.executable, "-c",
+                "from macip_backup.sync import run_sync; "
+                f"run_sync({str(self.db)!r}, {str(self.central_file)!r})",
+            ],
+            env=env,
+        )
+        # espera determinística: marcador só existe quando o servidor
+        # já recebeu o POST e a resposta ainda não saiu
+        marker = self.tempdir / "accepted"
+        deadline = time.time() + 30
+        while not marker.exists() and time.time() < deadline:
+            self.assertIsNone(process.poll(), "sync morreu antes do POST")
+            time.sleep(0.05)
+        self.assertTrue(marker.exists(), "servidor nunca recebeu o POST")
+
+        process.kill()                      # SIGKILL na janela
+        process.wait(timeout=10)
+        release.write_text("x")
+
+        # kernel liberou os locks → sync.lock aceita EX de imediato
+        probe = (self.tempdir / "locks" / "sync.lock").open("a")
+        fcntl.flock(probe.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        probe.close()
+
+        item = self._outbox()[0]
+        self.assertEqual(item["status"], "pending")
+        self.assertEqual(item["execution_id"], execution_id)
+        self.assertEqual(len(_FakeApi.posts), 1)
+
+        # novo processo: a API já tinha aceito → 'duplicate' → sent
+        summary = run_sync(self.db, self.central_file)
+        self.assertEqual(summary["sent"], [execution_id])
+        self.assertEqual(len(_FakeApi.posts), 2)
+        self.assertEqual(
+            _FakeApi.posts[1]["execution_id"], execution_id
+        )

@@ -161,24 +161,15 @@ def main() -> int:
             print(json.dumps(run_sync(arguments.store, arguments.central, arguments.limit), ensure_ascii=False))
             return 0
         if arguments.command == "outbox-rearm":
-            from .central import load_central
-            from .store import ExecutionStore
+            from .sync import run_rearm
 
-            spec = load_central(arguments.central)
-            store = ExecutionStore(arguments.store)
-            try:
-                execution_ids = store.rearm_outbox(
-                    spec.url, spec.agent_id, arguments.include_permanent
-                )
-            finally:
-                store.close()
             print(
                 json.dumps(
-                    {
-                        "endpoint": spec.url,
-                        "agent_id": spec.agent_id,
-                        "rearmed": execution_ids,
-                    },
+                    run_rearm(
+                        arguments.store,
+                        arguments.central,
+                        arguments.include_permanent,
+                    ),
                     ensure_ascii=False,
                 )
             )

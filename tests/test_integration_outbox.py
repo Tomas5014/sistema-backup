@@ -177,5 +177,108 @@ class OutboxIntegrationTestCase(unittest.TestCase):
         )
 
 
+
+    def test_sigkill_entre_aceite_e_confirmacao_local(self):
+        """API real: subprocesso aceito pela central é morto antes de
+        confirmar `sent` — a reexecução reconhece a duplicata."""
+        base = f"http://127.0.0.1:{self.port}"
+        _, client = _request(
+            f"{base}/api/v1/clients", "POST",
+            {"name": f"kill-{uuid.uuid4().hex[:6]}"},
+        )
+        _, agent = _request(
+            f"{base}/api/v1/clients/{client['id']}/agents", "POST",
+            {"name": "agente-kill"},
+        )
+        _, credential = _request(
+            f"{base}/api/v1/agents/{agent['id']}/credentials", "POST", {},
+        )
+        os.environ["MACIP_API_TOKEN"] = credential["token"]
+        central = self.tempdir / "central-kill.json"
+        central.write_text(
+            json.dumps(
+                {
+                    "url": base,
+                    "agent_id": agent["id"],
+                    "token_environment": "MACIP_API_TOKEN",
+                }
+            )
+        )
+
+        from macip_backup.agent import run_task
+        from macip_backup.sync import run_sync
+
+        result = run_task(self.task_file, self.db, central)
+        assert result.status.value == "success"
+
+        # O pai segura a escrita no SQLite: o sync do subprocesso consegue
+        # ler a fila e POSTar, mas trava no UPDATE do 'sent' — a janela
+        # entre aceite remoto e confirmação local é determinística.
+        holder = sqlite3.connect(self.db)
+        holder.execute("BEGIN IMMEDIATE")
+        holder.execute("UPDATE outbox SET attempts = attempts WHERE 0")
+
+        env = dict(
+            os.environ,
+            PYTHONPATH=str(REPO / "src"),
+            MACIP_LOCK_DIR=str(self.tempdir / "locks"),
+        )
+        import signal
+        import subprocess
+
+        process = subprocess.Popen(
+            [
+                sys.executable, "-c",
+                "from macip_backup.sync import run_sync; "
+                f"run_sync({str(self.db)!r}, {str(central)!r})",
+            ],
+            env=env,
+        )
+        try:
+            # espera a execução existir na central (aceite confirmado)
+            deadline = time.time() + 60
+            present = False
+            while time.time() < deadline:
+                assert process.poll() is None, "sync morreu antes do aceite"
+                try:
+                    _, executions = _request(
+                        f"{base}/api/v1/executions?status=success"
+                    )
+                    present = any(
+                        e["execution_id"] == result.execution_id
+                        for e in executions
+                    )
+                except Exception:
+                    present = False
+                if present:
+                    break
+                time.sleep(0.5)
+            assert present, "central nunca recebeu a execução"
+            process.kill()                      # SIGKILL na janela
+            process.wait(timeout=10)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
+            holder.rollback()
+            holder.close()
+
+        # item continua reenviável, identidade intacta
+        check = sqlite3.connect(self.db)
+        rows = check.execute(
+            "SELECT status, payload, endpoint, agent_id FROM outbox"
+        ).fetchall()
+        assert len(rows) == 1
+        assert rows[0][0] == "pending", rows
+        assert rows[0][2] == base and rows[0][3] == agent["id"]
+
+        summary = run_sync(self.db, central)
+        assert summary["sent"] == [result.execution_id]
+        _, executions = _request(f"{base}/api/v1/executions")
+        assert (
+            len([e for e in executions if e["execution_id"] == result.execution_id])
+            == 1
+        )
+
 if __name__ == "__main__":
     unittest.main()

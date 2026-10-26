@@ -99,9 +99,10 @@ def _post(spec: CentralSpec, payload: bytes, token: str) -> tuple[int, dict | No
         return 0, None
 
 
-def _acquire_sync_locks(task_id: str):
+def _acquire_sync_locks():
     """Maintenance SH (coexiste com tarefas, bloqueia install) + lock EX
-    da própria sincronização — dois syncs não disputam a fila."""
+    da fila — sync e outbox-rearm compartilham este mesmo par e nunca
+    correm simultaneamente."""
     import fcntl
 
     directory = task_lock_directory()
@@ -127,7 +128,7 @@ def run_sync(store_path: Path, central_path: Path, limit: int = 50) -> dict:
     if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
         raise ConfigurationError("--limit deve ser inteiro positivo")
     spec = load_central(central_path)
-    locks = _acquire_sync_locks("_")
+    locks = _acquire_sync_locks()
     try:
         store = ExecutionStore(Path(store_path))
         try:
@@ -199,6 +200,31 @@ def run_sync(store_path: Path, central_path: Path, limit: int = 50) -> dict:
     finally:
         for lock in locks:
             lock.close()
+
+
+def run_rearm(
+    store_path: Path, central_path: Path, include_permanent: bool = False
+) -> dict:
+    """Rearme explícito — mesma exclusão do sync: maintenance SH +
+    sync.lock EX, adquiridos ANTES de abrir o banco (e das migrações)."""
+    spec = load_central(central_path)
+    locks = _acquire_sync_locks()
+    try:
+        store = ExecutionStore(Path(store_path))
+        try:
+            rearmed = store.rearm_outbox(
+                spec.url, spec.agent_id, include_permanent
+            )
+        finally:
+            store.close()
+    finally:
+        for lock in locks:
+            lock.close()
+    return {
+        "endpoint": spec.url,
+        "agent_id": spec.agent_id,
+        "rearmed": rearmed,
+    }
 
 
 def outbox_json(store_path: Path) -> str:

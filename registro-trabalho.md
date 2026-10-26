@@ -1302,3 +1302,40 @@ legadas anteriores à v4, distribuição de tarefas — incrementos
 posteriores. Piloto em acompanhamento (término 02/11).
 
 ---
+
+## 2026-10-26 — Consolidação da outbox: locks do rearme + prova SIGKILL
+
+### 1. outbox-rearm sob o mesmo protocolo do sync
+
+O comando abria o SQLite sem locks. Agora `run_rearm` (sync.py)
+adquire maintenance-SH + sync.lock EX ANTES de abrir o banco (migração
+incluída), libera em sucesso e falha, e compartilha a mesma exclusão do
+sync — sync e rearme nunca correm juntos. Backups continuam livres
+(manutenção é SH).
+
+Testes: manutenção ativa → recusa sem tocar no banco; sync ativo →
+recusa; rearme ativo → sync recusado; liberação → funciona; falha ao
+abrir o banco não prende lock; `sent` nunca é rearmado.
+
+### 2. Prova SIGKILL (determinística, subprocesso)
+
+`KillRecoveryTestCase`: servidor aceita o POST (marcador em disco) e
+segura a resposta → o pai envia SIGKILL na janela → locks liberados
+pelo kernel (probe EX imediato) → item segue `pending` → novo processo
+reenvia → `duplicate` → `sent`, 2 POSTs, 1 execução.
+
+### 3. Integração REAL agente → API → PostgreSQL
+
+`test_integration_outbox` (uvicorn + PG17 podman :55432, banco
+descartável): provisionamento admin → backup local → sync → consulta
+com destinos/tentativas → reenvio = 1 execução central. **SIGKILL
+contra a API real**: o pai segura a escrita SQLite (BEGIN IMMEDIATE)
+→ o subprocesso POSTa e trava no `sent` → central confirma a execução
+→ kill → item `pending` → reenvio → `duplicate`, uma única execução.
+Distinguido do teste com servidor HTTP controlado.
+
+### 4. Regressão
+
+Suíte única: **186 — 168 aprovados, 0 falhos, 18 ignorados** (SFTP/SMB/S3/combinações — ambientes remotos). API: **42/42** com PostgreSQL real.
+
+---

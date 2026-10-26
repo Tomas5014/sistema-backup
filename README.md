@@ -546,3 +546,11 @@ rearme explícito. `--limit` deve ser inteiro positivo. Erros locais guardam
 motivos sanitizados e nunca token ou `Authorization`.
 O `sync` respeita o lock de manutenção e não disputa a fila com outro
 sincronizador. Erros registrados nunca contêm token/`Authorization`.
+
+`outbox-rearm` compartilha o mesmo protocolo de exclusão do `sync`
+(maintenance-SH + `sync.lock` EX, adquiridos antes de abrir o banco —
+inclusive antes das migrações): recusa sob manutenção ativa ou outro
+sincronizador, e nunca deixa locks presos em falha. Em prova real com
+SIGKILL na janela entre aceite remoto e confirmação local, o item
+permanece reenviável e o reenvio resolve por `duplicate` — uma única
+execução central.
