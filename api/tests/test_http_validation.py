@@ -58,13 +58,15 @@ BASE = (
 DEST_TEMPLATE = (
     '{{"destination_id":"d","status":"success",'
     '"started_at_utc":"2026-10-26T10:00:00Z",'
-    '"finished_at_utc":"2026-10-26T10:05:00Z",{field}}}'
+    '"finished_at_utc":"2026-10-26T10:05:00Z"{field}}}'
 )
 
 
 def _body(field: str) -> bytes:
+    extra = f",{field}" if field else ""
     return (
-        "{" + BASE + f',"destinations":[{DEST_TEMPLATE.format(field=field)}]' + "}"
+        "{" + BASE + f',"destinations":[{DEST_TEMPLATE.format(field=extra)}]'
+        + "}"
     ).encode()
 
 
@@ -93,19 +95,51 @@ def test_non_finite_in_integer_field(http_client):
     assert "detail" in response.json()
 
 
+def _dest_valid() -> str:
+    """Destino válido completo — nenhum campo extra, JSON bem formado."""
+    return DEST_TEMPLATE.format(field="")
+
+
 def test_common_validation_errors_still_422(http_client):
-    # timezone naive
-    naive = _body("").replace(b"2026-10-26T10:00:00Z", b"2026-10-26T10:00:00")
+    # timezone naive → erro semântico de aware, não json_invalid
+    naive = (
+        "{" + BASE.replace(
+            '"started_at_utc":"2026-10-26T10:00:00Z"',
+            '"started_at_utc":"2026-10-26T10:00:00"',
+        ) + f',"destinations":[{_dest_valid()}]' + "}"
+    ).encode()
     response = http_client.post(
         "/api/v1/agent/executions", content=naive, headers=HEADERS
     )
     assert response.status_code == 422
-    # status inválido
-    bad = _body("").replace(b'"status":"success"', b'"status":"xyz"', 1)
+    detail = response.json()["detail"]
+    assert detail[0]["type"] == "value_error", detail
+    assert "timezone" in detail[0]["msg"], detail
+    assert detail[0]["loc"][-1] == "started_at_utc"
+
+    # status fora do Literal → literal_error no campo correto
+    bad = (
+        "{" + BASE.replace(
+            '"status":"success"', '"status":"xyz"'
+        ) + f',"destinations":[{_dest_valid()}]' + "}"
+    ).encode()
     response = http_client.post(
         "/api/v1/agent/executions", content=bad, headers=HEADERS
     )
     assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail[0]["type"] == "literal_error", detail
+    assert detail[0]["loc"][-1] == "status"
+
+
+def test_malformed_json_returns_422(http_client):
+    response = http_client.post(
+        "/api/v1/agent/executions",
+        content=b'{"execution_id": "e1", nao-e-json}',
+        headers=HEADERS,
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["type"] == "json_invalid"
 
 
 def test_valid_payload_not_rejected(http_client):
