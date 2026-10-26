@@ -19,6 +19,7 @@ lida, o POST acontece e o resultado é gravado numa transação curta.
 from __future__ import annotations
 
 import json
+import http.client
 import urllib.error
 import urllib.request
 from datetime import UTC, datetime, timedelta
@@ -72,20 +73,30 @@ def _post(spec: CentralSpec, payload: bytes, token: str) -> tuple[int, dict | No
         },
         method="POST",
     )
+    # urllib expõe somente um timeout de socket. Aplicamos o menor prazo
+    # declarado a connect e leitura: ambos os limites configurados são reais,
+    # sem deixar ``connect_timeout_seconds`` silenciosamente inerte.
+    timeout = min(spec.connect_timeout_seconds, spec.request_timeout_seconds)
     try:
-        with _opener.open(request, timeout=spec.request_timeout_seconds) as response:
+        with _opener.open(request, timeout=timeout) as response:
             body = response.read()
             try:
                 return response.status, json.loads(body)
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, UnicodeDecodeError):
                 return response.status, None
     except urllib.error.HTTPError as error:
         try:
             return error.code, json.loads(error.read() or b"{}")
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, UnicodeDecodeError):
             return error.code, None
+        except (OSError, http.client.HTTPException):
+            return 0, None
         finally:
             error.close()
+    except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException):
+        # Não guardar o texto do erro: pode carregar URL, cabeçalhos ou dados
+        # de uma biblioteca intermediária. O estado registrado é genérico.
+        return 0, None
 
 
 def _acquire_sync_locks(task_id: str):
@@ -113,6 +124,8 @@ def _acquire_sync_locks(task_id: str):
 
 def run_sync(store_path: Path, central_path: Path, limit: int = 50) -> dict:
     """Uma rodada limitada de envio — agenda automática não entra aqui."""
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+        raise ConfigurationError("--limit deve ser inteiro positivo")
     spec = load_central(central_path)
     locks = _acquire_sync_locks("_")
     try:
@@ -146,7 +159,7 @@ def run_sync(store_path: Path, central_path: Path, limit: int = 50) -> dict:
                 execution_id = item["execution_id"]
                 if (
                     status in (200, 201)
-                    and body
+                    and isinstance(body, dict)
                     and body.get("status") in ("created", "duplicate")
                     and body.get("execution_id") == execution_id
                 ):
@@ -165,10 +178,7 @@ def run_sync(store_path: Path, central_path: Path, limit: int = 50) -> dict:
                 else:
                     # rede, timeout, 5xx, resposta inesperada ou JSON
                     # inválido → retentativa limitada, nunca "entregue"
-                    row = next(
-                        r for r in store.outbox_state() if r["id"] == item["id"]
-                    )
-                    attempts = row["attempts"] + 1
+                    attempts = item["attempts"] + 1
                     if attempts >= _MAX_ATTEMPTS:
                         store.outbox_blocked(
                             item["id"],

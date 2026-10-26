@@ -93,6 +93,22 @@ def main() -> int:
         "--limit", type=int, default=50,
         help="máximo de itens enviados nesta rodada (padrão: 50)",
     )
+    rearm_parser = subcommands.add_parser(
+        "outbox-rearm",
+        help="rearma bloqueios da outbox vinculados à central informada",
+    )
+    rearm_parser.add_argument(
+        "--store", type=Path, default=Path("/var/lib/macip-backup/agent.db"),
+        help="banco SQLite do histórico local",
+    )
+    rearm_parser.add_argument(
+        "--central", type=Path, required=True,
+        help="configuração central que deve coincidir com o vínculo original",
+    )
+    rearm_parser.add_argument(
+        "--include-permanent", action="store_true",
+        help="inclui bloqueios permanentes; padrão rearma apenas auth_blocked",
+    )
     schedule_parser = subcommands.add_parser(
         "schedule",
         help="instala par service+timer systemd --user para a tarefa",
@@ -143,6 +159,29 @@ def main() -> int:
             from .sync import run_sync
 
             print(json.dumps(run_sync(arguments.store, arguments.central, arguments.limit), ensure_ascii=False))
+            return 0
+        if arguments.command == "outbox-rearm":
+            from .central import load_central
+            from .store import ExecutionStore
+
+            spec = load_central(arguments.central)
+            store = ExecutionStore(arguments.store)
+            try:
+                execution_ids = store.rearm_outbox(
+                    spec.url, spec.agent_id, arguments.include_permanent
+                )
+            finally:
+                store.close()
+            print(
+                json.dumps(
+                    {
+                        "endpoint": spec.url,
+                        "agent_id": spec.agent_id,
+                        "rearmed": execution_ids,
+                    },
+                    ensure_ascii=False,
+                )
+            )
             return 0
         if arguments.command == "agent":
             from .agent import run_task

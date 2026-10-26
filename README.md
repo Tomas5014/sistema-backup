@@ -478,10 +478,13 @@ local separada — **nunca** no JSON da tarefa e sem segredos em disco:
 - `agent_id`: UUID **central** do agente (provisionado via API admin) —
   o `client_id` local da tarefa (`macip-laboratorio`) NÃO é enviado.
 - Token: somente por ambiente ou kernel keyring
-  (`keyctl add user macip.MACIP_API_TOKEN <TOKEN> @s`) — resolvido
+  (`printf '%s' "$MACIP_API_TOKEN" | keyctl padd user macip.MACIP_API_TOKEN @s`) — resolvido
   apenas no envio; ausência não impede backup nem enfileiramento.
 - HTTPS obrigatório fora de localhost; TLS sempre verificado;
   redirecionamentos nunca seguidos.
+- `connect_timeout_seconds` e `request_timeout_seconds` são inteiros positivos.
+  A biblioteca HTTP usa um único prazo de socket; por isso aplica o menor dos
+  dois tanto à conexão quanto à leitura. Ajuste ambos para backups com rede lenta.
 
 ### Fluxo
 
@@ -496,10 +499,27 @@ macip-backup history --store ~/.local/state/macip-backup/agent.db --outbox
 # 3) uma rodada de envio (agendamento automático: incremento posterior)
 macip-backup sync --store ~/.local/state/macip-backup/agent.db \
   --central ~/.config/macip-backup/central.json --limit 50
+
+# 4) depois de corrigir uma credencial, rearma somente os auth_blocked
+macip-backup outbox-rearm --store ~/.local/state/macip-backup/agent.db \
+  --central ~/.config/macip-backup/central.json
+
+# decisão explícita do operador para bloqueios 409/413/422/esgotados
+macip-backup outbox-rearm --store ~/.local/state/macip-backup/agent.db \
+  --central ~/.config/macip-backup/central.json --include-permanent
 ```
 
-A conclusão da execução e o item da outbox são **a mesma transação
-SQLite** — nunca uma execução concluída sem item correspondente.
+No início de cada execução, o banco grava se há intenção de envio e, nesse
+caso, o endpoint e UUID central. Recuperações usam somente esse vínculo:
+configuração A não é redirecionada para B, mesmo se a recuperação ocorrer sem
+`--central`. Execuções antigas migradas de v4 sem esse dado ficam
+conservadoramente sem envio automático; itens já existentes preservam seu
+vínculo original.
+
+A conclusão final e o item da outbox são **a mesma transação SQLite** — nunca
+uma execução concluída sem item correspondente. Sinal recebido antes desse
+ponto final congela histórico e payload como `interrupted`; sinal posterior
+não altera resultado já enfileirado ou enviado.
 O `execution_id` local é estável entre reenvios; aceitação perdida ou
 morte do processo mantém o item reenviável e a idempotência da API
 (`UNIQUE(agent_id, execution_id)`) impede duplicidade.
@@ -515,5 +535,14 @@ morte do processo mantém o item reenviável e a idempotência da API
 
 Cada item fica vinculado ao endpoint/agente do enfileiramento — mudar a
 configuração não redireciona resultados antigos para outro servidor.
+`outbox-rearm` só seleciona itens cujo vínculo coincide exatamente com a
+central indicada, preserva `execution_id`, payload e contador de tentativas,
+e nunca rearma `sent`. Por padrão só rearma `auth_blocked`; bloqueios
+permanentes exigem `--include-permanent`.
+
+Falhas de conexão, timeout, desconexão, resposta inválida ou 5xx registram uma
+tentativa e backoff de 30 s até 1 h (máximo de 10). `401/403` bloqueiam até
+rearme explícito. `--limit` deve ser inteiro positivo. Erros locais guardam
+motivos sanitizados e nunca token ou `Authorization`.
 O `sync` respeita o lock de manutenção e não disputa a fila com outro
 sincronizador. Erros registrados nunca contêm token/`Authorization`.

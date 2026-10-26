@@ -44,10 +44,26 @@ class CentralSpec:
 
     @classmethod
     def from_dict(cls, data: dict, source: str = "config") -> "CentralSpec":
+        if not isinstance(data, dict):
+            raise ConfigurationError(f"{source}: objeto JSON obrigatório")
         url = data.get("url")
         if not url or not isinstance(url, str):
             raise ConfigurationError(f"{source}: 'url' ausente")
         parsed = urlparse(url)
+        try:
+            port = parsed.port
+        except ValueError as error:
+            raise ConfigurationError(f"{source}: porta inválida em 'url'") from error
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ConfigurationError(
+                f"{source}: 'url' deve ser HTTP(S) com host válido"
+            )
+        if parsed.username is not None or parsed.password is not None:
+            raise ConfigurationError(
+                f"{source}: credenciais embutidas em 'url' não são aceitas"
+            )
+        if port is not None and not 1 <= port <= 65535:
+            raise ConfigurationError(f"{source}: porta inválida em 'url'")
         local = parsed.hostname in ("localhost", "127.0.0.1", "::1")
         if parsed.scheme != "https" and not local:
             raise ConfigurationError(
@@ -76,9 +92,23 @@ class CentralSpec:
             url=url.rstrip("/"),
             agent_id=agent_id,
             token_environment=token_env,
-            connect_timeout_seconds=int(data.get("connect_timeout_seconds", 10)),
-            request_timeout_seconds=int(data.get("request_timeout_seconds", 30)),
+            connect_timeout_seconds=cls._timeout(
+                data.get("connect_timeout_seconds", 10),
+                "connect_timeout_seconds",
+                source,
+            ),
+            request_timeout_seconds=cls._timeout(
+                data.get("request_timeout_seconds", 30),
+                "request_timeout_seconds",
+                source,
+            ),
         )
+
+    @staticmethod
+    def _timeout(value: object, field: str, source: str) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ConfigurationError(f"{source}: '{field}' deve ser inteiro positivo")
+        return value
 
 
 def load_central(path: Path) -> CentralSpec:

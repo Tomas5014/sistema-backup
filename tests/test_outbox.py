@@ -12,10 +12,12 @@ import sqlite3
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
@@ -32,6 +34,7 @@ from macip_backup.models import (
 )
 from macip_backup.store import ExecutionStore
 from macip_backup.sync import run_sync
+from macip_backup.orchestrator import ExecutionStatus
 
 AGENT_UUID = str(uuid.uuid4())
 
@@ -52,17 +55,40 @@ def _central(path: Path, url: str, agent_id: str = AGENT_UUID) -> Path:
 class _FakeApi(BaseHTTPRequestHandler):
     responses: list = []  # fila de (status, body_dict) por requisição
     posts: list = []
+    accepted_execution_ids: set[str] = set()
+    disconnect_after_accept = 0
+    delay_before_close = 0.0
 
     def do_POST(self):
         body = json.loads(
             self.rfile.read(int(self.headers["Content-Length"]))
         )
         _FakeApi.posts.append(body)
+        accepted = body["execution_id"]
+        if _FakeApi.delay_before_close:
+            time.sleep(_FakeApi.delay_before_close)
+            self.close_connection = True
+            return
+        if _FakeApi.disconnect_after_accept:
+            _FakeApi.disconnect_after_accept -= 1
+            _FakeApi.accepted_execution_ids.add(accepted)
+            self.close_connection = True
+            return
         status, payload = (
             _FakeApi.responses.pop(0)
             if _FakeApi.responses
-            else (200, {"status": "created", "execution_id": body["execution_id"]})
+            else (
+                200,
+                {
+                    "status": "duplicate" if accepted in _FakeApi.accepted_execution_ids else "created",
+                    "execution_id": accepted,
+                },
+            )
         )
+        if status in (200, 201) and isinstance(payload, dict) and payload.get("status") in {
+            "created", "duplicate",
+        }:
+            _FakeApi.accepted_execution_ids.add(accepted)
         data = json.dumps(payload).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
@@ -110,9 +136,13 @@ class OutboxTestCase(unittest.TestCase):
         self.thread.start()
         _FakeApi.responses = []
         _FakeApi.posts = []
+        _FakeApi.accepted_execution_ids = set()
+        _FakeApi.disconnect_after_accept = 0
+        _FakeApi.delay_before_close = 0.0
 
     def tearDown(self):
         self.server.shutdown()
+        self.server.server_close()
         os.environ.pop("MACIP_LOCK_DIR", None)
         os.environ.pop("MACIP_TEST_TOKEN", None)
         os.environ.pop("MACIP_TEST_REPO_PASSWORD", None)
@@ -177,15 +207,12 @@ class OutboxTestCase(unittest.TestCase):
         run_task(self.task_file, self.db, self.central_file)
         execution_id = self._outbox()[0]["execution_id"]
 
-        # 1ª tentativa: API aceita mas a resposta se perde (simulação:
-        # o servidor registra e devolve resposta que o cliente não lê)
-        _FakeApi.responses = [
-            (200, {"status": "created", "execution_id": execution_id})
-        ]
-        with patch("macip_backup.sync._post") as post:
-            post.return_value = (0, None)  # resposta perdida
-            run_sync(self.db, self.central_file)
-        # o servidor nem viu — marca como retry
+        # A API realmente recebe e aceita, mas encerra a conexão antes da
+        # confirmação local. O cliente deve manter a entrega reenviável.
+        _FakeApi.disconnect_after_accept = 1
+        summary = run_sync(self.db, self.central_file)
+        self.assertEqual(summary["retry"], [execution_id])
+        self.assertEqual(len(_FakeApi.posts), 1)
         self.assertEqual(self._outbox()[0]["status"], "pending")
 
         # força a tentativa imediata (o backoff real agendaria para depois)
@@ -200,6 +227,25 @@ class OutboxTestCase(unittest.TestCase):
         summary = run_sync(self.db, self.central_file)
         self.assertEqual(summary["sent"], [execution_id])
         self.assertEqual(self._outbox()[0]["status"], "sent")
+        self.assertEqual(len(_FakeApi.posts), 2)
+        self.assertEqual(_FakeApi.accepted_execution_ids, {execution_id})
+
+    def test_interrupcao_apos_aceite_remoto_mantem_item_reenviavel(self):
+        """Interrupção entre POST aceito e confirmação SQLite não marca sent."""
+        _central(self.central_file, f"http://127.0.0.1:{self.port}")
+        run_task(self.task_file, self.db, self.central_file)
+        execution_id = self._outbox()[0]["execution_id"]
+        from macip_backup.store import ExecutionStore as Store
+
+        with patch.object(Store, "outbox_sent", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                run_sync(self.db, self.central_file)
+        self.assertEqual(len(_FakeApi.posts), 1)
+        self.assertEqual(self._outbox()[0]["status"], "pending")
+        summary = run_sync(self.db, self.central_file)
+        self.assertEqual(summary["sent"], [execution_id])
+        self.assertEqual(len(_FakeApi.posts), 2)
+        self.assertEqual(_FakeApi.accepted_execution_ids, {execution_id})
 
     def test_falhas_transitorias_agendam_retry(self):
         _central(self.central_file, f"http://127.0.0.1:{self.port}")
@@ -211,6 +257,67 @@ class OutboxTestCase(unittest.TestCase):
         self.assertEqual(item["status"], "pending")
         self.assertEqual(item["attempts"], 1)
         self.assertIsNotNone(item["next_attempt_at"])
+
+    def test_rede_json_invalido_e_continuidade_nao_aborta_rodada(self):
+        _central(self.central_file, f"http://127.0.0.1:{self.port}")
+        run_task(self.task_file, self.db, self.central_file)
+        run_task(self.task_file, self.db, self.central_file)
+        with patch(
+            "macip_backup.sync._post",
+            side_effect=[(0, None), (200, ["não é objeto"])],
+        ):
+            summary = run_sync(self.db, self.central_file)
+        self.assertEqual(len(summary["retry"]), 2)
+        self.assertEqual([item["attempts"] for item in self._outbox()], [1, 1])
+
+    def test_json_invalido_da_resposta_nunca_confirma_entrega(self):
+        _central(self.central_file, f"http://127.0.0.1:{self.port}")
+        run_task(self.task_file, self.db, self.central_file)
+
+        class InvalidJsonResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return b"{invalido"
+
+        with patch("macip_backup.sync._opener.open", return_value=InvalidJsonResponse()):
+            summary = run_sync(self.db, self.central_file)
+        self.assertEqual(len(summary["retry"]), 1)
+        self.assertEqual(self._outbox()[0]["status"], "pending")
+
+    def test_conexao_recusada_registra_tentativa_sem_expor_token(self):
+        # Um endpoint sem listener produz URLError tratado dentro de _post.
+        import socket
+
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+        probe.close()
+        _central(self.central_file, f"http://127.0.0.1:{port}")
+        run_task(self.task_file, self.db, self.central_file)
+        summary = run_sync(self.db, self.central_file)
+        item = self._outbox()[0]
+        self.assertEqual(len(summary["retry"]), 1)
+        self.assertEqual(item["attempts"], 1)
+        self.assertNotIn(os.environ["MACIP_TEST_TOKEN"], item["last_error"])
+
+    def test_timeout_real_registra_tentativa(self):
+        _central(self.central_file, f"http://127.0.0.1:{self.port}")
+        central = json.loads(self.central_file.read_text())
+        central["connect_timeout_seconds"] = 1
+        central["request_timeout_seconds"] = 1
+        self.central_file.write_text(json.dumps(central))
+        run_task(self.task_file, self.db, self.central_file)
+        _FakeApi.delay_before_close = 1.2
+        summary = run_sync(self.db, self.central_file)
+        self.assertEqual(len(summary["retry"]), 1)
+        self.assertEqual(self._outbox()[0]["attempts"], 1)
 
     def test_credencial_ausente_nao_impede_enfileiramento(self):
         _central(self.central_file, f"http://127.0.0.1:{self.port}")
@@ -233,14 +340,18 @@ class OutboxTestCase(unittest.TestCase):
         self.assertEqual(summary["sent"], [])
         self.assertEqual(len(_FakeApi.posts), 1)
 
-    def test_conflito_e_rejeicao_sao_permanentes(self):
+    def test_conflito_rejeicao_e_payload_invalido_sao_permanentes(self):
         _central(self.central_file, f"http://127.0.0.1:{self.port}")
-        run_task(self.task_file, self.db, self.central_file)
-        for code in (409, 422):
-            _FakeApi.responses = [(code, {"detail": "x"})]
-            run_sync(self.db, self.central_file)
-            if code == 409:
-                self.assertEqual(self._outbox()[0]["status"], "failed_permanent")
+        for _ in range(3):
+            run_task(self.task_file, self.db, self.central_file)
+        _FakeApi.responses = [(409, {"detail": "x"}), (413, {"detail": "x"}), (422, {"detail": "x"})]
+        summary = run_sync(self.db, self.central_file)
+        self.assertEqual(len(summary["blocked"]), 3)
+        self.assertEqual(len(_FakeApi.posts), 3)
+        self.assertEqual(
+            [item["status"] for item in self._outbox()],
+            ["failed_permanent", "failed_permanent", "failed_permanent"],
+        )
 
     # ---- identidade/endpoint vinculados ----------------------------------
 
@@ -260,6 +371,107 @@ class OutboxTestCase(unittest.TestCase):
         self.assertEqual(_FakeApi.posts, [])  # nada enviado para B
         self.assertEqual(self._outbox()[0]["status"], "pending")
 
+    def test_orfa_mantem_vinculo_a_com_configuracao_b_ou_ausente(self):
+        central_a = _central(self.central_file, f"http://127.0.0.1:{self.port}")
+        task = TaskSpec.from_dict(json.loads(self.task_file.read_text()))
+        spec_a = load_central(central_a)
+        store = ExecutionStore(self.db, outbox=(spec_a.url, spec_a.agent_id))
+        store.record_start(task, "orfa-a", "2026-10-26T10:00:00+00:00")
+        store.close()
+        other = _central(
+            self.tempdir / "central-b.json", f"http://127.0.0.1:{self.port}", str(uuid.uuid4())
+        )
+        spec_b = load_central(other)
+        # Recuperação iniciada com B não pode redirecionar a órfã A.
+        store = ExecutionStore(self.db, outbox=(spec_b.url, spec_b.agent_id))
+        store.mark_stale_interrupted(task.id, "2026-10-26T10:01:00+00:00")
+        item = store.outbox_state()[0]
+        store.close()
+        self.assertEqual(item["endpoint"], spec_a.url)
+        self.assertEqual(item["agent_id"], spec_a.agent_id)
+        self.assertEqual(run_sync(self.db, other)["sent"], [])
+        self.assertEqual(run_sync(self.db, central_a)["sent"], ["orfa-a"])
+
+    def test_execucao_sem_central_nao_ganha_destino_posterior(self):
+        task = TaskSpec.from_dict(json.loads(self.task_file.read_text()))
+        store = ExecutionStore(self.db)
+        store.record_start(task, "sem-central", "2026-10-26T10:00:00+00:00")
+        store.mark_stale_interrupted(task.id, "2026-10-26T10:01:00+00:00")
+        self.assertEqual(store.outbox_state(), [])
+        store.close()
+
+    def test_finalizacao_congela_historico_e_payload(self):
+        _central(self.central_file, f"http://127.0.0.1:{self.port}")
+        task = TaskSpec.from_dict(json.loads(self.task_file.read_text()))
+        spec = load_central(self.central_file)
+        store = ExecutionStore(self.db, outbox=(spec.url, spec.agent_id))
+        store.record_start(task, "cancelada", "2026-10-26T10:00:00+00:00")
+        result = SimpleNamespace(
+            execution_id="cancelada",
+            status=ExecutionStatus.SUCCESS,
+            finished_at_utc="2026-10-26T10:01:00+00:00",
+            destinations=(),
+        )
+        store.record_finish(result, interruption_detail="sinal 15")
+        frozen = store.outbox_state()[0]["payload"]
+        store.mark_interrupted("cancelada", "2026-10-26T10:02:00+00:00", "tarde")
+        history = store.history()[0]
+        self.assertEqual(history["status"], "interrupted")
+        self.assertEqual(history["finished_at_utc"], "2026-10-26T10:01:00+00:00")
+        self.assertEqual(json.loads(frozen)["status"], "interrupted")
+        self.assertEqual(store.outbox_state()[0]["payload"], frozen)
+        store.close()
+
+    def test_falha_ao_enfileirar_desfaz_conclusao(self):
+        task = TaskSpec.from_dict(json.loads(self.task_file.read_text()))
+        store = ExecutionStore(self.db, outbox=("http://127.0.0.1:1", AGENT_UUID))
+        store.record_start(task, "rollback", "2026-10-26T10:00:00+00:00")
+        result = SimpleNamespace(
+            execution_id="rollback", status=ExecutionStatus.SUCCESS,
+            finished_at_utc="2026-10-26T10:01:00+00:00", destinations=(),
+        )
+        with patch.object(store, "_enqueue_locked", side_effect=sqlite3.OperationalError("x")):
+            with self.assertRaises(sqlite3.OperationalError):
+                store.record_finish(result)
+        self.assertEqual(store.history()[0]["status"], "running")
+        store.close()
+
+    def test_rearm_exige_vinculo_e_preserva_tentativas(self):
+        _central(self.central_file, f"http://127.0.0.1:{self.port}")
+        run_task(self.task_file, self.db, self.central_file)
+        _FakeApi.responses = [(403, {})]
+        run_sync(self.db, self.central_file)
+        before = self._outbox()[0]
+        store = ExecutionStore(self.db)
+        other = ("http://127.0.0.1:9", str(uuid.uuid4()))
+        self.assertEqual(store.rearm_outbox(*other), [])
+        spec = load_central(self.central_file)
+        self.assertEqual(store.rearm_outbox(spec.url, spec.agent_id), [before["execution_id"]])
+        after = store.outbox_state()[0]
+        store.close()
+        self.assertEqual(after["status"], "pending")
+        self.assertEqual(after["attempts"], before["attempts"])
+        self.assertEqual(after["payload"], before["payload"])
+        self.assertEqual(after["last_error"], before["last_error"])
+
+    def test_rearm_cli_exige_central_correspondente(self):
+        import io
+
+        _central(self.central_file, f"http://127.0.0.1:{self.port}")
+        run_task(self.task_file, self.db, self.central_file)
+        _FakeApi.responses = [(401, {})]
+        run_sync(self.db, self.central_file)
+        from macip_backup.cli import main
+
+        stdout = io.StringIO()
+        with patch("sys.argv", [
+            "macip-backup-poc", "outbox-rearm", "--store", str(self.db),
+            "--central", str(self.central_file),
+        ]), patch("sys.stdout", stdout):
+            self.assertEqual(main(), 0)
+        self.assertEqual(len(json.loads(stdout.getvalue())["rearmed"]), 1)
+        self.assertEqual(self._outbox()[0]["status"], "pending")
+
     # ---- concorrência -----------------------------------------------------
 
     def test_sync_respeita_lock_de_manutencao(self):
@@ -277,13 +489,17 @@ class OutboxTestCase(unittest.TestCase):
 
     # ---- migração ---------------------------------------------------------
 
-    def test_migracao_v3_preserva_historico(self):
-        """Banco v3 (sem outbox) abre v4 com todo o histórico intacto."""
-        run_task(self.task_file, self.db)  # grava sem outbox
-        # força user_version antigo + remove tabela para simular v3
+    def test_migracao_v4_preserva_historico_e_outbox(self):
+        """Banco v4 abre v5 sem inferir intenção para histórico antigo."""
+        _central(self.central_file, f"http://127.0.0.1:{self.port}")
+        run_task(self.task_file, self.db, self.central_file)
+        before = self._outbox()
+        # Reconstrói o formato v4: outbox existe, executions ainda não tem
+        # intenção persistida.
         raw = sqlite3.connect(self.db)
-        raw.execute("DROP TABLE outbox")
-        raw.execute("PRAGMA user_version = 3")
+        for column in ("outbox_enabled", "outbox_endpoint", "outbox_agent_id"):
+            raw.execute(f"ALTER TABLE executions DROP COLUMN {column}")
+        raw.execute("PRAGMA user_version = 4")
         raw.commit()
         raw.close()
         store = ExecutionStore(self.db)
@@ -296,7 +512,10 @@ class OutboxTestCase(unittest.TestCase):
         version = sqlite3.connect(self.db).execute(
             "PRAGMA user_version"
         ).fetchone()[0]
-        self.assertEqual(version, 4)
+        self.assertEqual(version, 5)
+        columns = {row[1] for row in sqlite3.connect(self.db).execute("PRAGMA table_info(executions)")}
+        self.assertIn("outbox_endpoint", columns)
+        self.assertEqual(self._outbox(), before)
 
     # ---- validação do CentralSpec ----------------------------------------
 
@@ -320,6 +539,25 @@ class OutboxTestCase(unittest.TestCase):
                     "token": "segredo",
                 }
             )
+
+    def test_central_rejeita_tipos_url_e_timeouts_invalidos(self):
+        invalidos = (
+            [],
+            {"url": "https://user:pass@host", "agent_id": AGENT_UUID, "token_environment": "X"},
+            {"url": "https://host:0", "agent_id": AGENT_UUID, "token_environment": "X"},
+            {"url": "https://host", "agent_id": AGENT_UUID, "token_environment": "X", "connect_timeout_seconds": True},
+            {"url": "https://host", "agent_id": AGENT_UUID, "token_environment": "X", "request_timeout_seconds": 1.5},
+            {"url": "https://host", "agent_id": AGENT_UUID, "token_environment": "X", "request_timeout_seconds": 0},
+        )
+        for config in invalidos:
+            with self.subTest(config=config), self.assertRaises(ConfigurationError):
+                CentralSpec.from_dict(config)
+
+    def test_limit_deve_ser_positivo(self):
+        _central(self.central_file, f"http://127.0.0.1:{self.port}")
+        for limit in (0, -1, True, 1.5):
+            with self.subTest(limit=limit), self.assertRaises(ConfigurationError):
+                run_sync(self.db, self.central_file, limit=limit)
 
 
 if __name__ == "__main__":

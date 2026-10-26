@@ -31,6 +31,7 @@ import json
 import os
 import signal
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO
@@ -40,6 +41,7 @@ from .models import TaskSpec
 from .orchestrator import (
     BackupOrchestrator,
     ExecutionResult,
+    ExecutionStatus,
     password_from_environment,
 )
 from .restic import ResticAdapter, ResticError
@@ -204,10 +206,11 @@ def run_task(
                 execution_id,
                 recorder=store,
             )
-            store.record_finish(result)
             if interrupted_by:
                 # execute() retornou → cancel() confirmou o encerramento do
-                # grupo (ou registrou a falha). Só agora marca interrompido.
+                # grupo (ou registrou a falha). O sinal observado antes da
+                # conclusão vence o resultado normal: histórico e payload são
+                # congelados uma única vez como interrupted.
                 signum = interrupted_by[0]
                 detail = f"sinal {signum}"
                 if adapter.cancel_cleanup_error:
@@ -222,7 +225,17 @@ def run_task(
                     signum=signum,
                     cleanup_error=adapter.cancel_cleanup_error,
                 )
-                store.mark_interrupted(execution_id, _now(), detail)
+                result = replace(
+                    result,
+                    status=ExecutionStatus.INTERRUPTED,
+                    finished_at_utc=_now(),
+                )
+                store.record_finish(
+                    result,
+                    interruption_detail=detail,
+                )
+            else:
+                store.record_finish(result)
         return result
     finally:
         restore_signal_handlers(previous_handlers)

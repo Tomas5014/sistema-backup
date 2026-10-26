@@ -312,7 +312,7 @@ class ExecutionStoreMigrationTests(unittest.TestCase):
 
         store = ExecutionStore(self.db_path)
         version = store._connection.execute("PRAGMA user_version").fetchone()[0]
-        self.assertEqual(version, 4)
+        self.assertEqual(version, 5)
         entries = store.history("task-store")
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0]["execution_id"], "exec-antiga")
@@ -344,7 +344,7 @@ class ExecutionStoreMigrationTests(unittest.TestCase):
         # reabrir não repete nem danifica a migração
         store = ExecutionStore(self.db_path)
         version = store._connection.execute("PRAGMA user_version").fetchone()[0]
-        self.assertEqual(version, 4)
+        self.assertEqual(version, 5)
         entries = store.history("task-store")
         store.close()
         self.assertEqual(len(entries), 2)
@@ -407,7 +407,7 @@ class ExecutionStoreMigrationTests(unittest.TestCase):
         # Após a falha, uma nova migração conclui normalmente.
         store = ExecutionStore(self.db_path)
         version = store._connection.execute("PRAGMA user_version").fetchone()[0]
-        self.assertEqual(version, 4)
+        self.assertEqual(version, 5)
         entries = store.history("task-store")
         store.close()
         self.assertEqual(entries[0]["execution_id"], "exec-antiga")
