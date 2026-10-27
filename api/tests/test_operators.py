@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import threading
+import time
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -607,28 +608,61 @@ def test_rate_limit_janela_expira(portal, admin_headers):
     ).scalar() == 1
 
 
-def test_reset_na_janela_do_login_nao_deixa_sessao_da_senha_antiga(
-    portal, admin_headers, monkeypatch
-):
-    """Corrida real: login pausado entre verificar e criar sessão.
 
-    O FOR UPDATE serializa: o reset espera a linha, conclui depois do
-    login e revoga INCLUSIVE a sessão recém-criada — depois do reset
-    nada autenticado com a senha antiga sobrevive.
-    """
+
+def _wait_lock_blocked(needle: str, timeout: float = 30.0) -> list:
+    """Prova no banco: backend em `wait_event_type=Lock` numa query
+    reconhecível, bloqueado por OUTRA conexão (pg_blocking_pids).
+    Um evento de thread não comprova espera — isto comprova."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        rows = _exec(
+            "SELECT a.pid, pg_blocking_pids(a.pid) AS blockers "
+            "FROM pg_stat_activity a "
+            "WHERE a.wait_event_type = 'Lock' AND a.query ILIKE :n",
+            n=f"%{needle}%",
+        ).all()
+        rows = [r for r in rows if r.blockers]
+        if rows:
+            return rows
+        time.sleep(0.1)
+    return []
+
+
+def _holder(pid: int):
+    """Estado do backend que segura o lock — deve ser a transação
+    pausada (idle in transaction, última query FOR UPDATE)."""
+    return _exec(
+        "SELECT state, query FROM pg_stat_activity WHERE pid = :p",
+        p=pid,
+    ).one()
+
+
+def _paused_session_factory(monkeypatch):
+    """create_session instrumentado: sinaliza quando o login está com a
+    transação aberta (e a linha travada) entre verificar e persistir."""
     import macip_backup_api.app as app_module
 
-    op = make_operator(portal, admin_headers, login="corrida")
-    created = threading.Event()
+    at_create = threading.Event()
     release = threading.Event()
     original = app_module.create_session
 
     def paused(db_, operator):
-        created.set()
+        at_create.set()
         release.wait(timeout=60)
         return original(db_, operator)
 
     monkeypatch.setattr(app_module, "create_session", paused)
+    return at_create, release
+
+def test_reset_na_janela_do_login_nao_deixa_sessao_da_senha_antiga(
+    portal, admin_headers, monkeypatch
+):
+    """Ordem login→reset: login pausado com a linha travada; a prova de
+    espera é no PostgreSQL — o backend do reset aparece bloqueado pelo
+    PID da transação do login, não só por evento de thread."""
+    op = make_operator(portal, admin_headers, login="corrida")
+    at_create, release = _paused_session_factory(monkeypatch)
 
     result: dict = {}
 
@@ -646,14 +680,22 @@ def test_reset_na_janela_do_login_nao_deixa_sessao_da_senha_antiga(
         )
 
     t_login = threading.Thread(target=do_login)
-    t_login.start()
-    assert created.wait(timeout=60), "login não chegou ao ponto de corrida"
-
     t_reset = threading.Thread(target=do_reset)
-    t_reset.start()
-    release.set()  # login cria sessão e comita → reset destrava
-    t_login.join(timeout=60)
-    t_reset.join(timeout=60)
+    try:
+        t_login.start()
+        assert at_create.wait(timeout=60), "login não chegou ao ponto de corrida"
+
+        t_reset.start()
+        # o reset TEM que estar no banco esperando o lock do login
+        blocked = _wait_lock_blocked("operators.id")
+        assert blocked, "reset não chegou a esperar o lock do login"
+        holder = _holder(blocked[0].blockers[0])
+        # transação do login pausada no meio — lock de linha seguro
+        assert holder.state == "idle in transaction", holder
+    finally:
+        release.set()
+        t_login.join(timeout=60)
+        t_reset.join(timeout=60)
     assert not t_login.is_alive() and not t_reset.is_alive()
 
     # o login antigo concluiu com sucesso…
@@ -664,6 +706,74 @@ def test_reset_na_janela_do_login_nao_deixa_sessao_da_senha_antiga(
     # senha antiga recusada; senha nova funciona
     assert login(portal, "corrida", "senha-super-secreta-1").status_code == 401
     assert login(portal, "corrida", "senha-nova-corrida-3").status_code == 200
+
+
+def test_login_espera_reset_e_senha_antiga_morre(
+    portal, admin_headers, monkeypatch
+):
+    """Ordem reset→login: o reset trava a linha e fica sem commit;
+    o login ESPERA no banco e, ao destravar, lê o hash novo — senha
+    antiga recusada, nenhuma sessão criada."""
+    import macip_backup_api.app as app_module
+
+    op = make_operator(portal, admin_headers, login="invertida")
+    locked = threading.Event()
+    release = threading.Event()
+    original_hash = app_module.hash_password
+
+    def paused_hash(password):
+        locked.set()           # reset já detém a linha (FOR UPDATE)
+        release.wait(timeout=60)  # …e ainda não commitou
+        return original_hash(password)
+
+    monkeypatch.setattr(app_module, "hash_password", paused_hash)
+
+    result: dict = {}
+
+    def do_reset():
+        c2 = _fresh_portal("10.5.5.5")
+        result["reset"] = c2.post(
+            f"/api/v1/operators/{op['id']}/reset-password",
+            json={"password": "senha-nova-invertida-4"},
+            headers={**admin_headers, **csrf_headers(c2)},
+        )
+
+    def do_login():
+        c = _fresh_portal("10.6.6.6")
+        result["login"] = login(c, "invertida", "senha-super-secreta-1")
+        result["client"] = c
+
+    t_reset = threading.Thread(target=do_reset)
+    t_login = threading.Thread(target=do_login)
+    try:
+        t_reset.start()
+        assert locked.wait(timeout=60), "reset não travou a linha"
+
+        t_login.start()
+        # prova no banco: o LOGIN espera o lock que o reset segura
+        blocked = _wait_lock_blocked("operators.login")
+        assert blocked, "login não chegou a esperar o lock do reset"
+        holder = _holder(blocked[0].blockers[0])
+        # transação do reset pausada sem commit — lock de linha seguro
+        assert holder.state == "idle in transaction", holder
+    finally:
+        release.set()
+        t_reset.join(timeout=60)
+        t_login.join(timeout=60)
+    assert not t_reset.is_alive() and not t_login.is_alive()
+
+    assert result["reset"].status_code == 204
+    # senha antiga era válida quando o login começou — mas o reset
+    # venceu: recusada, sem sessão utilizável
+    assert result["login"].status_code == 401
+    assert result["client"].get("/api/v1/auth/me").status_code == 401
+    assert _exec(
+        "SELECT count(*) FROM operator_sessions s "
+        "JOIN operators o ON o.id = s.operator_id "
+        "WHERE o.login = 'invertida'"
+    ).scalar() == 0
+    # e a senha nova funciona normalmente
+    assert login(portal, "invertida", "senha-nova-invertida-4").status_code == 200
 
 
 def test_desativar_reativar_nao_ressuscita_sessao(portal, admin_headers):
@@ -730,3 +840,134 @@ def test_reset_pela_cli_local_tambem_revoga(portal, admin_headers):
     assert portal.get("/api/v1/auth/me").status_code == 401
     assert login(portal, "cli-reset", "senha-super-secreta-1").status_code == 401
     assert login(portal, "cli-reset", "senha-cli-nova-4").status_code == 200
+
+
+def test_reset_cli_concorrente_com_login_pausado(portal, admin_headers, monkeypatch):
+    """A CLI local disputa a MESMA linha: login pausado segura o lock;
+    prova no banco do backend do subprocesso bloqueado; depois da
+    liberação o reset local revoga a sessão recém-criada."""
+    import subprocess
+    import sys as _sys
+    from pathlib import Path
+
+    make_operator(portal, admin_headers, login="cli-conc")
+    at_create, release = _paused_session_factory(monkeypatch)
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "PYTHONPATH": str(Path(__file__).parents[1] / "src"),
+        "MACIP_API_DATABASE_URL": (
+            TEST_URL
+            if TEST_URL.startswith("postgresql+psycopg://")
+            else "postgresql+psycopg://" + TEST_URL.removeprefix("postgresql://")
+        ),
+        "MACIP_API_ADMIN_TOKEN": ADMIN_TOKEN,
+    }
+    result: dict = {}
+    proc = None
+
+    def do_login():
+        c = _fresh_portal("10.8.8.8")
+        result["login"] = login(c, "cli-conc", "senha-super-secreta-1")
+        result["client"] = c
+
+    t_login = threading.Thread(target=do_login)
+    try:
+        t_login.start()
+        assert at_create.wait(timeout=60), "login não chegou à janela"
+
+        proc = subprocess.Popen(
+            [
+                _sys.executable, "-m", "macip_backup_api.operator_cli",
+                "reset-password", "--login", "cli-conc", "--password-stdin",
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+        proc.stdin.write("senha-cli-conc-5\n")
+        proc.stdin.close()  # a CLI lê a senha ANTES de travar a linha
+
+        # prova: a CLI está no banco esperando o lock do login
+        blocked = _wait_lock_blocked("operators.login")
+        assert blocked, "CLI não chegou a esperar o lock no banco"
+        holder = _holder(blocked[0].blockers[0])
+        # quem segura é a transação do login pausada em Python
+        assert holder.state == "idle in transaction", holder
+    finally:
+        release.set()
+        t_login.join(timeout=60)
+        if proc is not None:
+            try:
+                proc.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+
+    assert not t_login.is_alive()
+    assert proc.returncode == 0, (proc.returncode, proc.stderr.read())
+    assert result["login"].status_code == 200  # login antigo "concluiu"
+    # …mas o reset local revogou a sessão que a senha antiga criou
+    assert result["client"].get("/api/v1/auth/me").status_code == 401
+    assert login(portal, "cli-conc", "senha-super-secreta-1").status_code == 401
+    assert login(portal, "cli-conc", "senha-cli-conc-5").status_code == 200
+
+
+def test_desativacao_durante_login_pausado_e_reativacao(
+    portal, admin_headers, monkeypatch
+):
+    """Desativação espera o lock do login, conclui revogando a sessão
+    recém-criada; reativação posterior NÃO a ressuscita."""
+    op = make_operator(portal, admin_headers, login="desativa-conc")
+    at_create, release = _paused_session_factory(monkeypatch)
+
+    result: dict = {}
+
+    def do_login():
+        c = _fresh_portal("10.9.9.9")
+        result["login"] = login(c, "desativa-conc", "senha-super-secreta-1")
+        result["client"] = c
+
+    def do_deactivate():
+        c2 = _fresh_portal("10.10.10.10")
+        result["patch"] = c2.patch(
+            f"/api/v1/operators/{op['id']}",
+            json={"active": False},
+            headers={**admin_headers, **csrf_headers(c2)},
+        )
+
+    t_login = threading.Thread(target=do_login)
+    t_patch = threading.Thread(target=do_deactivate)
+    try:
+        t_login.start()
+        assert at_create.wait(timeout=60), "login não chegou à janela"
+
+        t_patch.start()
+        # prova no banco: a desativação espera o lock do login
+        blocked = _wait_lock_blocked("operators.id")
+        assert blocked, "desativação não chegou a esperar o lock"
+        holder = _holder(blocked[0].blockers[0])
+        assert holder.state == "idle in transaction", holder
+    finally:
+        release.set()
+        t_login.join(timeout=60)
+        t_patch.join(timeout=60)
+    assert not t_login.is_alive() and not t_patch.is_alive()
+
+    assert result["login"].status_code == 200   # login "concluiu"…
+    assert result["patch"].status_code == 200   # …e a desativação venceu
+    token = result["client"].cookies.get("macip_session")
+    assert token
+    assert result["client"].get("/api/v1/auth/me").status_code == 401
+
+    # reativação NÃO ressuscita a sessão revogada
+    reactivate = portal.patch(
+        f"/api/v1/operators/{op['id']}",
+        json={"active": True},
+        headers={**admin_headers, **csrf_headers(portal)},
+    )
+    assert reactivate.status_code == 200
+    portal.cookies.set("macip_session", token)
+    assert portal.get("/api/v1/auth/me").status_code == 401
+    assert login(portal, "desativa-conc", "senha-super-secreta-1").status_code == 200

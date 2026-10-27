@@ -1453,3 +1453,32 @@ Suíte API: **77/77** com PostgreSQL 17 real; sem banco: 19 ok,
 58 skips explícitos; integração agente→API: 2/2.
 
 ---
+## Provas de corrida da autenticação (somente testes)
+
+Os testes de corrida passaram a observar o lock NO PostgreSQL, não só
+eventos de thread: `pg_stat_activity` + `pg_blocking_pids` confirmam o
+backend adversário bloqueado pela transação pausada (`idle in
+transaction`) antes de qualquer liberação.
+
+- `test_reset_na_janela_...`: login pausado entre verify e
+  create_session; reset API chega ao banco e espera (prova por PID);
+  após liberar, a sessão recém-criada é revogada → me 401, senha velha
+  401, senha nova 200.
+- `test_login_espera_reset_...`: ordem inversa — reset trava a linha
+  sem commitar (pausa em hash_password); o login aparece bloqueado no
+  banco; depois do commit do reset o login velho é 401 sem sessão.
+- `test_reset_cli_concorrente_...`: subprocesso real da CLI espera o
+  lock do login (prova no banco) e revoga a sessão criada por ele.
+- `test_desativacao_durante_...`: PATCH active=false bloqueia atrás do
+  login; após liberar, a sessão do login morre e a reativação posterior
+  não a ressuscita.
+
+Verificação por mutação (temporária, não commitada): removido
+`with_for_update()` do SELECT do login → os 4 testes falham em
+"backend não chegou a esperar o lock" / sessão sobrevivendo; código
+restaurado → 80/80.
+
+Suíte API: **80/80** PostgreSQL 17 real; sem banco: 19 ok + 61 skips;
+integração agente→API: 2/2. Nenhum arquivo de produção alterado.
+
+---
