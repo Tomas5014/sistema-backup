@@ -70,9 +70,12 @@ MACIP_API_TEST_DATABASE_URL='postgresql+psycopg://<user>:<senha>@<host>:<porta>/
   npm run test:e2e
 ```
 
-Sem `MACIP_API_TEST_DATABASE_URL` o teste pula explicitamente.
-O cenário provisiona um operador pelo endpoint administrativo,
-autentica pela interface, consulta uma execução com
+Sem `MACIP_API_TEST_DATABASE_URL` os servidores **não sobem** —
+a configuração só cria os `webServer` quando a variável existe —
+e o teste é ignorado explicitamente (`1 skipped`). Com a variável
+presente mas inacessível, a subida da API falha claramente (não vira
+skip). O cenário provisiona um operador pelo endpoint
+administrativo, autentica pela interface, consulta uma execução com
 destinos/tentativas e sai (revogação comprovada).
 
 ## Servir em operação

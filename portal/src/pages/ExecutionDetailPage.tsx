@@ -1,7 +1,7 @@
 /** Detalhe da execução: destinos e tentativas. Erros como texto puro —
  * o JSX já escapa, e erros extensos ficam em bloco rolável. */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useLocation, useParams } from "react-router-dom";
 import { ApiError, getExecution, type ExecutionDetail } from "../api";
 import { formatBytes, formatDate, formatDuration } from "../format";
@@ -17,18 +17,25 @@ export function ExecutionDetailPage() {
   const [detail, setDetail] = useState<ExecutionDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const back = (location.state as { back?: string } | null)?.back ?? "";
+  // só a busca mais recente (e do id atual) altera a tela
+  const generation = useRef(0);
 
   async function load() {
+    const gen = ++generation.current;
     setError(null);
     try {
-      setDetail(await getExecution(id!));
+      const data = await getExecution(id!);
+      if (gen !== generation.current) return; // rota já mudou
+      setDetail(data);
     } catch (err) {
+      if (gen !== generation.current) return;
       setError(err instanceof ApiError ? err.message : "Falha inesperada.");
       setDetail(null);
     }
   }
 
   useEffect(() => {
+    setDetail(null); // id novo → conteúdo do anterior não permanece
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);

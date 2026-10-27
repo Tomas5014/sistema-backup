@@ -79,25 +79,33 @@ export function ClientAgentsPage() {
   const [agents, setAgents] = useState<AgentRow[] | null>(null);
   const [clientName, setClientName] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // respostas de um clientId antigo nunca substituem o atual
+  const generation = useRef(0);
 
   async function load() {
+    const gen = ++generation.current;
+    const wanted = clientId;
     setError(null);
     try {
       const [clientRows, agentRows] = await Promise.all([
         listClients(500, 0),
-        listAgents(clientId, 200, 0),
+        listAgents(wanted, 200, 0),
       ]);
+      if (gen !== generation.current) return; // rota já mudou
       setClientName(
-        clientRows.find((c) => c.id === clientId)?.name ?? null,
+        clientRows.find((c) => c.id === wanted)?.name ?? null,
       );
       setAgents(agentRows);
     } catch (err) {
+      if (gen !== generation.current) return;
       setError(err instanceof ApiError ? err.message : "Falha inesperada.");
       setAgents(null);
     }
   }
 
   useEffect(() => {
+    setAgents(null);
+    setClientName(null); // outro cliente → dados do anterior somem
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clientId]);

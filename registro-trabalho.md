@@ -1504,3 +1504,22 @@ Pendências: administração de operadores, distribuição de tarefas,
 comandos remotos — etapas posteriores.
 
 ---
+## Correções de corridas no portal
+
+- `AuthProvider`: geração de operações — refresh/signIn/signOut
+  incrementam o contador; sucesso e erro de respostas antigas são
+  descartados (me() antigo não derruba login nem ressuscita sessão
+  após logout; falha de rede descartada não vira "indisponível").
+  Desmontar invalida pendências; falha de logout segue visível.
+- `ExecutionDetailPage`/`ClientAgentsPage`: mesma geração + limpeza
+  do conteúdo ao trocar de rota — dados ficam presos ao id atual,
+  inclusive retry fora de ordem.
+- Playwright: `webServer` só existe com `MACIP_API_TEST_DATABASE_URL`
+  — sem a variável o teste skipa sem subir Python/Chrome/PG; com ela
+  inválida, falha clara.
+
+Testes novos com promises controladas (sem sleeps): 8 cenários —
+mutação temporária dos guards fez os testes falharem; restaurado,
+32/32. E2E: `1 skipped` sem env (nenhum servidor) e `1 passed` real.
+
+---
