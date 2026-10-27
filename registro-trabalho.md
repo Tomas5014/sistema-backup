@@ -1482,3 +1482,25 @@ Suíte API: **80/80** PostgreSQL 17 real; sem banco: 19 ok + 61 skips;
 integração agente→API: 2/2. Nenhum arquivo de produção alterado.
 
 ---
+## Portal operacional (React + TypeScript)
+
+Primeira entrega do portal em `portal/` (Vite, pacote independente):
+login/logout com cookie HttpOnly + CSRF double-submit, restauração e
+revalidação de sessão, clientes e agentes, execuções com filtros em
+URL (cliente/agente/tarefa/status/período) e paginação limit/offset
+sem total inventado, detalhe por UUID central com destinos e
+tentativas — null vira "—", erros como texto puro.
+
+Verificação: `npm ci` limpo, `tsc` estrito, **24/24** testes vitest
+(mockados: login ok/errado/429, CSRF ausente/rotação, restauração,
+expiração, logout com revogação e falha visível, proteção de rota,
+viewer, filtros/paginação/vazio/rede, detalhe com tentativas) e
+**1/1 prova real** Playwright+Chrome contra API+PostgreSQL reais
+(operador provisionado pelo endpoint admin, execução via Bearer de
+agente, login→detalhe→logout revogado). Build 59 KiB gzip. Telas
+conferidas em 1280px e 390px (tabela com rolagem horizontal).
+
+Pendências: administração de operadores, distribuição de tarefas,
+comandos remotos — etapas posteriores.
+
+---
