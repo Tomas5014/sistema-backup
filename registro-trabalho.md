@@ -1339,3 +1339,46 @@ Distinguido do teste com servidor HTTP controlado.
 Suíte única: **186 — 168 aprovados, 0 falhos, 18 ignorados** (SFTP/SMB/S3/combinações — ambientes remotos). API: **42/42** com PostgreSQL real.
 
 ---
+## Isolamento de filas de sync + recuperação automática do timer
+
+### Problema
+
+A exclusão de `sync`/`outbox-rearm` era um lock GLOBAL (`sync.lock`):
+um único vínculo segurando HTTP bloqueava todas as outras filas —
+rodadas coincidentes de B eram recusadas e ficavam permanentemente
+pendentes.
+
+### Correção
+
+Identidade da fila = `(caminho canônico do banco, endpoint normalizado,
+UUID do agente central)` → `locks/sync-<sha256>.lock` (sem credencial).
+`run_sync` e `run_rearm` compartilham a mesma fila; filas distintas
+progridem em paralelo. Manutenção SH preservada; locks antes de abrir
+o SQLite; liberação garantida em sucesso, exceção e morte (flock).
+
+### Provas
+
+- `QueueConcurrencyTestCase` (HTTP controlado, ThreadingHTTPServer):
+  A preso no POST → B conclui sem esperar; 3 rodadas disputadas sem
+  fome; bancos distintos independentes; dois UUIDs no mesmo banco =
+  filas distintas; dois `central.json` do mesmo vínculo = mesmo lock;
+  sync×rearm da mesma fila se excluem.
+- `test_sync_timer_outage_retry_e_recuperacao_automatica`
+  (systemctl --user REAL): backup `--central` → pendente → timer
+  dispara com API fora → tentativa+backoff gravados, resultado do
+  backup intacto → API volta no MESMO endpoint → disparo posterior
+  entrega ao ficar elegível → `sent`, 1 execução aceita. Sem sync
+  manual e sem tocar SQLite; token só no EnvironmentFile, verificado
+  pelo servidor.
+- `test_timers_coincidentes_de_duas_filas_entregam_ambas`
+  (systemd real): dois timers no mesmo calendário, duas filas,
+  entregam juntas.
+
+### Regressão
+
+Suíte única: **202 testes — 182 aprovados, 0 falhos, 20 ignorados**
+(backends remotos SFTP/SMB/S3 sem ambiente). API: **42/42** com
+PostgreSQL 17 real (podman :55432 descartável). Integração agente →
+API → PG: 2/2 (end-to-end + SIGKILL entre aceite e confirmação).
+
+---

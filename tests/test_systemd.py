@@ -19,7 +19,7 @@ import threading
 import time
 import unittest
 import uuid
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
@@ -685,6 +685,228 @@ class SystemdUserIntegrationTests(unittest.TestCase):
             if sync_installation is not None:
                 self._systemctl("stop", sync_installation["timer_name"])
                 uninstall_sync_schedule(self.db_path, central)
+            server.shutdown()
+            server.server_close()
+
+    def _outbox_state(self, db: Path) -> list[dict[str, object]]:
+        store = ExecutionStore(db)
+        try:
+            return store.outbox_state()
+        finally:
+            store.close()
+
+    @staticmethod
+    def _token_handler(
+        accepted: list[dict[str, object]], expected: str
+    ) -> type[BaseHTTPRequestHandler]:
+        """Servidor controlado que exige o Bearer token esperado."""
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:  # noqa: N802
+                payload = json.loads(
+                    self.rfile.read(int(self.headers["Content-Length"]))
+                )
+                auth = self.headers.get("Authorization", "")
+                if auth != f"Bearer {expected}":
+                    self.send_response(401)
+                    self.end_headers()
+                    return
+                accepted.append(
+                    {"execution_id": payload["execution_id"], "auth": auth}
+                )
+                response = json.dumps(
+                    {"status": "created", "execution_id": payload["execution_id"]}
+                ).encode()
+                self.send_response(201)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(response)))
+                self.end_headers()
+                self.wfile.write(response)
+
+            def log_message(self, *args: object) -> None:
+                pass
+
+        return Handler
+
+    def test_sync_timer_outage_retry_e_recuperacao_automatica(self) -> None:
+        """Timer real: API fora → retry+backoff → API volta → entrega.
+
+        Sem sync manual, sem tocar SQLite: o timer dispara com a API
+        indisponível (conexão recusada), grava tentativa+backoff; a API
+        sobe no MESMO endpoint e um disparo posterior entrega quando o
+        item fica elegível — sem mudar o resultado do backup.
+        """
+        probe = HTTPServer(("127.0.0.1", 0), BaseHTTPRequestHandler)
+        port = probe.server_address[1]
+        probe.server_close()  # porta livre e recusando conexões
+
+        token_name = f"MACIP_SD_SYNC_TOKEN_{self.suffix}"
+        token_value = secrets.token_urlsafe(24)
+        central = self.root / "central.json"
+        central.write_text(
+            json.dumps(
+                {
+                    "url": f"http://127.0.0.1:{port}",
+                    "agent_id": str(uuid.uuid4()),
+                    "token_environment": token_name,
+                    "connect_timeout_seconds": 3,
+                    "request_timeout_seconds": 3,
+                }
+            )
+        )
+        config_dir = self.root / "cfg"
+        config_dir.mkdir()
+        # credencial SÓ no EnvironmentFile das units geradas
+        (config_dir / "agent.env").write_text(f"{token_name}={token_value}\n")
+        self.assertNotIn(token_name, os.environ)
+
+        sync_installation: dict[str, str] | None = None
+        try:
+            with patch.dict(os.environ, {"MACIP_CONFIG": str(config_dir)}):
+                install_schedule(
+                    TaskSpec.from_dict(json.loads(self.config_path.read_text())),
+                    self.config_path,
+                    self.db_path,
+                    "daily",
+                    central_path=central,
+                )
+            self._systemctl("daemon-reload")
+            backup = self._systemctl("start", f"{self.unit_name}.service")
+            self.assertEqual(backup.returncode, 0, backup.stdout + backup.stderr)
+            items = self._outbox_state(self.db_path)
+            self.assertEqual(len(items), 1)
+            self.assertEqual(items[0]["status"], "pending")
+
+            with patch.dict(os.environ, {"MACIP_CONFIG": str(config_dir)}):
+                sync_installation = install_sync_schedule(
+                    self.db_path,
+                    central,
+                    "*-*-* *:*:0/10",
+                    enable=True,
+                )
+
+            # 2-3. API fora: o timer tenta e grava retry + backoff
+            deadline = time.monotonic() + 60
+            attempted: dict[str, object] | None = None
+            while time.monotonic() < deadline:
+                items = self._outbox_state(self.db_path)
+                if items and items[0]["attempts"] >= 1:
+                    attempted = items[0]
+                    break
+                time.sleep(1)
+            self.assertIsNotNone(attempted, "timer não tentou durante a queda")
+            self.assertEqual(attempted["status"], "pending")
+            self.assertIsNotNone(attempted["next_attempt_at"])  # backoff
+            # resultado do backup NÃO foi tocado pela falha de sync
+            self.assertEqual(self._history()[0]["status"], "success")
+
+            # 4-5. API volta no MESMO endpoint; timer entrega ao ficar elegível
+            accepted: list[dict[str, object]] = []
+            server = ThreadingHTTPServer(
+                ("127.0.0.1", port),
+                self._token_handler(accepted, token_value),
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                deadline = time.monotonic() + 90
+                state = "pending"
+                while time.monotonic() < deadline:
+                    items = self._outbox_state(self.db_path)
+                    state = items[0]["status"]
+                    if state == "sent":
+                        break
+                    time.sleep(2)
+                self.assertEqual(
+                    state, "sent", "timer não entregou após a API voltar"
+                )
+                self.assertEqual(len(accepted), 1, "entrega deve ser única")
+                self.assertEqual(
+                    accepted[0]["execution_id"], attempted["execution_id"]
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+        finally:
+            if sync_installation is not None:
+                self._systemctl("stop", sync_installation["timer_name"])
+                uninstall_sync_schedule(self.db_path, central)
+
+    def test_timers_coincidentes_de_duas_filas_entregam_ambas(self) -> None:
+        """Dois timers no mesmo calendário, filas distintas, entregam juntas.
+
+        Filas distintas = banco + UUID central diferentes; o lock por fila
+        (não global) permite que as duas rodadas progridam no mesmo disparo.
+        """
+        accepted: list[dict[str, object]] = []
+        token_value = secrets.token_urlsafe(24)
+        server = ThreadingHTTPServer(
+            ("127.0.0.1", 0), self._token_handler(accepted, token_value)
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        queues: list[tuple[Path, Path, str]] = []  # db, central, timer_name
+        config_dir = self.root / "cfg"
+        config_dir.mkdir()
+        installations: list[dict[str, str]] = []
+        try:
+            env_lines = []
+            for label in ("A", "B"):
+                token_name = f"MACIP_SD_SYNC_TOKEN_{self.suffix}_{label}"
+                env_lines.append(f"{token_name}={token_value}\n")
+                (config_dir / "agent.env").write_text("".join(env_lines))
+                central = self.root / f"central-{label}.json"
+                central.write_text(
+                    json.dumps(
+                        {
+                            "url": f"http://127.0.0.1:{server.server_address[1]}",
+                            "agent_id": str(uuid.uuid4()),
+                            "token_environment": token_name,
+                        }
+                    )
+                )
+                db = self.root / f"agent-{label}.db"
+                # item pendente real: backup executado com --central
+                with patch.dict(os.environ, {"MACIP_CONFIG": str(config_dir)}):
+                    result = run_task(self.config_path, db, central)
+                self.assertEqual(result.status, ExecutionStatus.SUCCESS)
+                self.assertEqual(self._outbox_state(db)[0]["status"], "pending")
+
+            # mesmo calendário → os dois timers disparam juntos
+            for label in ("A", "B"):
+                central = self.root / f"central-{label}.json"
+                db = self.root / f"agent-{label}.db"
+                with patch.dict(os.environ, {"MACIP_CONFIG": str(config_dir)}):
+                    inst = install_sync_schedule(
+                        db, central, "*-*-* *:*:0/10", enable=True
+                    )
+                installations.append(inst)
+                queues.append((db, central, inst["timer_name"]))
+
+            deadline = time.monotonic() + 70
+            states = ("pending", "pending")
+            while time.monotonic() < deadline:
+                states = tuple(
+                    self._outbox_state(db)[0]["status"] for db, _, _ in queues
+                )
+                if all(s == "sent" for s in states):
+                    break
+                time.sleep(2)
+            self.assertEqual(
+                states,
+                ("sent", "sent"),
+                "filas coincidentes não entregaram as duas",
+            )
+            self.assertEqual(len(accepted), 2)
+        finally:
+            for inst in installations:
+                self._systemctl("stop", inst["timer_name"])
+            for db, central, _ in queues:
+                try:
+                    uninstall_sync_schedule(db, central)
+                except Exception:
+                    pass
             server.shutdown()
             server.server_close()
 

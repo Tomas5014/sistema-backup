@@ -36,7 +36,19 @@ _MAX_ATTEMPTS = 10
 _BACKOFF_BASE_SECONDS = 30
 _BACKOFF_CAP_SECONDS = 3600
 
-_SYNC_LOCK = "sync.lock"
+def queue_lock_name(store_path: Path, spec: CentralSpec) -> str:
+    """Identidade da FILA: banco canônico + endpoint + UUID central.
+
+    Arquivos de configuração diferentes que apontam o mesmo vínculo
+    compartilham o mesmo lock; filas distintas progridem em paralelo.
+    Nunca contém credencial — só caminho, endpoint e UUID.
+    """
+    import hashlib
+
+    material = (
+        f"{Path(store_path).resolve()}\0{spec.url}\0{spec.agent_id}"
+    ).encode("utf-8")
+    return f"sync-{hashlib.sha256(material).hexdigest()[:16]}.lock"
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -99,10 +111,10 @@ def _post(spec: CentralSpec, payload: bytes, token: str) -> tuple[int, dict | No
         return 0, None
 
 
-def _acquire_sync_locks():
+def _acquire_sync_locks(store_path: Path, spec: CentralSpec):
     """Maintenance SH (coexiste com tarefas, bloqueia install) + lock EX
-    da fila — sync e outbox-rearm compartilham este mesmo par e nunca
-    correm simultaneamente."""
+    DA FILA — sync e outbox-rearm da mesma fila são mutuamente
+    exclusivos; filas distintas progridem independentemente."""
     import fcntl
 
     directory = task_lock_directory()
@@ -113,14 +125,14 @@ def _acquire_sync_locks():
     except BlockingIOError as error:
         maintenance.close()
         raise ResticError("manutenção em andamento — sincronização recusada")
-    sync_lock = (directory / _SYNC_LOCK).open("a")
+    queue_lock = (directory / queue_lock_name(store_path, spec)).open("a")
     try:
-        fcntl.flock(sync_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(queue_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError as error:
-        sync_lock.close()
+        queue_lock.close()
         maintenance.close()
-        raise ResticError("outra sincronização já está em andamento")
-    return maintenance, sync_lock
+        raise ResticError("outra sincronização desta fila já está em andamento")
+    return maintenance, queue_lock
 
 
 def run_sync(store_path: Path, central_path: Path, limit: int = 50) -> dict:
@@ -128,7 +140,7 @@ def run_sync(store_path: Path, central_path: Path, limit: int = 50) -> dict:
     if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
         raise ConfigurationError("--limit deve ser inteiro positivo")
     spec = load_central(central_path)
-    locks = _acquire_sync_locks()
+    locks = _acquire_sync_locks(store_path, spec)
     try:
         store = ExecutionStore(Path(store_path))
         try:
@@ -206,9 +218,9 @@ def run_rearm(
     store_path: Path, central_path: Path, include_permanent: bool = False
 ) -> dict:
     """Rearme explícito — mesma exclusão do sync: maintenance SH +
-    sync.lock EX, adquiridos ANTES de abrir o banco (e das migrações)."""
+    lock EX da fila, adquiridos ANTES de abrir o banco (e migrações)."""
     spec = load_central(central_path)
-    locks = _acquire_sync_locks()
+    locks = _acquire_sync_locks(store_path, spec)
     try:
         store = ExecutionStore(Path(store_path))
         try:

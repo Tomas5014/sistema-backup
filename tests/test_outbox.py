@@ -15,7 +15,7 @@ import threading
 import time
 import unittest
 import uuid
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -33,7 +33,7 @@ from macip_backup.models import (
     TaskSpec,
 )
 from macip_backup.store import ExecutionStore
-from macip_backup.sync import run_sync
+from macip_backup.sync import queue_lock_name, run_sync
 from macip_backup.orchestrator import ExecutionStatus
 
 AGENT_UUID = str(uuid.uuid4())
@@ -67,8 +67,11 @@ class _FakeApi(BaseHTTPRequestHandler):
         accepted = body["execution_id"]
         if getattr(_FakeApi, "hold_marker", None):
             # POST já aceito — sinaliza e segura a resposta até o teste
-            # liberar (ou até 30s, para não travar em falha do pai)
+            # liberar (ou até 30s, para não travar em falha do pai).
+            # Só a PRIMEIRA requisição é segurada: o marcador se desarma
+            # e os próximos POSTs (outra fila) fluem normalmente.
             marker, hold_file, release_file = _FakeApi.hold_marker
+            _FakeApi.hold_marker = None
             marker.write_text("x")
             deadline = time.time() + 30
             while hold_file.exists() and not release_file.exists() and time.time() < deadline:
@@ -143,7 +146,7 @@ class OutboxBase(unittest.TestCase):
         }
         os.environ["MACIP_TEST_REPO_PASSWORD"] = "senha-repo"
         self.task_file.write_text(json.dumps(task))
-        self.server = HTTPServer(("127.0.0.1", 0), _FakeApi)
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), _FakeApi)
         self.port = self.server.server_address[1]
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -617,7 +620,7 @@ class RearmLockTestCase(OutboxBase):
         import fcntl
 
         self._auth_blocked_item()
-        sync_lock = (self.tempdir / "locks" / "sync.lock").open("a")
+        sync_lock = (self.tempdir / "locks" / queue_lock_name(self.db, load_central(self.central_file))).open("a")
         fcntl.flock(sync_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         try:
             with self.assertRaises(Exception):
@@ -631,8 +634,8 @@ class RearmLockTestCase(OutboxBase):
         import fcntl
 
         self._auth_blocked_item()
-        # ocupa o sync.lock como faria um outbox-rearm em curso
-        held = (self.tempdir / "locks" / "sync.lock").open("a")
+        # ocupa o lock DA FILA como faria um outbox-rearm em curso
+        held = (self.tempdir / "locks" / queue_lock_name(self.db, load_central(self.central_file))).open("a")
         fcntl.flock(held.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         try:
             with self.assertRaises(Exception):
@@ -728,8 +731,8 @@ class KillRecoveryTestCase(OutboxBase):
         process.wait(timeout=10)
         release.write_text("x")
 
-        # kernel liberou os locks → sync.lock aceita EX de imediato
-        probe = (self.tempdir / "locks" / "sync.lock").open("a")
+        # kernel liberou os locks → lock da fila aceita EX de imediato
+        probe = (self.tempdir / "locks" / queue_lock_name(self.db, load_central(self.central_file))).open("a")
         fcntl.flock(probe.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         probe.close()
 
@@ -745,3 +748,145 @@ class KillRecoveryTestCase(OutboxBase):
         self.assertEqual(
             _FakeApi.posts[1]["execution_id"], execution_id
         )
+
+
+# ---- exclusão por fila -----------------------------------------------------
+
+
+class QueueConcurrencyTestCase(OutboxBase):
+    """Filas = banco canônico + endpoint + UUID central. Filas distintas
+    progridem em paralelo; a mesma fila mantém exclusão."""
+
+    def _second_queue(self) -> Path:
+        """Outra identidade central no mesmo banco → fila diferente."""
+        return _central(
+            self.tempdir / "central-B.json",
+            f"http://127.0.0.1:{self.port}",
+            agent_id=str(uuid.uuid4()),
+        )
+
+    def test_mesma_fila_por_caminhos_de_config_diferentes(self):
+        """Dois arquivos com mesmo url+agente+store → mesmo lock."""
+        _central(self.central_file, f"http://127.0.0.1:{self.port}")
+        twin = _central(
+            self.tempdir / "copia.json", f"http://127.0.0.1:{self.port}"
+        )
+        import fcntl
+
+        from macip_backup.sync import queue_lock_name as qln
+
+        lock_a = qln(self.db, load_central(self.central_file))
+        lock_b = qln(self.db, load_central(twin))
+        self.assertEqual(lock_a, lock_b)  # mesma fila = mesmo arquivo
+        (self.tempdir / "locks").mkdir(exist_ok=True)
+        held = (self.tempdir / "locks" / lock_a).open("a")
+        fcntl.flock(held.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            with self.assertRaises(Exception):
+                run_sync(self.db, twin)
+        finally:
+            held.close()
+
+    def test_fila_b_progride_enquanto_a_esta_preso_no_http(self):
+        """A ocupa o servidor; B conclui SEM esperar A."""
+        db_a, db_b = self.db, self.tempdir / "agent-B.db"
+        central_a = _central(
+            self.central_file, f"http://127.0.0.1:{self.port}"
+        )
+        central_b = self._second_queue()
+        run_task(self.task_file, db_a, central_a)
+        run_task(self.task_file, db_b, central_b)
+
+        _FakeApi.hold_marker = (self.tempdir / "accepted", self.tempdir / "hold", self.tempdir / "release")
+        (self.tempdir / "hold").write_text("x")
+        done_a = []
+
+        def sync_a():
+            try:
+                run_sync(db_a, central_a)
+            finally:
+                done_a.append(True)
+
+        thread_a = threading.Thread(target=sync_a)
+        thread_a.start()
+        # espera A estar DENTRO do POST (marcador do servidor)
+        deadline = time.time() + 30
+        while not (self.tempdir / "accepted").exists() and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertTrue((self.tempdir / "accepted").exists())
+
+        # B — fila distinta — entrega enquanto A segura o servidor
+        summary_b = run_sync(db_b, central_b)
+        (self.tempdir / "release").write_text("x")
+        thread_a.join(timeout=30)
+        self.assertFalse(thread_a.is_alive())
+        self.assertEqual(len(summary_b["sent"]), 1)
+        self.assertTrue(done_a)
+
+    def test_rodadas_coincidentes_nao_famintam_b(self):
+        """Três rodadas disputadas: B entrega nas três — nunca perde a vez."""
+        central_a = _central(
+            self.central_file, f"http://127.0.0.1:{self.port}"
+        )
+        central_b = self._second_queue()
+        db_b = self.tempdir / "agent-B.db"
+        for _ in range(3):
+            run_task(self.task_file, self.db, central_a)
+            run_task(self.task_file, db_b, central_b)
+        sent_a, sent_b = [], []
+
+        def round_a():
+            sent_a.append(run_sync(self.db, central_a)["sent"])
+
+        def round_b():
+            sent_b.append(run_sync(db_b, central_b)["sent"])
+
+        threads = [
+            threading.Thread(target=round_a),
+            threading.Thread(target=round_b),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=60)
+        self.assertFalse(any(t.is_alive() for t in threads))
+        # B entregou seus 3 — nada ficou permanentemente pendente
+        self.assertEqual(len([s for s in sent_b[0]]), 3)
+        store_b = ExecutionStore(db_b)
+        try:
+            pending = [i for i in store_b.outbox_state() if i["status"] == "pending"]
+        finally:
+            store_b.close()
+        self.assertEqual(pending, [])
+
+    def test_duas_identidades_mesmo_banco_sao_filas_distintas(self):
+        """Mesmo SQLite, dois UUIDs centrais → locks diferentes."""
+        from macip_backup.sync import queue_lock_name as qln
+
+        central_a = _central(
+            self.central_file, f"http://127.0.0.1:{self.port}"
+        )
+        central_b = self._second_queue()
+        self.assertNotEqual(
+            qln(self.db, load_central(central_a)),
+            qln(self.db, load_central(central_b)),
+        )
+
+    def test_sync_e_rearm_mesma_fila_se_excluem(self):
+        """Rearme da fila bloqueia o sync da MESMA fila — não o de outra."""
+        import fcntl
+
+        _central(self.central_file, f"http://127.0.0.1:{self.port}")
+        run_task(self.task_file, self.db, self.central_file)
+        from macip_backup.sync import queue_lock_name as qln
+
+        held = (
+            self.tempdir / "locks"
+            / qln(self.db, load_central(self.central_file))
+        ).open("a")
+        fcntl.flock(held.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            with self.assertRaises(Exception):
+                run_sync(self.db, self.central_file)
+        finally:
+            held.close()

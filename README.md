@@ -522,7 +522,11 @@ macip-backup outbox-rearm --store ~/.local/state/macip-backup/agent.db \
 `schedule-sync` cria outro par `Type=oneshot` para executar somente `sync`.
 Ele não inicia backup, não rearma bloqueios e não mantém daemon ou loop. O nome
 da unit deriva de banco + caminho da configuração central: agendamentos de
-vínculos diferentes coexistem e nunca se substituem.
+vínculos diferentes coexistem e nunca se substituem. Filas distintas têm locks
+independentes e rodadas disparadas ao mesmo tempo progridem em paralelo.
+Em prova com `systemctl --user` real, a queda da API gera tentativa+backoff
+sem tocar no resultado do backup, e um disparo posterior entrega quando o
+item volta a ficar elegível — sem `sync` manual.
 
 ```bash
 # Instala e habilita rodadas independentes, no máximo 50 itens por rodada.
@@ -595,13 +599,19 @@ Falhas de conexão, timeout, desconexão, resposta inválida ou 5xx registram um
 tentativa e backoff de 30 s até 1 h (máximo de 10). `401/403` bloqueiam até
 rearme explícito. `--limit` deve ser inteiro positivo. Erros locais guardam
 motivos sanitizados e nunca token ou `Authorization`.
-O `sync` respeita o lock de manutenção e não disputa a fila com outro
-sincronizador. Erros registrados nunca contêm token/`Authorization`.
+O `sync` respeita o lock de manutenção e não disputa a **sua** fila com
+outro sincronizador. A identidade da fila é
+`(banco canônico, endpoint normalizado, UUID do agente central)` —
+materializada em `locks/sync-<sha256>.lock`, sem credencial no nome.
+Filas distintas (outro banco, outro endpoint ou outro UUID) progridem em
+paralelo; dois arquivos `central.json` diferentes que representam o mesmo
+vínculo compartilham o mesmo lock. Erros registrados nunca contêm
+token/`Authorization`.
 
 `outbox-rearm` compartilha o mesmo protocolo de exclusão do `sync`
-(maintenance-SH + `sync.lock` EX, adquiridos antes de abrir o banco —
+(maintenance-SH + lock EX da fila, adquiridos antes de abrir o banco —
 inclusive antes das migrações): recusa sob manutenção ativa ou outro
-sincronizador, e nunca deixa locks presos em falha. Em prova real com
-SIGKILL na janela entre aceite remoto e confirmação local, o item
-permanece reenviável e o reenvio resolve por `duplicate` — uma única
-execução central.
+sincronizador **da mesma fila**, e nunca deixa locks presos em falha.
+Em prova real com SIGKILL na janela entre aceite remoto e confirmação
+local, o item permanece reenviável e o reenvio resolve por `duplicate` —
+uma única execução central.
