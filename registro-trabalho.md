@@ -1426,3 +1426,30 @@ v2 preservando dados (mais rollback/concorrência/versão futura).
 Integração agente→API inalterada: 2/2.
 
 ---
+## Consolidação da autenticação de operadores
+
+Três correções na feature/operator-auth:
+
+1. **422 sem segredos**: mascaramento por `loc` não cobria erros na
+   raiz — lista de login, lista de operador e string-senha nua
+   devolviam o corpo inteiro. Agora: erro na raiz → `input` removido;
+   erro em campo sensível → "***"; demais → scrub recursivo por chave
+   sensível em qualquer profundidade. `loc`/`type` preservados.
+   Provas HTTP sem banco com sentinela no corpo e nos logs.
+
+2. **Rate limit atômico**: dois `pg_advisory_xact_lock`
+   (login depois IP — ordem fixa) serializam contagem+registro por
+   request; tentativas simultâneas do mesmo login/IP não ultrapassam
+   o limite por leitura desatualizada. Provas reais: 7 logins/1 login
+   × limite 3 → exatamente 3 gravados; 5 logins/1 IP → 3 gravados;
+   janela expira e volta a contar.
+
+3. **Corrida login×reset**: `SELECT ... FOR UPDATE` na linha do
+   operador (HTTP e CLI local). Reset que vence revoga até a sessão
+   criada por um login iniciado antes; login posterior lê hash novo.
+   Reativação nunca ressuscita sessão revogada. Sem nova migração.
+
+Suíte API: **77/77** com PostgreSQL 17 real; sem banco: 19 ok,
+58 skips explícitos; integração agente→API: 2/2.
+
+---

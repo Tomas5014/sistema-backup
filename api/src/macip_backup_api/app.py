@@ -88,11 +88,38 @@ _SENSITIVE_FIELDS = {
 }
 
 
+def _scrub_input(value: object) -> object:
+    """Remove valores sob chaves sensíveis em qualquer profundidade —
+    listas e dicionários aninhados incluídos."""
+    if isinstance(value, dict):
+        return {
+            key: ("***" if str(key).lower() in _SENSITIVE_FIELDS
+                  else _scrub_input(item))
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_scrub_input(item) for item in value]
+    return value
+
+
 def _mask_sensitive(error: dict) -> dict:
-    """Campos sensíveis nunca voltam no `input` de um 422."""
-    loc = {str(part).lower() for part in error.get("loc", ())}
-    if loc & _SENSITIVE_FIELDS and "input" in error:
+    """Segredos nunca voltam no `input` de um 422.
+
+    Erro na RAIZ do corpo (loc = só "body") pode devolver o payload
+    inteiro — uma lista com senha ou a própria string-senha. Não há
+    chave para mascarar: o input some. Erros em campos nomeados
+    mantêm o input, com valores sensíveis escavados e mascarados.
+    """
+    if "input" not in error:
+        return error
+    loc = [str(part).lower() for part in error.get("loc", ())]
+    inner = [part for part in loc if part not in {"body", "query", "path"}]
+    if not inner:
+        error.pop("input", None)  # eco do corpo inteiro — pode ser o segredo
+    elif set(inner) & _SENSITIVE_FIELDS:
         error["input"] = "***"
+    else:
+        error["input"] = _scrub_input(error["input"])
     return error
 
 
@@ -475,8 +502,13 @@ def create_app() -> FastAPI:
             audit.warning("login rate-limit login=%s ip=%s", login_name, ip)
             raise HTTPException(429, "muitas tentativas — aguarde")
 
+        # FOR UPDATE: verificação+criação de sessão e reset/desativação
+        # serializam na linha — reset que vence a corrida revoga até a
+        # sessão recém-criada; login que chega depois lê o hash novo.
         operator = db.execute(
-            select(Operator).where(Operator.login == login_name)
+            select(Operator)
+            .where(Operator.login == login_name)
+            .with_for_update()
         ).scalar_one_or_none()
         # resposta genérica — não revela existência nem desativação;
         # _verify_or_burn_time equaliza o tempo de resposta
@@ -572,7 +604,11 @@ def create_app() -> FastAPI:
         payload: OperatorUpdate,
         db: Session = Depends(session),
     ) -> OperatorOut:
-        operator = db.get(Operator, operator_id)
+        operator = db.execute(
+            select(Operator)
+            .where(Operator.id == operator_id)
+            .with_for_update()
+        ).scalar_one_or_none()
         if operator is None:
             raise HTTPException(404, "operador inexistente")
         changes: list[str] = []
@@ -606,7 +642,11 @@ def create_app() -> FastAPI:
         payload: PasswordResetIn,
         db: Session = Depends(session),
     ) -> None:
-        operator = db.get(Operator, operator_id)
+        operator = db.execute(
+            select(Operator)
+            .where(Operator.id == operator_id)
+            .with_for_update()
+        ).scalar_one_or_none()
         if operator is None:
             raise HTTPException(404, "operador inexistente")
         operator.password_hash = hash_password(payload.password)

@@ -510,3 +510,223 @@ def test_bootstrap_cli_cria_primeiro_admin(portal):
     assert row is not None and row.role == "admin"
     # senha NUNCA entra como argumento — só por stdin
     assert "--password" not in result.args or "stdin" in " ".join(result.args)
+
+
+# ---- concorrência real (PostgreSQL, conexões independentes) -------------------
+
+
+def _fresh_portal(ip: str) -> TestClient:
+    """Client independente com IP próprio — conexão direta simulada."""
+    from macip_backup_api import app as app_module
+
+    return TestClient(
+        app_module.app, base_url="https://testserver", client=(ip, 50000)
+    )
+
+
+def test_rate_limit_atomico_mesmo_login_ips_diferentes(portal, admin_headers, monkeypatch):
+    """7 tentativas concorrentes do MESMO login com limite 3:
+    exatamente 3 registradas — nenhuma lê contagem desatualizada."""
+    monkeypatch.setenv("MACIP_API_LOGIN_MAX_ATTEMPTS", "3")
+    make_operator(portal, admin_headers, login="alvo-conc")
+    barrier = threading.Barrier(7)
+    statuses: list[int] = []
+
+    def attempt(n):
+        c = _fresh_portal(f"10.0.0.{n}")
+        c.get("/api/v1/auth/csrf")
+        barrier.wait(timeout=30)
+        statuses.append(
+            c.post(
+                "/api/v1/auth/login",
+                json={"login": "alvo-conc", "password": "errada-9"},
+                headers={"X-CSRF-Token": c.cookies.get("macip_csrf")},
+            ).status_code
+        )
+
+    threads = [threading.Thread(target=attempt, args=(n,)) for n in range(7)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=120)
+    assert not any(t.is_alive() for t in threads)
+
+    recorded = _exec(
+        "SELECT count(*) FROM login_attempts WHERE login='alvo-conc'"
+    ).scalar()
+    assert recorded == 3, f"limite 3 — gravadas {recorded}"
+    assert statuses.count(401) == 3 and statuses.count(429) == 4
+
+
+def test_rate_limit_atomico_mesmo_ip_logins_diferentes(portal, admin_headers, monkeypatch):
+    """Limite por IP: 5 logins diferentes, mesma origem, limite 3."""
+    monkeypatch.setenv("MACIP_API_LOGIN_MAX_ATTEMPTS", "3")
+    for n in range(5):
+        make_operator(portal, admin_headers, login=f"lote-{n}")
+    barrier = threading.Barrier(5)
+    statuses: list[int] = []
+
+    def attempt(n):
+        c = _fresh_portal("10.7.7.7")
+        c.get("/api/v1/auth/csrf")
+        barrier.wait(timeout=30)
+        statuses.append(
+            c.post(
+                "/api/v1/auth/login",
+                json={"login": f"lote-{n}", "password": "errada-9"},
+                headers={"X-CSRF-Token": c.cookies.get("macip_csrf")},
+            ).status_code
+        )
+
+    threads = [threading.Thread(target=attempt, args=(n,)) for n in range(5)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=120)
+
+    recorded = _exec(
+        "SELECT count(*) FROM login_attempts WHERE ip='10.7.7.7'"
+    ).scalar()
+    assert recorded == 3
+    assert statuses.count(401) == 3 and statuses.count(429) == 2
+
+
+def test_rate_limit_janela_expira(portal, admin_headers):
+    """Tentativas antigas fora da janela não contam — volta a 401."""
+    make_operator(portal, admin_headers, login="janela")
+    _exec(
+        "INSERT INTO login_attempts (login, ip, attempted_at) "
+        "SELECT 'janela', 'testclient', now() - interval '1 hour' "
+        "FROM generate_series(1, 9)"
+    )
+    # sem expirar seria 429 — expirado volta a contar do zero
+    assert login(portal, "janela", "errada-9").status_code == 401
+    # e a poda removeu as antigas: só a nova permanece
+    assert _exec(
+        "SELECT count(*) FROM login_attempts WHERE login='janela'"
+    ).scalar() == 1
+
+
+def test_reset_na_janela_do_login_nao_deixa_sessao_da_senha_antiga(
+    portal, admin_headers, monkeypatch
+):
+    """Corrida real: login pausado entre verificar e criar sessão.
+
+    O FOR UPDATE serializa: o reset espera a linha, conclui depois do
+    login e revoga INCLUSIVE a sessão recém-criada — depois do reset
+    nada autenticado com a senha antiga sobrevive.
+    """
+    import macip_backup_api.app as app_module
+
+    op = make_operator(portal, admin_headers, login="corrida")
+    created = threading.Event()
+    release = threading.Event()
+    original = app_module.create_session
+
+    def paused(db_, operator):
+        created.set()
+        release.wait(timeout=60)
+        return original(db_, operator)
+
+    monkeypatch.setattr(app_module, "create_session", paused)
+
+    result: dict = {}
+
+    def do_login():
+        c = _fresh_portal("10.3.3.3")
+        result["login"] = login(c, "corrida", "senha-super-secreta-1")
+        result["client"] = c
+
+    def do_reset():
+        c2 = _fresh_portal("10.4.4.4")
+        result["reset"] = c2.post(
+            f"/api/v1/operators/{op['id']}/reset-password",
+            json={"password": "senha-nova-corrida-3"},
+            headers={**admin_headers, **csrf_headers(c2)},
+        )
+
+    t_login = threading.Thread(target=do_login)
+    t_login.start()
+    assert created.wait(timeout=60), "login não chegou ao ponto de corrida"
+
+    t_reset = threading.Thread(target=do_reset)
+    t_reset.start()
+    release.set()  # login cria sessão e comita → reset destrava
+    t_login.join(timeout=60)
+    t_reset.join(timeout=60)
+    assert not t_login.is_alive() and not t_reset.is_alive()
+
+    # o login antigo concluiu com sucesso…
+    assert result["login"].status_code == 200
+    assert result["reset"].status_code == 204
+    # …mas o reset revogou a sessão que a senha antiga acabou de criar
+    assert result["client"].get("/api/v1/auth/me").status_code == 401
+    # senha antiga recusada; senha nova funciona
+    assert login(portal, "corrida", "senha-super-secreta-1").status_code == 401
+    assert login(portal, "corrida", "senha-nova-corrida-3").status_code == 200
+
+
+def test_desativar_reativar_nao_ressuscita_sessao(portal, admin_headers):
+    op = make_operator(portal, admin_headers, login="revive")
+    login(portal, "revive", "senha-super-secreta-1")
+    token = portal.cookies.get("macip_session")
+    csrf = csrf_headers(portal)
+    admin_csrf = {**admin_headers, **csrf}
+
+    portal.patch(
+        f"/api/v1/operators/{op['id']}",
+        json={"active": False},
+        headers=admin_csrf,
+    )
+    portal.patch(
+        f"/api/v1/operators/{op['id']}",
+        json={"active": True},
+        headers=admin_csrf,
+    )
+    # reativado, mas a sessão revogada NÃO volta
+    portal.cookies.set("macip_session", token)
+    assert portal.get("/api/v1/auth/me").status_code == 401
+    revoked = _exec(
+        "SELECT count(*) FROM operator_sessions "
+        "WHERE token_hash = :h AND revoked_at IS NOT NULL",
+        h=hashlib.sha256(token.encode()).hexdigest(),
+    ).scalar()
+    assert revoked == 1
+    # login novo funciona normalmente após reativação
+    assert login(portal, "revive", "senha-super-secreta-1").status_code == 200
+
+
+def test_reset_pela_cli_local_tambem_revoga(portal, admin_headers):
+    """A CLI local (FOR UPDATE) não deixa sessão da senha antiga."""
+    import subprocess
+    import sys as _sys
+    from pathlib import Path
+
+    make_operator(portal, admin_headers, login="cli-reset")
+    login(portal, "cli-reset", "senha-super-secreta-1")
+    assert portal.get("/api/v1/auth/me").status_code == 200
+
+    result = subprocess.run(
+        [
+            _sys.executable, "-m", "macip_backup_api.operator_cli",
+            "reset-password", "--login", "cli-reset", "--password-stdin",
+        ],
+        input="senha-cli-nova-4\n",
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={
+            "PATH": "/usr/bin:/bin",
+            "PYTHONPATH": str(Path(__file__).parents[1] / "src"),
+            "MACIP_API_DATABASE_URL": (
+                TEST_URL
+                if TEST_URL.startswith("postgresql+psycopg://")
+                else "postgresql+psycopg://" + TEST_URL.removeprefix("postgresql://")
+            ),
+            "MACIP_API_ADMIN_TOKEN": ADMIN_TOKEN,
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    assert portal.get("/api/v1/auth/me").status_code == 401
+    assert login(portal, "cli-reset", "senha-super-secreta-1").status_code == 401
+    assert login(portal, "cli-reset", "senha-cli-nova-4").status_code == 200

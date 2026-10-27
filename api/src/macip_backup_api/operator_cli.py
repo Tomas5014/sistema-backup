@@ -50,8 +50,12 @@ def _password(args, confirm: bool) -> str:
 
 
 def _get_operator(session: Session, login: str) -> Operator:
+    """FOR UPDATE — mesma garantia do HTTP: reset/desativação local
+    e login concorrente serializam na linha do operador."""
     operator = session.execute(
-        select(Operator).where(Operator.login == normalize_login(login))
+        select(Operator)
+        .where(Operator.login == normalize_login(login))
+        .with_for_update()
     ).scalar_one_or_none()
     if operator is None:
         raise SystemExit(f"operador '{login}' inexistente")
@@ -104,8 +108,10 @@ def main() -> int:
             print(f"operador '{operator.login}' ({operator.role}) criado")
             return 0
         if args.command == "reset-password":
+            # senha primeiro — o getpass NÃO corre segurando o lock
+            password_hash = hash_password(_password(args, confirm=True))
             operator = _get_operator(db, args.login)
-            operator.password_hash = hash_password(_password(args, confirm=True))
+            operator.password_hash = password_hash
             revoke_sessions(db, operator.id)  # sessões antigas morrem
             db.commit()
             audit.info("reset local senha login=%s", operator.login)

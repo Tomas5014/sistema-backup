@@ -143,9 +143,13 @@ Sessões são **opacas**: identificador aleatório forte renovado a cada
 login, persistido só como SHA-256, cookie `HttpOnly` + `SameSite=Lax`
 + `Secure` (exceção local: `MACIP_API_SESSION_INSECURE_COOKIE=1`).
 Expiração validada no servidor (`MACIP_API_SESSION_TTL_SECONDS`,
-default 8 h); logout revoga de fato; desativar operador ou redefinir
-senha derruba suas sessões; mudança de perfil vale já na requisição
-seguinte.
+default 8 h); logout revoga de fato. Verificação de credencial,
+criação de sessão, reset e desativação serializam na linha do
+operador (`SELECT ... FOR UPDATE`, HTTP e CLI): concluído um reset
+ou desativação, nenhuma sessão autenticada com a credencial anterior
+sobrevive — inclusive a de um login que começou antes. Reativar um
+operador nunca ressuscita sessões revogadas; mudança de perfil vale
+já na requisição seguinte.
 
 ```bash
 # 1) cookie CSRF pré-sessão → 2) login exige o par cookie+cabeçalho
@@ -168,8 +172,11 @@ puro não usa cookie — sem exigência. Sem CORS credenciado.
 (PostgreSQL — vale entre processos da API): `MACIP_API_LOGIN_MAX_ATTEMPTS`
 (default 5) por `MACIP_API_LOGIN_WINDOW_SECONDS` (default 900), por
 login E por IP da conexão direta — cabeçalhos `X-Forwarded-*` não são
-confiáveis. Respostas de login são genéricas: credencial errada, login
-inexistente e operador desativado recebem o mesmo `401`.
+confiáveis. A contagem é **atômica**: dois advisory locks
+transacionais (escopo login, depois IP — ordem fixa, sem deadlock)
+serializam tentativas simultâneas; nenhuma lê contagem desatualizada.
+Respostas de login são genéricas: credencial errada, login inexistente
+e operador desativado recebem o mesmo `401`.
 
 Administração de operadores (Bearer admin OU operador `admin`):
 

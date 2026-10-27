@@ -16,7 +16,7 @@ from datetime import UTC, datetime, timedelta
 
 from argon2 import PasswordHasher
 from argon2.exceptions import VerificationError, VerifyMismatchError
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.orm import Session
 
 from . import config
@@ -116,6 +116,17 @@ class LoginRateLimited(Exception):
 
 
 def check_login_rate(db: Session, login: str, ip: str) -> None:
+    """Contagem atômica entre processos: dois advisory locks
+    TRANSACIONAIS — um por login, um por IP — adquiridos em ordem
+    fixa (login depois IP, sem deadlock). A verificação e a
+    gravação posterior da tentativa correm dentro da transação do
+    request: tentativas simultâneas do mesmo login/IP serializam —
+    nenhuma ultrapassa o limite por leitura desatualizada."""
+    for key in (f"login:{login}", f"ip:{ip}"):
+        db.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"),
+            {"k": key},
+        )
     window = datetime.now(UTC) - timedelta(seconds=config.login_window_seconds())
     limit = config.login_max_attempts()
     for field, value in ((LoginAttempt.login, login), (LoginAttempt.ip, ip)):

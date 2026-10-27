@@ -27,7 +27,13 @@ def http_client(monkeypatch):
     os.environ.pop("MACIP_API_MAX_BODY_BYTES", None)  # limite do suite vizinho
     from macip_backup_api import db as db_module
     from macip_backup_api.app import create_app
-    from macip_backup_api.auth import require_agent, require_admin
+    from macip_backup_api.auth import (
+        csrf_guard,
+        csrf_pair_guard,
+        require_admin,
+        require_agent,
+        require_viewer,
+    )
     from macip_backup_api.db import session as session_dep
 
     db_module.set_engine(None)
@@ -35,6 +41,10 @@ def http_client(monkeypatch):
     fake_agent = SimpleNamespace(id=uuid.uuid4(), client_id=uuid.uuid4())
     app.dependency_overrides[require_agent] = lambda: fake_agent
     app.dependency_overrides[require_admin] = lambda: None
+    app.dependency_overrides[require_viewer] = lambda: None
+    # validação deve ser exercitada SEM passar pelo guard CSRF
+    app.dependency_overrides[csrf_guard] = lambda: None
+    app.dependency_overrides[csrf_pair_guard] = lambda: None
     # sessão simulada — a validação rejeita ANTES de qualquer gravação;
     # se algo escapar, o mock devolve um id como uma linha criada
     mock_db = MagicMock()
@@ -151,3 +161,95 @@ def test_valid_payload_not_rejected(http_client):
     assert response.status_code != 422
     assert response.status_code == 200  # handler rodou sobre o mock
     assert response.json()["status"] == "created"
+
+
+# ---- segredos nunca ecoam nos 422 -------------------------------------------
+
+SENTINEL = "SEGREDO_SENTINELA_77"
+
+
+def test_login_recebendo_lista_nao_ecoa_senha(http_client, caplog):
+    """Erro na RAIZ (lista, não objeto) devolvia o corpo inteiro."""
+    response = http_client.post(
+        "/api/v1/auth/login",
+        content=json.dumps(
+            [{"login": "teste", "password": SENTINEL}]
+        ).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    assert response.status_code == 422
+    assert SENTINEL not in response.text
+    assert "detail" in response.json()
+    assert all(SENTINEL not in r.getMessage() for r in caplog.records)
+
+
+def test_criacao_operador_em_lista_nao_ecoa_senha(http_client):
+    response = http_client.post(
+        "/api/v1/operators",
+        content=json.dumps(
+            [
+                {
+                    "login": "op",
+                    "name": "Op",
+                    "role": "viewer",
+                    "password": SENTINEL,
+                }
+            ]
+        ).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    assert response.status_code == 422
+    assert SENTINEL not in response.text
+
+
+def test_reset_senha_em_string_na_raiz_nao_ecoa(http_client):
+    """A raiz É o segredo — não existe chave para mascarar."""
+    response = http_client.post(
+        f"/api/v1/operators/{uuid.uuid4()}/reset-password",
+        content=json.dumps(SENTINEL).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    assert response.status_code == 422
+    assert SENTINEL not in response.text
+
+
+def test_campo_faltante_devolve_dict_sem_senha(http_client):
+    """Erro `missing` carrega o dict INTEIRO no input — incluindo
+    senha e estruturas aninhadas: o scrub precisa escavar."""
+    response = http_client.post(
+        "/api/v1/operators",
+        content=json.dumps(
+            {
+                "login": "op2",
+                "role": "viewer",  # falta "name" → missing
+                "password": SENTINEL,
+                "extra": {"password": SENTINEL, "nested": [{"password": SENTINEL}]},
+            }
+        ).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    assert response.status_code == 422
+    assert SENTINEL not in response.text
+    detail = response.json()["detail"]
+    assert detail[0]["loc"][-1] == "name"  # localização preservada
+
+
+def test_erro_de_campo_preserva_localizacao_e_tipo(http_client):
+    """O mascaramento não pode destruir a utilidade do 422."""
+    response = http_client.post(
+        "/api/v1/auth/login",
+        content=json.dumps({"login": 123, "password": "x"}).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail[0]["loc"][-1] == "login"
+    assert "type" in detail[0]
+    # e o campo sensível segue mascarado mesmo em erro de outro campo
+    response2 = http_client.post(
+        "/api/v1/auth/login",
+        content=json.dumps({"login": "x", "password": 999}).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    assert response2.status_code == 422
+    assert "999" not in response2.text
