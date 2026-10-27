@@ -1,0 +1,17 @@
+.git
+**/__pycache__
+**/.pytest_cache
+*.egg-info
+.venv/
+.venv-api/
+var/
+portal/node_modules
+portal/dist
+portal/test-results
+portal/playwright-report
+deploy/central/secrets/*.env
+deploy/central/tls/
+deploy/central/backups/
+deploy/central/.env
+.trail/
+.claude/

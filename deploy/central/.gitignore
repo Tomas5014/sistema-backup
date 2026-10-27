@@ -1,0 +1,7 @@
+.env
+tls/*.pem
+tls/*.key
+secrets/*.env
+backups/*
+!backups/.gitkeep
+tls/*.srl

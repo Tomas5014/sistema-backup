@@ -1536,3 +1536,24 @@ refresh durante/antes/depois; mutação sem a supressão falha 2
 testes; restaurado, 36/36. E2E: skip limpo sem env + 1/1 real.
 
 ---
+## Homologação da central HTTPS (deploy/central)
+
+Stack Compose `macip-central`: PG17 (volume pgdata) + API (constraints
+fixadas) + nginx com portal compilado via `npm ci` — HTTPS único em
+`127.0.0.1:8443` configurável; api/db sem portas publicadas. Segredos
+em `secrets/*.env` (600, fora do Git), certificado montado em runtime;
+dois caminhos TLS (cert do administrador / CA de laboratório com
+confiança explícita, nunca no SO). Scripts: gen-secrets, mk-lab-tls,
+up (valida permissões/senha coerente/sem cookie inseguro), check
+(openssl verify_hostname + /readyz), down (preserva volume), backup/
+restore (pg_dump -Fc/pg_restore --clean), bootstrap-operator (CLI,
+senha por prompt), prove.sh.
+
+Prova real executada: prove.sh provisionou operador/cliente/agente/
+credencial/execução, rodou backup real do agente (restic → outbox →
+sync HTTPS) e dirigiu Chrome com CA no nssdb de HOME temporário —
+1/1 Playwright: login, cookie HttpOnly+Secure, rotação CSRF,
+detalhe, reload, revogação, restart com dados preservados.
+Backup/restore: 15 execuções, 11 operadores e 10 agentes preservados.
+
+---

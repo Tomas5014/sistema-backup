@@ -1,0 +1,11 @@
+# Portal operacional — build reproduzível pelo package-lock.json.
+FROM docker.io/library/node:22-alpine AS build
+WORKDIR /src/portal
+COPY portal/package.json portal/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY portal/ ./
+RUN npm run build
+
+FROM docker.io/library/nginx:1.27-alpine AS runtime
+COPY --from=build /src/portal/dist /usr/share/nginx/html
+COPY deploy/central/nginx.conf /etc/nginx/conf.d/default.conf

@@ -1,0 +1,52 @@
+# Stack de homologação da central MAC IP — projeto explícito.
+name: macip-central
+
+networks:
+  central:
+
+volumes:
+  pgdata:
+
+services:
+  db:
+    image: docker.io/library/postgres:17-alpine
+    env_file: secrets/postgres.env   # fora do Git — ver secrets/*.example
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks: [central]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ../..
+      dockerfile: deploy/central/Dockerfile.api
+    env_file: secrets/api.env
+    networks: [central]
+    depends_on:
+      db: { condition: service_healthy }
+    healthcheck:  # /readyz confirma acesso real ao banco
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://127.0.0.1:8080/readyz')\""]
+      interval: 5s
+      timeout: 4s
+      retries: 24
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ../..
+      dockerfile: deploy/central/Dockerfile.portal
+    networks: [central]
+    # somente HTTPS publicado — loopback por padrão, porta configurável
+    ports:
+      - "${CENTRAL_BIND:-127.0.0.1}:${CENTRAL_HTTPS_PORT:-8443}:443"
+    volumes:  # certificados em runtime — nunca na imagem nem no Git
+      - ${CENTRAL_TLS_CERT:-./tls/cert.pem}:/etc/nginx/tls/cert.pem:ro
+      - ${CENTRAL_TLS_KEY:-./tls/key.pem}:/etc/nginx/tls/key.pem:ro
+    depends_on:
+      api: { condition: service_healthy }
+    restart: unless-stopped

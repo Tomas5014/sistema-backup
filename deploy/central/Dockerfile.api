@@ -1,0 +1,15 @@
+# API central MAC IP — pacote python isolado, deps fixadas pelo
+# constraints gerado do ambiente homologado (ver api-constraints.txt).
+FROM docker.io/library/python:3.13-slim AS runtime
+
+WORKDIR /srv/api
+COPY api/ /srv/api/
+COPY deploy/central/api-constraints.txt /srv/api/
+
+RUN pip install --no-cache-dir --upgrade pip \
+ && pip install --no-cache-dir -c api-constraints.txt .
+
+EXPOSE 8080
+USER nobody
+CMD ["python", "-m", "uvicorn", "macip_backup_api.app:app", \
+     "--host", "0.0.0.0", "--port", "8080"]
