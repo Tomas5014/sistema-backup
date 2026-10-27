@@ -146,3 +146,45 @@ class ExecutionSummary(BaseModel):
 
 class ExecutionDetail(ExecutionSummary):
     destinations: list[dict]
+
+
+# ---- operadores e sessões ---------------------------------------------------
+
+Login = Annotated[str, Field(min_length=1, max_length=64)]
+Password = Annotated[str, Field(min_length=8, max_length=256)]
+LoginPassword = Annotated[str, Field(min_length=1, max_length=256)]
+Role = Literal["admin", "viewer"]
+
+
+class LoginIn(BaseModel):
+    login: Login
+    password: LoginPassword  # nunca ecoado — máscara nos 422
+
+
+class OperatorIn(BaseModel):
+    login: Login
+    name: Name
+    role: Role
+    password: Password  # nunca ecoado — máscara nos 422
+
+
+class OperatorUpdate(BaseModel):
+    """Campos opcionais — ausente = sem mudança."""
+
+    name: Name | None = None
+    role: Role | None = None
+    active: bool | None = None
+
+
+class PasswordResetIn(BaseModel):
+    password: Password  # nunca ecoado — máscara nos 422
+
+
+class OperatorOut(BaseModel):
+    id: uuid.UUID
+    login: str
+    name: str
+    role: str
+    active: bool
+    created_at: datetime
+    last_login_at: datetime | None

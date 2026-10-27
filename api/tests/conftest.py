@@ -61,6 +61,9 @@ def client():
         engine = db_module.engine()
         with engine.begin() as connection:
             for table in (
+                "login_attempts",
+                "operator_sessions",
+                "operators",
                 "attempt_results",
                 "destination_results",
                 "executions",
@@ -131,6 +134,41 @@ def second_agent(client, admin_headers):
         "token": credential.json()["token"],
         "headers": {"Authorization": f"Bearer {credential.json()['token']}"},
     }
+
+
+def csrf_headers(client) -> dict:
+    """Par CSRF: GET emite o cookie; cabeçalho repete o valor."""
+    assert client.get("/api/v1/auth/csrf").status_code == 204
+    token = client.cookies.get("macip_csrf")
+    assert token, "cookie macip_csrf ausente"
+    return {"X-CSRF-Token": token}
+
+
+def make_operator(client, admin_headers, login="operador", role="admin",
+                  password="senha-super-secreta-1", name="Operador"):
+    """Cria operador via API administrativa (Bearer)."""
+    response = client.post(
+        "/api/v1/operators",
+        json={
+            "login": login,
+            "name": name,
+            "role": role,
+            "password": password,
+        },
+        headers=admin_headers,
+    )
+    assert response.status_code == 201, response.text
+    return {**response.json(), "password": password}
+
+
+def login(client, login: str, password: str):
+    """Login real com par CSRF — mantém a sessão nos cookies do client."""
+    headers = csrf_headers(client)
+    return client.post(
+        "/api/v1/auth/login",
+        json={"login": login, "password": password},
+        headers=headers,
+    )
 
 
 def execution_payload(**overrides) -> dict:

@@ -142,6 +142,55 @@ class AttemptResultRow(Base):
     destination: Mapped[DestinationResultRow] = relationship(back_populates="attempts")
 
 
+class Operator(Base):
+    """Operador interno MAC IP — login normalizado único + Argon2id."""
+
+    __tablename__ = "operators"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    login: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    password_hash: Mapped[str] = mapped_column(String(256), nullable=False)
+    role: Mapped[str] = mapped_column(String(20), nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at = mapped_column(DateTime(timezone=True), server_default=func.now())
+    last_login_at = mapped_column(DateTime(timezone=True), nullable=True)
+
+    sessions: Mapped[list["OperatorSession"]] = relationship(
+        back_populates="operator", cascade="all, delete-orphan"
+    )
+
+
+class OperatorSession(Base):
+    """Sessão opaca — persistimos SÓ o hash do identificador."""
+
+    __tablename__ = "operator_sessions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    operator_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("operators.id"), nullable=False, index=True
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    created_at = mapped_column(DateTime(timezone=True), server_default=func.now())
+    expires_at = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at = mapped_column(DateTime(timezone=True), nullable=True)
+
+    operator: Mapped[Operator] = relationship(back_populates="sessions")
+
+
+class LoginAttempt(Base):
+    """Tentativas de login — limitação válida entre processos da API."""
+
+    __tablename__ = "login_attempts"
+
+    id = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    login: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    ip: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    attempted_at = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
 class SchemaMigration(Base):
     __tablename__ = "schema_migrations"
 

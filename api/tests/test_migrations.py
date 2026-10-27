@@ -22,7 +22,7 @@ def _cleanup_extra_versions(client):
     contaminar o próximo teste nem o start do app (versão futura)."""
     yield
     with _engine().begin() as connection:
-        connection.execute(text("DELETE FROM schema_migrations WHERE version > 1"))
+        connection.execute(text("DELETE FROM schema_migrations WHERE version > 2"))
         for table in ("mig_test", "mig_probe", "mig_race"):
             connection.execute(text(f"DROP TABLE IF EXISTS {table}"))
 
@@ -67,6 +67,9 @@ def _history_snapshot() -> dict:
             "executions": rows("executions"),
             "destination_results": rows("destination_results"),
             "attempt_results": rows("attempt_results"),
+            "operators": rows("operators"),
+            "operator_sessions": rows("operator_sessions"),
+            "login_attempts": rows("login_attempts"),
         }
 
 
@@ -92,8 +95,8 @@ def test_failed_migration_rolls_back_with_full_history(client, agent, monkeypatc
     monkeypatch.setattr(
         migrations,
         "MIGRATIONS",
-        migrations.MIGRATIONS[:1]
-        + [(2, "fail-mid",
+        migrations.MIGRATIONS[:2]
+        + [(3, "fail-mid",
             "CREATE TABLE mig_test (id int);"
             "SELECT coluna_inexistente FROM agents;")],
     )
@@ -115,7 +118,7 @@ def test_failed_migration_rolls_back_with_full_history(client, agent, monkeypatc
             )
         }
     assert created == 0, "DDL da migração falha deveria reverter"
-    assert 2 not in versions, "versão não registrada em falha"
+    assert 3 not in versions, "versão não registrada em falha"
     assert _history_snapshot() == before, "histórico alterado pelo rollback"
     assert _advisory_locks_held() == 0, "advisory lock preso após falha"
 
@@ -124,10 +127,10 @@ def test_failed_migration_rolls_back_with_full_history(client, agent, monkeypatc
     monkeypatch.setattr(
         migrations,
         "MIGRATIONS",
-        migrations.MIGRATIONS[:1]
-        + [(2, "probe", "CREATE TABLE mig_probe (id int);")],
+        migrations.MIGRATIONS[:2]
+        + [(3, "probe", "CREATE TABLE mig_probe (id int);")],
     )
-    assert migrate_now() == [2]
+    assert migrate_now() == [3]
     with engine.connect() as connection:
         present = connection.execute(
             text(
@@ -136,7 +139,7 @@ def test_failed_migration_rolls_back_with_full_history(client, agent, monkeypatc
             )
         ).scalar()
         v2 = connection.execute(
-            text("SELECT count(*) FROM schema_migrations WHERE version=2")
+            text("SELECT count(*) FROM schema_migrations WHERE version=3")
         ).scalar()
     assert present == 1, "retentativa não aplicou a migração"
     assert v2 == 1, "versão registrada mais de uma vez"
@@ -153,8 +156,8 @@ def test_concurrent_pending_migration_applies_once(client, monkeypatch):
     monkeypatch.setattr(
         migrations,
         "MIGRATIONS",
-        migrations.MIGRATIONS[:1]
-        + [(2, "concurrent", "CREATE TABLE mig_race (id int);")],
+        migrations.MIGRATIONS[:2]
+        + [(3, "concurrent", "CREATE TABLE mig_race (id int);")],
     )
     results: list = []
 
@@ -174,12 +177,12 @@ def test_concurrent_pending_migration_applies_once(client, monkeypatch):
     applied = [r for r in results if isinstance(r, list)]
     errors = [r for r in results if not isinstance(r, list)]
     assert not errors, errors
-    assert sorted(applied[0] + applied[1]) == [2], results  # um aplicou, outro viu
+    assert sorted(applied[0] + applied[1]) == [3], results  # um aplicou, outro viu
 
     engine = _engine()
     with engine.connect() as connection:
         count = connection.execute(
-            text("SELECT count(*) FROM schema_migrations WHERE version=2")
+            text("SELECT count(*) FROM schema_migrations WHERE version=3")
         ).scalar()
         present = connection.execute(
             text(
@@ -190,6 +193,25 @@ def test_concurrent_pending_migration_applies_once(client, monkeypatch):
     assert count == 1
     assert present == 1
     assert _advisory_locks_held() == 0, "advisory lock preso após sucesso"
+
+
+def test_v1_database_migrates_preserving_data(client, agent):
+    """Banco parado em v1 com histórico → v2 aplica sem tocar nos dados."""
+    from macip_backup_api.db import migrate_now
+
+    before = _seed_history(client, agent)
+    engine = _engine()
+    with engine.begin() as connection:
+        # volta o banco ao estado v1: remove v2 e sua linha de versão
+        for table in ("operator_sessions", "operators", "login_attempts"):
+            connection.execute(text(f"DROP TABLE {table}"))
+        connection.execute(
+            text("DELETE FROM schema_migrations WHERE version = 2")
+        )
+
+    assert migrate_now() == [2]
+    assert _history_snapshot() == before, "migração v2 tocou dados antigos"
+    assert migrate_now() == []  # idempotente
 
 
 def test_future_version_rejected_without_changes(client):

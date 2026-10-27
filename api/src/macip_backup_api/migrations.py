@@ -91,6 +91,43 @@ MIGRATIONS: list[tuple[int, str, str]] = [
         CREATE INDEX IF NOT EXISTS ix_attempt_dest ON attempt_results(destination_row_id);
         """,
     ),
+    (
+        2,
+        "operators-sessions",
+        """
+        CREATE TABLE IF NOT EXISTS operators (
+            id            uuid PRIMARY KEY,
+            login         varchar(64) NOT NULL UNIQUE,
+            name          varchar(200) NOT NULL,
+            password_hash varchar(256) NOT NULL,
+            role          varchar(20) NOT NULL
+                          CHECK (role IN ('admin','viewer')),
+            active        boolean NOT NULL DEFAULT true,
+            created_at    timestamptz NOT NULL DEFAULT now(),
+            last_login_at timestamptz
+        );
+        CREATE TABLE IF NOT EXISTS operator_sessions (
+            id          uuid PRIMARY KEY,
+            operator_id uuid NOT NULL REFERENCES operators(id),
+            token_hash  varchar(64) NOT NULL UNIQUE,
+            created_at  timestamptz NOT NULL DEFAULT now(),
+            expires_at  timestamptz NOT NULL,
+            revoked_at  timestamptz
+        );
+        CREATE INDEX IF NOT EXISTS ix_operator_sessions_operator
+            ON operator_sessions(operator_id);
+        CREATE TABLE IF NOT EXISTS login_attempts (
+            id           bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            login        varchar(64) NOT NULL,
+            ip           varchar(64) NOT NULL,
+            attempted_at timestamptz NOT NULL DEFAULT now()
+        );
+        CREATE INDEX IF NOT EXISTS ix_login_attempts_login
+            ON login_attempts(login, attempted_at);
+        CREATE INDEX IF NOT EXISTS ix_login_attempts_ip
+            ON login_attempts(ip, attempted_at);
+        """,
+    ),
 ]
 
 _ADVISORY_KEY = 727_203_001

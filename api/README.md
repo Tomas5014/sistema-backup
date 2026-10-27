@@ -116,13 +116,87 @@ enviar o mesmo). `GET /api/v1/agents` mostra `last_seen_at`.
 `started/finished_at_utc` informados pelo agente são preservados
 separadamente (exigem timezone — naive é rejeitado).
 
+## Operadores (portal)
+
+Operadores são da **equipe interna do MSP** — login de clientes fica
+para uma etapa posterior. Três credenciais coexistem sem se confundir:
+
+| Credencial | Acesso |
+|---|---|
+| `Bearer <ADMIN_TOKEN>` | automação/provisionamento — contrato original preservado |
+| Cookie `macip_session` | operador autenticado (`admin` escreve, `viewer` só consulta) |
+| `Bearer <AGENT_TOKEN>` | somente `/api/v1/agent/*` — nunca vira operador |
+
+**Sem usuário padrão.** O primeiro administrador nasce pelo
+procedimento local — senha por `getpass` ou stdin, nunca por argumento:
+
+```bash
+macip-backup-api-operator create --login ana --name "Ana" --role admin
+# recuperação administrativa (mesmo caminho, fora do HTTP):
+macip-backup-api-operator reset-password --login ana   # revoga sessões
+macip-backup-api-operator set-active --login ana --active true
+macip-backup-api-operator list
+```
+
+Senhas em **Argon2id** (argon2-cffi) — o banco só guarda o hash.
+Sessões são **opacas**: identificador aleatório forte renovado a cada
+login, persistido só como SHA-256, cookie `HttpOnly` + `SameSite=Lax`
++ `Secure` (exceção local: `MACIP_API_SESSION_INSECURE_COOKIE=1`).
+Expiração validada no servidor (`MACIP_API_SESSION_TTL_SECONDS`,
+default 8 h); logout revoga de fato; desativar operador ou redefinir
+senha derruba suas sessões; mudança de perfil vale já na requisição
+seguinte.
+
+```bash
+# 1) cookie CSRF pré-sessão → 2) login exige o par cookie+cabeçalho
+curl -c jar http://127.0.0.1:8080/api/v1/auth/csrf
+curl -b jar -c jar -X POST http://127.0.0.1:8080/api/v1/auth/login \
+  -H 'X-CSRF-Token: <valor-do-cookie-macip_csrf>' \
+  -H 'Content-Type: application/json' \
+  -d '{"login": "ana", "password": "<senha>"}'
+
+curl -b jar http://127.0.0.1:8080/api/v1/auth/me              # sessão
+curl -b jar -X POST http://127.0.0.1:8080/api/v1/auth/logout \
+  -H 'X-CSRF-Token: <valor-do-cookie-macip_csrf>'             # revoga
+```
+
+**CSRF**: toda escrita autenticada por cookie exige `X-CSRF-Token`
+igual ao cookie `macip_csrf` (double-submit; o login também). Bearer
+puro não usa cookie — sem exigência. Sem CORS credenciado.
+
+**Rate limit de login**: falhas contadas em `login_attempts`
+(PostgreSQL — vale entre processos da API): `MACIP_API_LOGIN_MAX_ATTEMPTS`
+(default 5) por `MACIP_API_LOGIN_WINDOW_SECONDS` (default 900), por
+login E por IP da conexão direta — cabeçalhos `X-Forwarded-*` não são
+confiáveis. Respostas de login são genéricas: credencial errada, login
+inexistente e operador desativado recebem o mesmo `401`.
+
+Administração de operadores (Bearer admin OU operador `admin`):
+
+```bash
+GET    /api/v1/operators                         # lista
+POST   /api/v1/operators                         # cria {login,name,role,password}
+PATCH  /api/v1/operators/<id>                    # name/role/active
+POST   /api/v1/operators/<id>/reset-password     # redefinir senha
+```
+
+Leitura (`GET` clients/agents/credentials/executions): Bearer admin OU
+qualquer operador ativo. Escrita administrativa: Bearer admin OU
+operador `admin`. `viewer` recebe `403` em escrita. O Bearer admin
+segue NÃO indo ao navegador — não é substituto da sessão.
+
 ## Segurança
 
 - Token de agente entregue uma vez; armazenado só como SHA-256.
 - `Authorization` nunca é registrado em log (uvicorn loga só status+path).
 - Identidade vem da credencial autenticada — corpo que a contradiz → 403.
+- Senhas/hashes/sessões/cookies não aparecem em logs nem respostas —
+  campos sensíveis são mascarados também no `input` dos `422`.
+- Auditoria (`macip_backup_api.audit`): login, falha, logout, criação/
+  desativação de operador, mudança de perfil e reset — sem segredos.
 - **HTTPS obrigatório** para comunicação fora de localhost — os endpoints
-  de agente levam Bearer tokens; sem TLS eles circulam em claro.
+  de agente levam Bearer tokens e as sessões trafegam por cookie;
+  sem TLS ambos circulam em claro.
 
 ## Testes
 

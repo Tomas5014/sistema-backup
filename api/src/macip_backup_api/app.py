@@ -11,13 +11,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import secrets
 import uuid
 from datetime import UTC, datetime
 
 import math
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -27,7 +28,16 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from . import config
-from .auth import new_agent_token, require_admin, require_agent, token_hash
+from .auth import (
+    csrf_guard,
+    csrf_pair_guard,
+    new_agent_token,
+    require_admin,
+    require_agent,
+    require_operator,
+    require_viewer,
+    token_hash,
+)
 from .db import migrate_now, session
 from .models import (
     Agent,
@@ -36,7 +46,23 @@ from .models import (
     Client,
     DestinationResultRow,
     Execution,
+    Operator,
+    OperatorSession,
 )
+from .operators import (
+    CSRF_COOKIE,
+    SESSION_COOKIE,
+    LoginRateLimited,
+    audit,
+    check_login_rate,
+    clear_attempts,
+    create_session,
+    hash_password,
+    normalize_login,
+    record_failed_attempt,
+    revoke_sessions,
+)
+from . import operators as ops
 from .schemas import (
     AgentIn,
     AgentOut,
@@ -48,7 +74,26 @@ from .schemas import (
     ExecutionDetail,
     ExecutionIn,
     ExecutionSummary,
+    LoginIn,
+    OperatorIn,
+    OperatorOut,
+    OperatorUpdate,
+    PasswordResetIn,
 )
+
+
+_SENSITIVE_FIELDS = {
+    "password", "password_hash", "token", "session", "cookie",
+    "authorization", "secret", "senha",
+}
+
+
+def _mask_sensitive(error: dict) -> dict:
+    """Campos sensíveis nunca voltam no `input` de um 422."""
+    loc = {str(part).lower() for part in error.get("loc", ())}
+    if loc & _SENSITIVE_FIELDS and "input" in error:
+        error["input"] = "***"
+    return error
 
 
 def _json_safe(value: object) -> object:
@@ -107,7 +152,10 @@ def create_app() -> FastAPI:
         # jsonable_encoder serializa ctx (ValueError etc.) e _json_safe
         # limpa floats não finitos carregados do valor ofensor
         return JSONResponse(
-            {"detail": _json_safe(jsonable_encoder(exc.errors()))},
+            {"detail": [
+                _mask_sensitive(error)
+                for error in _json_safe(jsonable_encoder(exc.errors()))
+            ]},
             status_code=422,
         )
 
@@ -154,7 +202,7 @@ def create_app() -> FastAPI:
         return {"database": "ok"}
 
     # ---- administrativo ----------------------------------------------
-    @app.post("/api/v1/clients", status_code=201, dependencies=[Depends(require_admin)])
+    @app.post("/api/v1/clients", status_code=201, dependencies=[Depends(require_admin), Depends(csrf_guard)])
     def create_client(payload: ClientIn, db: Session = Depends(session)) -> ClientOut:
         client = Client(id=uuid.uuid4(), name=payload.name)
         db.add(client)
@@ -165,7 +213,7 @@ def create_app() -> FastAPI:
             raise HTTPException(409, "cliente já existe")
         return ClientOut(id=client.id, name=client.name, created_at=client.created_at)
 
-    @app.get("/api/v1/clients", dependencies=[Depends(require_admin)])
+    @app.get("/api/v1/clients", dependencies=[Depends(require_viewer)])
     def list_clients(
         limit: int = Query(50, ge=1, le=500),
         offset: int = Query(0, ge=0),
@@ -181,7 +229,7 @@ def create_app() -> FastAPI:
     @app.post(
         "/api/v1/clients/{client_id}/agents",
         status_code=201,
-        dependencies=[Depends(require_admin)],
+        dependencies=[Depends(require_admin), Depends(csrf_guard)],
     )
     def create_agent(
         client_id: uuid.UUID, payload: AgentIn, db: Session = Depends(session)
@@ -193,7 +241,7 @@ def create_app() -> FastAPI:
         db.commit()
         return _out_agent(agent)
 
-    @app.get("/api/v1/clients/{client_id}/agents", dependencies=[Depends(require_admin)])
+    @app.get("/api/v1/clients/{client_id}/agents", dependencies=[Depends(require_viewer)])
     def list_client_agents(
         client_id: uuid.UUID,
         limit: int = Query(50, ge=1, le=500),
@@ -209,7 +257,7 @@ def create_app() -> FastAPI:
         ).scalars()
         return [_out_agent(a) for a in rows]
 
-    @app.get("/api/v1/agents", dependencies=[Depends(require_admin)])
+    @app.get("/api/v1/agents", dependencies=[Depends(require_viewer)])
     def list_agents(
         client_id: uuid.UUID | None = None,
         limit: int = Query(50, ge=1, le=500),
@@ -225,7 +273,7 @@ def create_app() -> FastAPI:
     @app.post(
         "/api/v1/agents/{agent_id}/credentials",
         status_code=201,
-        dependencies=[Depends(require_admin)],
+        dependencies=[Depends(require_admin), Depends(csrf_guard)],
     )
     def provision_credential(
         agent_id: uuid.UUID, payload: CredentialIn, db: Session = Depends(session)
@@ -245,7 +293,7 @@ def create_app() -> FastAPI:
             credential_id=credential.id, agent_id=agent_id, token=token
         )
 
-    @app.get("/api/v1/agents/{agent_id}/credentials", dependencies=[Depends(require_admin)])
+    @app.get("/api/v1/agents/{agent_id}/credentials", dependencies=[Depends(require_viewer)])
     def list_credentials(
         agent_id: uuid.UUID, db: Session = Depends(session)
     ) -> list[CredentialInfo]:
@@ -265,7 +313,7 @@ def create_app() -> FastAPI:
 
     @app.post(
         "/api/v1/credentials/{credential_id}/revoke",
-        dependencies=[Depends(require_admin)],
+        dependencies=[Depends(require_admin), Depends(csrf_guard)],
     )
     def revoke_credential(
         credential_id: uuid.UUID, db: Session = Depends(session)
@@ -278,7 +326,7 @@ def create_app() -> FastAPI:
             db.commit()
         return {"id": str(credential_id), "revoked": True}
 
-    @app.get("/api/v1/executions", dependencies=[Depends(require_admin)])
+    @app.get("/api/v1/executions", dependencies=[Depends(require_viewer)])
     def list_executions(
         client_id: uuid.UUID | None = None,
         agent_id: uuid.UUID | None = None,
@@ -316,7 +364,7 @@ def create_app() -> FastAPI:
             query = query.where(Execution.started_at_utc <= until)
         return [_out_execution(e) for e in db.execute(query.limit(limit).offset(offset)).scalars()]
 
-    @app.get("/api/v1/executions/{execution_row_id}", dependencies=[Depends(require_admin)])
+    @app.get("/api/v1/executions/{execution_row_id}", dependencies=[Depends(require_viewer)])
     def get_execution(
         execution_row_id: uuid.UUID, db: Session = Depends(session)
     ) -> ExecutionDetail:
@@ -371,6 +419,200 @@ def create_app() -> FastAPI:
             for d in destinations
         ]
         return ExecutionDetail(**detail)
+
+    # ---- operadores: sessão ------------------------------------------
+    def _set_session_cookie(response: Response, token: str) -> None:
+        response.set_cookie(
+            SESSION_COOKIE,
+            token,
+            max_age=config.session_ttl_seconds(),
+            httponly=True,
+            samesite="lax",
+            secure=config.session_cookie_secure(),
+            path="/",
+        )
+
+    def _set_csrf_cookie(response: Response) -> str:
+        value = secrets.token_urlsafe(24)
+        response.set_cookie(
+            CSRF_COOKIE,
+            value,
+            httponly=False,  # o JS lê e repete em X-CSRF-Token
+            samesite="lax",
+            secure=config.session_cookie_secure(),
+            path="/",
+        )
+        return value
+
+    def _out_operator(row: Operator) -> OperatorOut:
+        return OperatorOut(
+            id=row.id,
+            login=row.login,
+            name=row.name,
+            role=row.role,
+            active=row.active,
+            created_at=row.created_at,
+            last_login_at=row.last_login_at,
+        )
+
+    @app.get("/api/v1/auth/csrf", status_code=204)
+    def csrf_token(response: Response) -> None:
+        """Emite o cookie CSRF pré-sessão — o login exige o par."""
+        _set_csrf_cookie(response)
+
+    @app.post("/api/v1/auth/login", dependencies=[Depends(csrf_pair_guard)])
+    def login(
+        payload: LoginIn,
+        request: Request,
+        response: Response,
+        db: Session = Depends(session),
+    ) -> OperatorOut:
+        login_name = normalize_login(payload.login)
+        ip = request.client.host if request.client else "desconhecido"
+        try:
+            check_login_rate(db, login_name, ip)
+        except LoginRateLimited:
+            audit.warning("login rate-limit login=%s ip=%s", login_name, ip)
+            raise HTTPException(429, "muitas tentativas — aguarde")
+
+        operator = db.execute(
+            select(Operator).where(Operator.login == login_name)
+        ).scalar_one_or_none()
+        # resposta genérica — não revela existência nem desativação;
+        # _verify_or_burn_time equaliza o tempo de resposta
+        valid = ops._verify_or_burn_time(
+            operator.password_hash if operator else None, payload.password
+        )
+        if not valid or operator is None or not operator.active:
+            record_failed_attempt(db, login_name, ip)
+            db.commit()
+            audit.warning("login falhou login=%s ip=%s", login_name, ip)
+            raise HTTPException(401, "credenciais inválidas")
+
+        clear_attempts(db, login_name, ip)
+        operator.last_login_at = datetime.now(UTC)
+        _, token = create_session(db, operator)
+        db.commit()
+        _set_session_cookie(response, token)
+        _set_csrf_cookie(response)  # rotaciona a cada login
+        audit.info("login ok operator=%s ip=%s", operator.login, ip)
+        return _out_operator(operator)
+
+    @app.post(
+        "/api/v1/auth/logout",
+        status_code=204,
+        dependencies=[Depends(csrf_guard)],
+    )
+    def logout(
+        request: Request,
+        response: Response,
+        db: Session = Depends(session),
+    ) -> None:
+        token = request.cookies.get(SESSION_COOKIE)
+        if token:
+            session_row = db.execute(
+                select(OperatorSession).where(
+                    OperatorSession.token_hash == token_hash(token)
+                )
+            ).scalar_one_or_none()
+            if session_row is not None and session_row.revoked_at is None:
+                session_row.revoked_at = datetime.now(UTC)
+                audit.info("logout operator=%s", session_row.operator_id)
+                db.commit()
+        response.delete_cookie(SESSION_COOKIE, path="/")
+        response.delete_cookie(CSRF_COOKIE, path="/")
+
+    @app.get("/api/v1/auth/me")
+    def me(operator: Operator = Depends(require_operator)) -> OperatorOut:
+        return _out_operator(operator)
+
+    # ---- operadores: administração -------------------------------------
+    @app.get("/api/v1/operators", dependencies=[Depends(require_admin)])
+    def list_operators(
+        limit: int = Query(50, ge=1, le=500),
+        offset: int = Query(0, ge=0),
+        db: Session = Depends(session),
+    ) -> list[OperatorOut]:
+        rows = db.execute(
+            select(Operator).order_by(Operator.login).limit(limit).offset(offset)
+        ).scalars()
+        return [_out_operator(row) for row in rows]
+
+    @app.post(
+        "/api/v1/operators",
+        status_code=201,
+        dependencies=[Depends(require_admin), Depends(csrf_guard)],
+    )
+    def create_operator(
+        payload: OperatorIn, db: Session = Depends(session)
+    ) -> OperatorOut:
+        operator = Operator(
+            id=uuid.uuid4(),
+            login=normalize_login(payload.login),
+            name=payload.name,
+            password_hash=hash_password(payload.password),
+            role=payload.role,
+            active=True,
+        )
+        db.add(operator)
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            raise HTTPException(409, "login já existe")
+        audit.info("operator criado login=%s role=%s", operator.login, operator.role)
+        return _out_operator(operator)
+
+    @app.patch(
+        "/api/v1/operators/{operator_id}",
+        dependencies=[Depends(require_admin), Depends(csrf_guard)],
+    )
+    def update_operator(
+        operator_id: uuid.UUID,
+        payload: OperatorUpdate,
+        db: Session = Depends(session),
+    ) -> OperatorOut:
+        operator = db.get(Operator, operator_id)
+        if operator is None:
+            raise HTTPException(404, "operador inexistente")
+        changes: list[str] = []
+        if payload.name is not None and payload.name != operator.name:
+            operator.name = payload.name
+            changes.append("name")
+        if payload.role is not None and payload.role != operator.role:
+            operator.role = payload.role
+            changes.append("role")
+        if payload.active is not None and payload.active != operator.active:
+            operator.active = payload.active
+            changes.append("active")
+            if not payload.active:
+                revoke_sessions(db, operator.id)  # desativou → sessões morrem
+        db.commit()
+        if changes:
+            audit.info(
+                "operator alterado login=%s campos=%s",
+                operator.login,
+                ",".join(changes),
+            )
+        return _out_operator(operator)
+
+    @app.post(
+        "/api/v1/operators/{operator_id}/reset-password",
+        status_code=204,
+        dependencies=[Depends(require_admin), Depends(csrf_guard)],
+    )
+    def reset_password(
+        operator_id: uuid.UUID,
+        payload: PasswordResetIn,
+        db: Session = Depends(session),
+    ) -> None:
+        operator = db.get(Operator, operator_id)
+        if operator is None:
+            raise HTTPException(404, "operador inexistente")
+        operator.password_hash = hash_password(payload.password)
+        revoke_sessions(db, operator.id)  # senha nova → sessões antigas morrem
+        db.commit()
+        audit.info("operator senha redefinida login=%s", operator.login)
 
     # ---- agente autenticado ------------------------------------------
     @app.post("/api/v1/agent/heartbeat", status_code=204)

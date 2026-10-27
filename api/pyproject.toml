@@ -13,6 +13,7 @@ dependencies = [
     "uvicorn>=0.30",
     "sqlalchemy>=2.0",
     "psycopg[binary]>=3.2",
+    "argon2-cffi>=23.1",
 ]
 
 [project.optional-dependencies]
@@ -23,6 +24,7 @@ test = [
 
 [project.scripts]
 macip-backup-api = "macip_backup_api.app:run"
+macip-backup-api-operator = "macip_backup_api.operator_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

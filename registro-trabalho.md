@@ -1382,3 +1382,47 @@ PostgreSQL 17 real (podman :55432 descartável). Integração agente →
 API → PG: 2/2 (end-to-end + SIGKILL entre aceite e confirmação).
 
 ---
+## Autenticação de operadores e sessões (API central)
+
+Primeira etapa do portal: base de autenticação/autorização na API —
+a interface web fica para um incremento posterior.
+
+### Modelo
+
+- `operators`: login normalizado (trim+lower) UNIQUE, nome, Argon2id,
+  perfil `admin|viewer`, ativo, created/last_login — migração v2
+  transacional preservando clientes/agentes/execuções.
+- `operator_sessions`: id opaco renovado a cada login; só SHA-256 no
+  banco; expires_at validada no servidor; revoked_at.
+- `login_attempts`: falhas por login+IP em PostgreSQL — rate limit
+  válido entre processos; sem confiança em X-Forwarded-*.
+
+### Contrato
+
+- `GET /auth/csrf` emite cookie pré-sessão; `POST /auth/login` exige
+  par cookie+`X-CSRF-Token` (double-submit); `POST /auth/logout`
+  revoga; `GET /auth/me` devolve o operador.
+- Cookie `macip_session`: HttpOnly + SameSite=Lax + Secure (exceção
+  local explícita via env). Token NUNCA em JSON — só o cookie.
+- CRUD de operadores sob Bearer admin OU operador admin; leituras
+  aceitam qualquer operador ativo; `viewer` → 403 em escrita.
+- Desativar/redefinir senha revoga sessões; mudança de perfil já vale
+  na próxima requisição. Bootstrap/recuperação local:
+  `macip-backup-api-operator` (senha por getpass/stdin, nunca argv).
+- Respostas de login genéricas + verify contra hash dummy — não vazam
+  existência/desativação nem por corpo nem por tempo.
+- Campos sensíveis mascarados no `input` dos 422; auditoria em logger
+  dedicado sem segredos.
+
+### Provas (PostgreSQL 17 real)
+
+66/66: unicidade normalizada+concorrente, hash-only, login ok/errado/
+inativo genérico, sessão expirada/revogada/logout, renovação de id,
+desativação+reset revogando, perfil na próxima requisição, viewer×
+admin, separação agente/operador/Bearer, CSRF login+escritas+logout,
+rate limit por login e IP entre conexões, 422 sem eco de senha, logs
+sem segredos, bootstrap via subprocesso. Migrações: v1 preenchido →
+v2 preservando dados (mais rollback/concorrência/versão futura).
+Integração agente→API inalterada: 2/2.
+
+---
