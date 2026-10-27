@@ -3,11 +3,12 @@
  * (carregando / autenticado / anônimo / API indisponível) e logout
  * com revogação no servidor — falha visível, sem fingir sucesso.
  *
- * Coordenação por GERAÇÃO: refresh, signIn e signOut incrementam um
- * contador; só a operação mais recente altera a sessão. Um /auth/me
- * antigo não desfaz login nem logout concluídos — sucesso e erro
- * obsoletos são descartados igualmente (e descarte nunca vira
- * "API indisponível"). Desmontar o provider invalida o pendente.
+ * Coordenação por GERAÇÃO + TRANSIÇÃO: signIn/signOut são transições
+ * explícitas e têm PRIORIDADE sobre revalidação. Um refresh pedido
+ * durante uma transição é suprimido (não busca, não invalida); um
+ * refresh que já estava em voo fica obsoleto quando a transição
+ * começa — seu resultado nunca sobrescreve login/logout, seja qual
+ * for a ordem de conclusão. Desmontar o provider invalida o pendente.
  */
 
 import {
@@ -42,8 +43,10 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<AuthState>("loading");
   const [operator, setOperator] = useState<Operator | null>(null);
-  // toda operação nova invalida as respostas das anteriores
+  // toda operação nova invalida as respostas das anteriores…
   const generation = useRef(0);
+  // …mas uma TRANSIÇÃO (login/logout) também suprime novos refresh
+  const transitioning = useRef(0);
 
   useEffect(() => {
     const alive = () => generation.current;
@@ -71,6 +74,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const refresh = useCallback(async () => {
+    // revalidação não interfere em login/logout em andamento —
+    // suprimida aqui, antes mesmo de tocar na rede ou na geração
+    if (transitioning.current > 0) return;
     const gen = ++generation.current;
     try {
       const op = await apiMe();
@@ -90,14 +96,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const signIn = useCallback(async (loginName: string, password: string) => {
     const gen = ++generation.current;
-    const op = await apiLogin(loginName, password); // lança ApiError
-    if (gen !== generation.current) return; // algo mais recente assumiu
-    setOperator(op);
-    setState("authenticated");
+    transitioning.current++;
+    try {
+      const op = await apiLogin(loginName, password); // lança ApiError
+      if (gen !== generation.current) return;
+      setOperator(op);
+      setState("authenticated");
+    } finally {
+      transitioning.current--;
+    }
   }, []);
 
   const signOut = useCallback(async () => {
     const gen = ++generation.current;
+    transitioning.current++;
     try {
       await apiLogout(); // revoga no servidor — cookie limpo pela resposta
       if (gen === generation.current) {
@@ -111,6 +123,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return error instanceof ApiError
         ? error.message
         : "Falha desconhecida ao encerrar a sessão.";
+    } finally {
+      transitioning.current--;
     }
   }, []);
 

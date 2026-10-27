@@ -425,3 +425,152 @@ describe("agentes do cliente: dados presos à rota", () => {
     expect(screen.getByText(/Cliente B/)).toBeInTheDocument();
   });
 });
+
+
+describe("transição tem prioridade sobre revalidação", () => {
+  it("login pendente + refresh durante → refresh suprimido, login vence", async () => {
+    const loginPend = deferred<Response>();
+    const calls = controlledFetch({
+      "GET /api/v1/auth/me": () => json({ detail: "x" }, 401),
+      "GET /api/v1/auth/csrf": () => noContent(),
+      "POST /api/v1/auth/login": () => loginPend.promise,
+    });
+    renderProbe();
+    await screen.findByText("anonymous", { selector: "output" }); // sem sessão
+    const meBefore = calls.filter((c) => c === "GET /api/v1/auth/me").length;
+
+    document.cookie = "macip_csrf=c; Path=/";
+    await act(async () => {
+      screen.getByRole("button", { name: "signIn" }).click();
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    // refresh durante o login pendente — SUPRIMIDO, não vai à rede
+    await act(async () => {
+      screen.getByRole("button", { name: "refresh" }).click();
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(
+      calls.filter((c) => c === "GET /api/v1/auth/me").length,
+    ).toBe(meBefore); // nenhuma requisição extra de revalidação
+
+    await act(async () => {
+      loginPend.resolve(json(OPERATOR));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(screen.getByTestId("state").textContent).toBe("authenticated");
+    expect(screen.getByTestId("operator").textContent).toBe("Ana");
+  });
+
+  it("logout pendente + refresh durante → suprimido, logout vence", async () => {
+    const out = deferred<Response>();
+    const calls = controlledFetch({
+      "GET /api/v1/auth/me": () => json(OPERATOR),
+      "POST /api/v1/auth/logout": () => out.promise,
+    });
+    renderProbe();
+    await screen.findByText("authenticated", { selector: "output" });
+    const meBefore = calls.filter((c) => c === "GET /api/v1/auth/me").length;
+
+    document.cookie = "macip_csrf=c; Path=/";
+    await act(async () => {
+      screen.getByRole("button", { name: "signOut" }).click();
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    await act(async () => {
+      screen.getByRole("button", { name: "refresh" }).click();
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(
+      calls.filter((c) => c === "GET /api/v1/auth/me").length,
+    ).toBe(meBefore);
+
+    await act(async () => {
+      out.resolve(new Response(null, { status: 204 }));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(screen.getByTestId("state").textContent).toBe("anonymous");
+    expect(lastLogoutError).toBeNull();
+  });
+
+  it("refresh iniciado ANTES do login responde depois — descartado", async () => {
+    let meCount = 0;
+    const pendings: Deferred<Response>[] = [];
+    const loginPend = deferred<Response>();
+    controlledFetch({
+      "GET /api/v1/auth/me": () => {
+        meCount++;
+        if (meCount === 1) return json({ detail: "x" }, 401);
+        const d = deferred<Response>();
+        pendings.push(d);
+        return d.promise;
+      },
+      "GET /api/v1/auth/csrf": () => noContent(),
+      "POST /api/v1/auth/login": () => loginPend.promise,
+    });
+    renderProbe();
+    await screen.findByText("anonymous", { selector: "output" });
+
+    // refresh começa ANTES do login — fica pendente
+    await act(async () => {
+      screen.getByRole("button", { name: "refresh" }).click();
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(pendings).toHaveLength(1);
+    // login começa — o refresh pendente já está obsoleto
+    document.cookie = "macip_csrf=c; Path=/";
+    await act(async () => {
+      screen.getByRole("button", { name: "signIn" }).click();
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    // o refresh responde 401 DURANTE o login pendente — descartado
+    await act(async () => {
+      pendings[0].resolve(json({ detail: "x" }, 401));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    // login conclui com sucesso — DEVE autenticar
+    await act(async () => {
+      loginPend.resolve(json(OPERATOR));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(screen.getByTestId("state").textContent).toBe("authenticated");
+  });
+
+  it("revalidação volta a funcionar depois da transição", async () => {
+    const loginPend = deferred<Response>();
+    let meCount = 0;
+    const pendings: Deferred<Response>[] = [];
+    controlledFetch({
+      "GET /api/v1/auth/me": () => {
+        meCount++;
+        if (meCount === 1) return json({ detail: "x" }, 401);
+        const d = deferred<Response>();
+        pendings.push(d);
+        return d.promise;
+      },
+      "GET /api/v1/auth/csrf": () => noContent(),
+      "POST /api/v1/auth/login": () => loginPend.promise,
+    });
+    renderProbe();
+    await screen.findByText("anonymous", { selector: "output" });
+    document.cookie = "macip_csrf=c; Path=/";
+    await act(async () => {
+      screen.getByRole("button", { name: "signIn" }).click();
+      await new Promise((r) => setTimeout(r, 0));
+      loginPend.resolve(json(OPERATOR));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(screen.getByTestId("state").textContent).toBe("authenticated");
+
+    // refresh NOVO, depois da transição — detecta expiração real
+    await act(async () => {
+      screen.getByRole("button", { name: "refresh" }).click();
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(pendings).toHaveLength(1); // a requisição realmente saiu
+    await act(async () => {
+      pendings[0].resolve(json({ detail: "x" }, 401));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(screen.getByTestId("state").textContent).toBe("anonymous");
+  });
+});

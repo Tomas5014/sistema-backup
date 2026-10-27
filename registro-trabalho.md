@@ -1523,3 +1523,16 @@ mutação temporária dos guards fez os testes falharem; restaurado,
 32/32. E2E: `1 skipped` sem env (nenhum servidor) e `1 passed` real.
 
 ---
+## Prioridade de transição sobre revalidação (portal)
+
+Restava uma corrida: refresh iniciado DURANTE login/logout
+incrementava a geração e descartava o resultado da transição do
+usuário. Regra final: transições (signIn/signOut) têm prioridade —
+refresh pedido durante transição é suprimido (sem fetch, sem tocar a
+geração); refresh já em voo fica obsoleto quando a transição começa.
+Depois dela, refresh novo volta a detectar expiração real.
+Testes com promises controladas para login/logout pendentes +
+refresh durante/antes/depois; mutação sem a supressão falha 2
+testes; restaurado, 36/36. E2E: skip limpo sem env + 1/1 real.
+
+---
