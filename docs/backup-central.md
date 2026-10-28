@@ -129,7 +129,6 @@ Custódia necessária, guardada FORA da VM:
 #    (version= em MANIFEST.txt — commit+data embutidos no artefato
 #    por git archive, ou rev-parse num checkout normal).
 git clone <repo> ~/macip-central && cd ~/macip-central
-git checkout <version-do-manifesto>   # se diferente do HEAD
 
 # 2) senha: por prompt, sem deixar valor no histórico —
 read -s -p "senha do repositório: " RESTIC_PASSWORD; export RESTIC_PASSWORD; echo
@@ -141,9 +140,25 @@ read -s -p "senha do repositório: " RESTIC_PASSWORD; export RESTIC_PASSWORD; ec
 #    identidade explícita e host key verificado em cada uma:
 export RESTIC_REPOSITORY='<o repositório>'   # local:/... ou sftp:...
 RESTIC_OPTS=()
-# se o repositório for sftp:, monte sftp.args com shlex e use-o em
-# TODO comando restic (caminhos com espaço são um argumento só):
-SSH_ARGS="-oBatchMode=yes -oStrictHostKeyChecking=yes -oUserKnownHostsFile='$HOME/.ssh/known_hosts.central-backup' -oIdentitiesOnly=yes -oPasswordAuthentication=no -oPreferredAuthentications=publickey -i '$HOME/.ssh/central-backup-key' -p 22 -oConnectTimeout=15 -oServerAliveInterval=30 -oServerAliveCountMax=3"
+# se o repositório for sftp:, gere sftp.args com shlex.join a partir
+# de uma LISTA de argumentos (mesma regra do wrapper da rotina) —
+# nunca aspas escritas à mão dentro do texto:
+SSH_ARGS="$(python3 - <<'PY'
+import os, shlex
+home = os.path.expanduser("~")
+print(shlex.join([
+    "-oBatchMode=yes", "-oStrictHostKeyChecking=yes",
+    "-oUserKnownHostsFile=" + home + "/.ssh/known_hosts.central-backup",
+    "-oIdentitiesOnly=yes", "-oPasswordAuthentication=no",
+    "-oKbdInteractiveAuthentication=no",
+    "-oPreferredAuthentications=publickey",
+    "-i", home + "/.ssh/central-backup-key",
+    "-p", "22",
+    "-oConnectTimeout=15", "-oServerAliveInterval=30",
+    "-oServerAliveCountMax=3",
+]))
+PY
+)"
 RESTIC_OPTS=(-o "sftp.args=$SSH_ARGS")
 
 restic "${RESTIC_OPTS[@]}" snapshots

@@ -1706,3 +1706,17 @@ Backup/restore: 15 execuções, 11 operadores e 10 agentes preservados.
   systemd) — restore real 9 e perms/up são de revisões anteriores.
 
 ---
+## runbook SFTP: sftp.args por shlex.join + regressão com restic real
+
+- SSH_ARGS agora é gerado por python shlex.join a partir de LISTA de
+  argumentos (como o wrapper) — o texto com aspas manuais fazia o
+  restic 0.18.1 entregar '-oUserKnownHostsFile=' e o caminho
+  separados ao ssh.
+- RESTIC_OPTS reaplicado em snapshots, restore --include e restore
+  completo; linha antiga de checkout pré-manifesto removida.
+- Regressão 8c: restic REAL + ssh falso registrando argv — confere
+  -i e UserKnownHostsFile íntegros com espaços. Integração com
+  servidor SFTP real segue pendente declarada.
+- Nova contagem: 168 simuladas + 22 reais = 190 asserções.
+
+---

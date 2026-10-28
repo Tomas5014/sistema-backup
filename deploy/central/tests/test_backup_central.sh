@@ -32,6 +32,9 @@ EOF
 chmod 600 "$CENTRAL/secrets/central-backup.env"
 export MACIP_TEST_BACKUP_PW_XYZ="senha-repo-SEGREDO-7x9"
 
+# restic REAL antes do stub sombrear o PATH (caso 8c)
+REAL_RESTIC="$(command -v restic || true)"
+
 STUB_DIR="$WORK/stubbin"; mkdir -p "$STUB_DIR"
 stub_docker "$STUB_DIR"; stub_restic "$STUB_DIR"
 export STUB_LOG="$WORK/docker.log"; : > "$STUB_LOG"
@@ -258,6 +261,54 @@ $SFTP_KEY_SP"
 expect_contains "restore recebe known_hosts" \
   "$r_args" "-oUserKnownHostsFile=$KH_SP"
 expect_contains "restore recebe strict" "$r_args" "-oStrictHostKeyChecking=yes"
+
+# 8c) regressão com RESTIC REAL: o padrão shlex.join do runbook entrega
+#     argv íntegro ao ssh — ssh falso registra os argumentos recebidos
+if [[ -n "$REAL_RESTIC" ]]; then
+  SSH_STUB="$WORK/sshstub"; mkdir -p "$SSH_STUB"
+  cat > "$SSH_STUB/ssh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$SSH_ARGV_LOG"
+exit 1   # sem servidor — só o argv interessa
+EOF
+  chmod +x "$SSH_STUB/ssh"
+  # gera como no runbook: lista de args → shlex.join
+  SSH_ARGS="$(KH_SP="$KH_SP" SFTP_KEY_SP="$SFTP_KEY_SP" python3 - <<'PY'
+import shlex
+import os
+print(shlex.join([
+    "-oBatchMode=yes", "-oStrictHostKeyChecking=yes",
+    "-oUserKnownHostsFile=" + os.environ["KH_SP"],
+    "-oIdentitiesOnly=yes", "-oPasswordAuthentication=no",
+    "-oPreferredAuthentications=publickey",
+    "-i", os.environ["SFTP_KEY_SP"],
+    "-p", "2222", "-oConnectTimeout=15",
+]))
+PY
+)"
+  rm -f "$WORK/ssh-argv.log"
+  SSH_ARGV_LOG="$WORK/ssh-argv.log" PATH="$SSH_STUB:$PATH" \
+    KH_SP="$KH_SP" SFTP_KEY_SP="$SFTP_KEY_SP" RESTIC_PASSWORD=x \
+    "$REAL_RESTIC" -r sftp:op@host.lab:/srv/bk -o "sftp.args=$SSH_ARGS" \
+    snapshots >/dev/null 2>&1 || true
+  [[ -f "$WORK/ssh-argv.log" ]] || : > "$WORK/ssh-argv.log"
+  argv="$(cat "$WORK/ssh-argv.log")"
+  expect_eq "ssh recebeu argv" "$([[ -n "$argv" ]] && echo sim)" "sim"
+  # compara token a token: identidade e known_hosts com espaço íntegros
+  mapfile -t got < "$WORK/ssh-argv.log"
+  want_i="$(printf '%s\n' "-i" "$SFTP_KEY_SP")"
+  found_i=0; found_kh=0
+  prev=""
+  for a in "${got[@]}"; do
+    [[ "$prev" == "-i" && "$a" == "$SFTP_KEY_SP" ]] && found_i=1
+    [[ "$a" == "-oUserKnownHostsFile=$KH_SP" ]] && found_kh=1
+    prev="$a"
+  done
+  expect_eq "ssh recebeu -i + caminho com espaço" "$found_i" "1"
+  expect_eq "ssh recebeu UserKnownHostsFile íntegro" "$found_kh" "1"
+else
+  echo "  SKIP: restic indisponível — argv do ssh não conferido"
+fi
 
 # 9) units: geração, caminho com espaço, units alheias preservadas
 UNIT_HOME="$WORK/unithome"; mkdir -p "$UNIT_HOME"
