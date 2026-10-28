@@ -241,6 +241,24 @@ expect_contains "BatchMode" "$n_args" "-oBatchMode=yes"
 expect_contains "strict host key" "$n_args" "-oStrictHostKeyChecking=yes"
 expect_contains "timeout limitado" "$n_args" "-oConnectTimeout=15"
 
+# 8b) regressão do RUNBOOK: o padrão documentado envia os MESMOS
+#     sftp.args ao `restore` (não só ao snapshots) — simula o comando
+#     do runbook com caminhos com espaço
+SSH_ARGS="-oBatchMode=yes -oStrictHostKeyChecking=yes -oUserKnownHostsFile='$KH_SP' -oIdentitiesOnly=yes -oPasswordAuthentication=no -oPreferredAuthentications=publickey -i '$SFTP_KEY_SP' -p 22 -oConnectTimeout=15"
+restic -o "sftp.args=$SSH_ARGS" restore latest --target "$WORK/out" 2>/dev/null || true
+r_args="$(python3 - "$STUB_LOG" <<'PY'
+import shlex, sys
+lines = [l for l in open(sys.argv[1]) if "restore" in l and "sftp.args=" in l]
+val = lines[-1].split("sftp.args=", 1)[1].rstrip()
+print("\n".join(shlex.split(val)))
+PY
+)"
+expect_contains "restore recebe chave com espaço" "$r_args" "-i
+$SFTP_KEY_SP"
+expect_contains "restore recebe known_hosts" \
+  "$r_args" "-oUserKnownHostsFile=$KH_SP"
+expect_contains "restore recebe strict" "$r_args" "-oStrictHostKeyChecking=yes"
+
 # 9) units: geração, caminho com espaço, units alheias preservadas
 UNIT_HOME="$WORK/unithome"; mkdir -p "$UNIT_HOME"
 export HOME="$UNIT_HOME" XDG_CONFIG_HOME="$UNIT_HOME/.config"

@@ -45,11 +45,12 @@ chmod 600 secrets/central-backup.env
 persiste a reboot e não depende de nenhuma sessão/keyring.
 
 ```bash
-# Crie o arquivo com o editor — NÃO use echo 'senha' em linha de
-# comando (fica no histórico do shell):
+# crie SOMENTE se não existir, já com permissão 0600 — depois edite:
+[[ -f secrets/central-backup-runtime.env ]] || \
+  install -m 600 /dev/null secrets/central-backup-runtime.env
 ${EDITOR:-nano} secrets/central-backup-runtime.env
 #   conteúdo da linha:  MACIP_CENTRAL_BACKUP_PASSWORD=<senha forte>
-chmod 600 secrets/central-backup-runtime.env
+# (nunca: echo 'senha' > arquivo — fica no histórico do shell)
 ```
 
 A unit gerada já inclui
@@ -74,14 +75,23 @@ Em ambas: guarde a senha também em custódia **independente** da VM
 (cofre do operador) — sem ela o repositório não abre.
 
 ```bash
-# 3) dry-run manual — comprova docker+staging+restic neste contexto
-./scripts/central-backup.sh
+# 3) gera as units SEM habilitar (mostra o comando de ativação)
+./scripts/install-central-backup-timer.sh "*-*-* 02:15:00"
 
-# 4) instala o par service+timer (02h15 local, Persistent)
-./scripts/install-central-backup-timer.sh "*-*-* 02:15:00" --enable
-
-systemctl --user list-timers macip-central-backup.timer
+# 4) prova NO CONTEXTO DO SERVIÇO — é a unit que carrega
+#    central-backup-runtime.env; executar central-backup.sh na mão
+#    NÃO carrega esse arquivo (reproduziria 'credencial ausente').
+#    Também comprova o acesso ao Docker sob systemd --user.
+systemctl --user daemon-reload
+systemctl --user start macip-central-backup.service
+systemctl --user status macip-central-backup.service --no-pager
 journalctl --user -u macip-central-backup.service -e
+#    → "central-backup concluído — snapshot <id>"; confira no repo:
+#      restic -r <repositório> snapshots
+
+# 5) comprovado → habilita o agendamento diário
+systemctl --user enable --now macip-central-backup.timer
+systemctl --user list-timers macip-central-backup.timer
 ```
 
 ## Destino externo SFTP (quando houver servidor)
@@ -126,33 +136,47 @@ read -s -p "senha do repositório: " RESTIC_PASSWORD; export RESTIC_PASSWORD; ec
 #    ou aponte um arquivo 0600 criado pelo seu gerenciador de senhas:
 #      restic --password-file ~/senha-repo.txt ...
 
-# 3) lista e restaura o último snapshot. Destino sftp exige as mesmas
-#    opções SSH do serviço (sftp.args — cada valor é um argumento):
-restic -r 'sftp:<user>@<host>:/caminho/repo' \
-  -o "sftp.args=-oBatchMode=yes -oStrictHostKeyChecking=yes -oUserKnownHostsFile=$HOME/.ssh/known_hosts.central-backup -oIdentitiesOnly=yes -oPasswordAuthentication=no -oPreferredAuthentications=publickey -i '$HOME/.ssh/central-backup-key' -p 22 -oConnectTimeout=15" \
-  snapshots
-export RESTIC_REPOSITORY='<o repositório>'
-restic snapshots
-restic restore latest --target /tmp/macip-recovery
+# 3) opções reutilizáveis — o mesmo array entra em TODAS as chamadas
+#    restic da recuperação (snapshots, restore, etc.), mantendo
+#    identidade explícita e host key verificado em cada uma:
+export RESTIC_REPOSITORY='<o repositório>'   # local:/... ou sftp:...
+RESTIC_OPTS=()
+# se o repositório for sftp:, monte sftp.args com shlex e use-o em
+# TODO comando restic (caminhos com espaço são um argumento só):
+SSH_ARGS="-oBatchMode=yes -oStrictHostKeyChecking=yes -oUserKnownHostsFile='$HOME/.ssh/known_hosts.central-backup' -oIdentitiesOnly=yes -oPasswordAuthentication=no -oPreferredAuthentications=publickey -i '$HOME/.ssh/central-backup-key' -p 22 -oConnectTimeout=15 -oServerAliveInterval=30 -oServerAliveCountMax=3"
+RESTIC_OPTS=(-o "sftp.args=$SSH_ARGS")
 
-# 4) o Restic restaura o caminho ABSOLUTO do staging
+restic "${RESTIC_OPTS[@]}" snapshots
+
+# 4) recupere o manifesto ANTES — ele diz a versão do artefato:
+restic "${RESTIC_OPTS[@]}" restore latest \
+  --target /tmp/macip-recovery --include MANIFEST.txt
+MAN="$(find /tmp/macip-recovery -name MANIFEST.txt -print -quit)"
+VERSION_SHA="$(sed -n 's/^version=\([0-9a-f]\{7,\}\).*/\1/p' "$MAN")"
+#    só o SHA → checkout (data ao lado do hash não entra no comando):
+git checkout "$VERSION_SHA"   # se 'desconhecido', use o HEAD do clone
+
+# 5) restaura o staging inteiro:
+restic "${RESTIC_OPTS[@]}" restore latest --target /tmp/macip-recovery
+
+# 6) o Restic restaura o caminho ABSOLUTO do staging
 #    (…/deploy/central/backups/.stage.XXXXXX/) — localize-o:
 STAGED="$(dirname "$(find /tmp/macip-recovery -name postgres.pgdump -print -quit)")"
 CFG_DIR="$STAGED/config"   # .env, compose.yaml, nginx.conf, secrets/, tls/
 
-# 5) reconstitui deploy/central:
+# 7) reconstitui deploy/central:
 #    $CFG_DIR/.env, compose.yaml, nginx.conf → deploy/central/
 #    $CFG_DIR/secrets/*.env → deploy/central/secrets/ (chmod 600)
 #    $CFG_DIR/tls/{cert,key}.pem → os caminhos tls_cert_source /
 #      tls_key_source do MANIFEST.txt (podem ser fora do projeto)
 #    lab-ca.* → deploy/central/tls/ (clientes confiam nela)
 
-# 6) sobe a stack e restaura o banco (confirmação 'sim' é pedida):
+# 8) sobe a stack e restaura o banco (confirmação 'sim' é pedida):
 cd ~/macip-central
 ./deploy/central/scripts/up.sh
 ./deploy/central/scripts/restore.sh "$STAGED/postgres.pgdump"
 
-# 7) operador: para redefinir a senha de um operador existente use o
+# 9) operador: para redefinir a senha de um operador existente use o
 #    reset-password da CLI (senha por getpass no TTY ou por stdin —
 #    nunca em argv):
 docker compose -p macip-central -f deploy/central/compose.yaml exec api \

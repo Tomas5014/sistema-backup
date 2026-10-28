@@ -1686,3 +1686,23 @@ Backup/restore: 15 execuções, 11 operadores e 10 agentes preservados.
   EnvironmentFile 0600, sftp.args na recuperação, tarefa.json real.
 
 ---
+## central-backup: ajustes finais do runbook
+
+- Ativação: o fluxo agora é gerar units SEM --enable → daemon-reload
+  → `systemctl --user start` → conferir snapshot → `enable --now` —
+  porque o EnvironmentFile é carregado pela unit, não pela execução
+  direta (o dry-run anterior falharia por credencial ausente).
+  Arquivo criado com `install -m 600` antes da senha, sem clobber.
+- Recuperação SFTP: SSH_ARGS/RESTIC_OPTS definidos uma vez e
+  aplicados em snapshots, restore --include MANIFEST.txt e restore
+  completo; manifesto extraído antes do checkout com `version=` →
+  só o SHA passa ao git; aspas no UserKnownHostsFile.
+- Regressão: teste confere sftp.args recebidos pelo próprio
+  `restore` (chave/known_hosts com espaço, strict, timeout).
+- systemd real executado de novo: serviço rodou com EnvironmentFile
+  (sem keyring) — snapshot 00852210, status SUCCESS.
+- Contagem correta: 165 simuladas + 22 reais = 187 asserções na
+  suíte; provas reais desta revisão = central-backup (restic/PG,
+  systemd) — restore real 9 e perms/up são de revisões anteriores.
+
+---
