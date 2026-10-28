@@ -39,8 +39,11 @@ POSTGRES_PASSWORD=fixture-sem-segredo
 EOF
 chmod 600 "$CENTRAL/secrets/postgres.env"
 
-# shim: compose exec → docker exec real; ps → sempre "de pé"
+# shim: compose exec → docker exec real; ps/stop/start mantêm estado
+# realista de serviços (stop tira do arquivo, start recoloca)
 SHIM="$WORK/shim"; mkdir -p "$SHIM"
+export SHIM_STATE="$WORK/shim-state.txt"
+printf 'api\nweb\ndb\n' > "$SHIM_STATE"
 cat > "$SHIM/docker" <<EOF
 #!/usr/bin/env bash
 echo "\$*" >> "\$STUB_LOG"
@@ -52,14 +55,27 @@ if [[ "\$all" == *" exec -T db "* ]]; then
   fi
   exec "$REAL_DOCKER" exec -i "$CTR" \$cmd
 fi
-if [[ "\$*" == *"ps --status running --services"* ]]; then
-  printf 'api\nweb\ndb\n'; exit 0
+if [[ "\$all" == *"ps --status running --services"* ]]; then
+  cat "$SHIM_STATE"; exit 0
 fi
-exit 0   # stop/start ficam só no log (o "banco" é o container real)
+if [[ "\$all" == *" stop "* ]]; then
+  for s in api web; do
+    [[ "\$all" == *" \$s"* ]] && grep -vx "\$s" "$SHIM_STATE" \
+      > "$SHIM_STATE.tmp" && mv "$SHIM_STATE.tmp" "$SHIM_STATE"
+  done
+  exit 0
+fi
+if [[ "\$all" == *" start "* ]]; then
+  for s in api web; do
+    [[ "\$all" == *" \$s"* ]] && { grep -qx "\$s" "$SHIM_STATE" \
+      || echo "\$s" >> "$SHIM_STATE"; }
+  done
+  exit 0
+fi
+exit 0
 EOF
 chmod +x "$SHIM/docker"
 export STUB_LOG="$WORK/docker.log" PATH="$SHIM:$PATH"
-export STUB_RUNNING_SERVICES="api web db"
 
 # esquema com histórico + versão de migração
 psql "CREATE TABLE schema_migrations(version text PRIMARY KEY);

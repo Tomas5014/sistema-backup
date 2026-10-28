@@ -142,13 +142,17 @@ publicado e falha/interrupção remove apenas o temporário.
 host) antes de parar qualquer serviço — arquivo ausente, vazio ou
 inválido é recusado nessa etapa; contêiner indisponível é
 diagnosticado como falha de infraestrutura, não como dump corrompido.
-api+web (os únicos escritores) são parados durante a aplicação e
-religados ao final — somente os que estavam de pé, nada fora da
-stack. `pg_restore --single-transaction --exit-on-error` desfaz
-TODAS as alterações se qualquer etapa falhar — o banco anterior fica
-intacto (rollback provado no teste real, com falha no meio da
-aplicação). O restore substitui o conteúdo do banco — exige
-confirmação `sim`.
+O estado dos escritores (api/web) é consultado **depois** da
+confirmação `sim` — serviços ligados enquanto o operador espera são
+detectados e parados. A parada é confirmada com prazo antes de
+aplicar: escritor ainda ativo ou estado não verificável aborta o
+dump. A recuperação fica armada desde antes do primeiro `stop` —
+parada parcial, erro de preparação, falha de restore ou interrupção
+sempre tentam religar somente o que estava de pé após o `sim` (nada
+fora da stack). `pg_restore --single-transaction --exit-on-error`
+desfaz TODAS as alterações se qualquer etapa falhar — o banco
+anterior fica intacto (rollback provado no teste real, com falha no
+meio da aplicação).
 
 **Códigos de saída de `restore.sh`**: `0` = banco restaurado E
 serviços retomados. Falha da restauração sai com o código do

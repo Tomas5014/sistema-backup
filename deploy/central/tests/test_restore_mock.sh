@@ -17,8 +17,10 @@ write_env "$CENTRAL" ""
 STUB_DIR="$WORK/stubbin"; mkdir -p "$STUB_DIR"; stub_docker "$STUB_DIR"
 export STUB_LOG="$WORK/docker.log"; : > "$STUB_LOG"
 export PATH="$STUB_DIR:$PATH"   # sem pg_restore no host
-export STUB_RUNNING_SERVICES="api web db"
 export STUB_L_RC=0 STUB_PGRESTORE_RC=0 STUB_START_RC=0
+# estado mutável: stub ps/stop/start leem/atualizam este arquivo
+export STUB_STATE_FILE="$WORK/state.txt"
+printf 'api\nweb\ndb\n' > "$STUB_STATE_FILE"
 
 echo "== restore.sh (docker simulado) =="
 echo "FAKE-DUMP" > "$WORK/dump.pgdump"
@@ -58,7 +60,7 @@ export STUB_L_RC=0
 
 # 4) contêiner indisponível ≠ dump corrompido
 : > "$STUB_LOG"
-export STUB_RUNNING_SERVICES="api web"   # db fora do ar
+printf 'api\nweb\n' > "$STUB_STATE_FILE"   # db fora do ar
 set +e
 out="$(printf 'sim\n' | "$CENTRAL/scripts/restore.sh" "$WORK/dump.pgdump" 2>&1)"
 rc=$?
@@ -67,7 +69,7 @@ expect_eq "db indisponível aborta" "$rc" "1"
 expect_contains "diagnóstico cita infraestrutura" "$out" "infraestrutura"
 expect_eq "sem chamada de restauração" \
   "$(grep -c 'pg_restore' "$STUB_LOG" || true)" "0"
-export STUB_RUNNING_SERVICES="api web db"
+printf 'api\nweb\ndb\n' > "$STUB_STATE_FILE"
 
 # 5) sucesso + retomada ok → 0, na ordem stop→restore→start
 : > "$STUB_LOG"
@@ -89,7 +91,7 @@ val_line="$(grep -n 'pg_restore -l' "$STUB_LOG" | cut -d: -f1)"
   || bad "validação antes de parar"
 
 # 6) restauração ok + retomada FALHA → não zero, diagnóstico explícito
-: > "$STUB_LOG"
+: > "$STUB_LOG"; printf 'api\nweb\ndb\n' > "$STUB_STATE_FILE"
 export STUB_START_RC=7
 set +e
 out="$(printf 'sim\n' | "$CENTRAL/scripts/restore.sh" "$WORK/dump.pgdump" 2>&1)"
@@ -102,7 +104,7 @@ case "$out" in *"concluído"*) bad "não anuncia recuperação completa";; \
 export STUB_START_RC=0
 
 # 7) restauração falha + retomada ok → código original preservado
-: > "$STUB_LOG"
+: > "$STUB_LOG"; printf 'api\nweb\ndb\n' > "$STUB_STATE_FILE"
 export STUB_PGRESTORE_RC=4
 set +e
 out="$(printf 'sim\n' | "$CENTRAL/scripts/restore.sh" "$WORK/dump.pgdump" 2>&1)"
@@ -112,7 +114,7 @@ expect_eq "código da restauração preservado" "$rc" "4"
 expect_contains "serviços religados após falha" "$(cat "$STUB_LOG")" "start api web"
 
 # 8) AMBOS falham → erro principal preservado + falha de retomada citada
-: > "$STUB_LOG"
+: > "$STUB_LOG"; printf 'api\nweb\ndb\n' > "$STUB_STATE_FILE"
 export STUB_PGRESTORE_RC=4 STUB_START_RC=9
 set +e
 out="$(printf 'sim\n' | "$CENTRAL/scripts/restore.sh" "$WORK/dump.pgdump" 2>&1)"
@@ -124,14 +126,14 @@ export STUB_PGRESTORE_RC=0 STUB_START_RC=0
 
 # 9) serviço parado fica parado
 : > "$STUB_LOG"
-export STUB_RUNNING_SERVICES="api db"   # web já parado
+printf 'api\ndb\n' > "$STUB_STATE_FILE"   # web já parado
 printf 'sim\n' | "$CENTRAL/scripts/restore.sh" "$WORK/dump.pgdump" >/dev/null 2>&1
 expect_contains "só api estava de pé → stop api" "$(cat "$STUB_LOG")" "stop api"
 grep -q "stop api web" "$STUB_LOG" && bad "web parada parada de novo" \
   || ok "web parada não parada de novo"
 grep -q "start api web" "$STUB_LOG" && bad "web parada não religada" \
   || ok "web parada não religada"
-export STUB_RUNNING_SERVICES="api web db"
+printf 'api\nweb\ndb\n' > "$STUB_STATE_FILE"
 
 # 10) falha na identificação do estado aborta ANTES da aplicação
 : > "$STUB_LOG"
@@ -146,5 +148,89 @@ expect_eq "sem chamada de restauração" \
   "$(grep -c 'pg_restore' "$STUB_LOG" || true)" "0"
 unset STUB_PS_RC
 
+# --- estado mutável: casos dos dois problemas reproduzidos ----------
+
+# 11) parada PARCIAL: api para, comando falha → sem restore, retomada
+# tentada e código da parada preservado
+: > "$STUB_LOG"; printf 'api\nweb\ndb\n' > "$STUB_STATE_FILE"
+export STUB_STOP_RC=5 STUB_STOP_KEPT=web
+set +e
+out="$(printf 'sim\n' | "$CENTRAL/scripts/restore.sh" "$WORK/dump.pgdump" 2>&1)"
+rc=$?
+set -e
+expect_eq "parada parcial → código preservado" "$rc" "5"
+expect_eq "dump NÃO aplicado" \
+  "$(grep 'pg_restore' "$STUB_LOG" | grep -vc 'pg_restore -l')" "0"
+expect_contains "recuperação tentada" "$(cat "$STUB_LOG")" "start api web"
+expect_contains "diagnóstico cita parada" "$out" "parada"
+
+# 12) parada falha + retomada falha → erro principal preservado, ambos citados
+: > "$STUB_LOG"; printf 'api\nweb\ndb\n' > "$STUB_STATE_FILE"
+export STUB_STOP_RC=5 STUB_STOP_KEPT=web STUB_START_RC=9
+set +e
+out="$(printf 'sim\n' | "$CENTRAL/scripts/restore.sh" "$WORK/dump.pgdump" 2>&1)"
+rc=$?
+set -e
+expect_eq "parada+retomada falham → código da parada" "$rc" "5"
+expect_contains "retomada também informada" "$out" "retomada"
+unset STUB_STOP_RC STUB_STOP_KEPT STUB_START_RC
+
+# 13) serviços LIGADOS durante a espera do `sim` → detectados, parados
+# e restaurados — o estado é reconsultado após a confirmação
+: > "$STUB_LOG"; printf 'db\n' > "$STUB_STATE_FILE"
+( sleep 0.2; printf 'api\nweb\n' >> "$STUB_STATE_FILE" ) &
+( sleep 0.4; printf 'sim\n' ) | "$CENTRAL/scripts/restore.sh" \
+  "$WORK/dump.pgdump" >/dev/null 2>&1
+rc=$?
+wait
+expect_eq "fluxo com serviços tardios = 0" "$rc" "0"
+expect_contains "serviços tardios foram parados" \
+  "$(cat "$STUB_LOG")" "stop api web"
+expect_eq "dump aplicado" \
+  "$(grep 'pg_restore' "$STUB_LOG" | grep -vc 'pg_restore -l')" "1"
+
+# 14) stop retorna ok mas escritor continua ativo → dump não aplicado
+: > "$STUB_LOG"; printf 'api\nweb\ndb\n' > "$STUB_STATE_FILE"
+export STUB_STOP_KEPT=web   # stop "ok" mas web segue rodando
+set +e
+out="$(printf 'sim\n' | "$CENTRAL/scripts/restore.sh" "$WORK/dump.pgdump" 2>&1)"
+rc=$?
+set -e
+expect_eq "escritor ativo → não zero" "$rc" "1"
+expect_eq "dump NÃO aplicado" \
+  "$(grep 'pg_restore' "$STUB_LOG" | grep -vc 'pg_restore -l')" "0"
+expect_contains "diagnóstico cita escritores" "$out" "escritores"
+expect_contains "recuperação tentada" "$(cat "$STUB_LOG")" "start api web"
+unset STUB_STOP_KEPT
+
+# 15) ps falha DEPOIS da confirmação → aborta antes de aplicar
+: > "$STUB_LOG"; printf 'api\nweb\ndb\n' > "$STUB_STATE_FILE"
+export STUB_PS_CNT="$WORK/ps.cnt" STUB_PS_FAIL_AT=2
+: > "$STUB_PS_CNT"
+set +e
+out="$(printf 'sim\n' | "$CENTRAL/scripts/restore.sh" "$WORK/dump.pgdump" 2>&1)"
+rc=$?
+set -e
+expect_eq "ps pós-confirmação falha → aborta" "$rc" "1"
+expect_contains "diagnóstico cita estado" "$out" "estado"
+expect_eq "dump NÃO aplicado" \
+  "$(grep 'pg_restore' "$STUB_LOG" | grep -vc 'pg_restore -l')" "0"
+expect_eq "nenhum serviço parado" "$(grep -c 'stop ' "$STUB_LOG" || true)" "0"
+unset STUB_PS_CNT STUB_PS_FAIL_AT
+
+# 16) ps falha na VERIFICAÇÃO pós-parada → aborta + recupera
+: > "$STUB_LOG"; printf 'api\nweb\ndb\n' > "$STUB_STATE_FILE"
+export STUB_PS_CNT="$WORK/ps2.cnt" STUB_PS_FAIL_AT=3
+: > "$STUB_PS_CNT"
+set +e
+out="$(printf 'sim\n' | "$CENTRAL/scripts/restore.sh" "$WORK/dump.pgdump" 2>&1)"
+rc=$?
+set -e
+expect_eq "verificação indisponível → aborta" "$rc" "1"
+expect_contains "diagnóstico cita verificação" "$out" "verificação"
+expect_eq "dump NÃO aplicado" \
+  "$(grep 'pg_restore' "$STUB_LOG" | grep -vc 'pg_restore -l')" "0"
+expect_contains "recuperação tentada" "$(cat "$STUB_LOG")" "start api web"
+unset STUB_PS_CNT STUB_PS_FAIL_AT STUB_STATE_FILE
 echo "-- restore mock: $PASS ok, $FAIL falhas"
 (( FAIL == 0 ))

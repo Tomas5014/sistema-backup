@@ -31,8 +31,14 @@ if [[ "$*" == *"pg_dump"* ]]; then
 fi
 # emula: docker compose ... ps --status running --services
 if [[ "$*" == *"ps --status running --services"* ]]; then
+  if [[ -n "${STUB_PS_CNT:-}" ]]; then
+    n=$(( $(cat "$STUB_PS_CNT" 2>/dev/null || echo 0) + 1 ))
+    echo "$n" > "$STUB_PS_CNT"
+    [[ "$n" == "${STUB_PS_FAIL_AT:--1}" ]] && exit 2
+  fi
   [[ "${STUB_PS_RC:-0}" == "0" ]] || exit "$STUB_PS_RC"
-  printf '%s\n' ${STUB_RUNNING_SERVICES:-api web db}
+  if [[ -n "${STUB_STATE_FILE:-}" ]]; then cat "$STUB_STATE_FILE"
+  else printf '%s\n' ${STUB_RUNNING_SERVICES:-api web db}; fi
   exit 0
 fi
 # emula: docker compose ... exec -T db pg_restore -l  (validação)
@@ -45,8 +51,25 @@ if [[ "$*" == *"pg_restore"* ]]; then
   cat >/dev/null
   exit "${STUB_PGRESTORE_RC:-0}"
 fi
-# emula stop/start com controle de resultado
-if [[ "$*" == *" start "* || "$*" == *"start"* ]]; then
+# emula stop: remove serviços; STUB_STOP_KEPT deixa um escritor de pé
+if [[ "$*" == *" stop "* ]]; then
+  if [[ -n "${STUB_STATE_FILE:-}" ]]; then
+    for s in api web; do
+      [[ "$*" == *" $s"* ]] && grep -vx "$s" "$STUB_STATE_FILE" \
+        > "$STUB_STATE_FILE.tmp" && mv "$STUB_STATE_FILE.tmp" "$STUB_STATE_FILE"
+    done
+    [[ -n "${STUB_STOP_KEPT:-}" ]] && echo "$STUB_STOP_KEPT" >> "$STUB_STATE_FILE"
+  fi
+  exit "${STUB_STOP_RC:-0}"
+fi
+# emula start: religa os serviços pedidos, resultado controlável
+if [[ "$*" == *" start "* ]]; then
+  if [[ -n "${STUB_STATE_FILE:-}" && "${STUB_START_RC:-0}" == "0" ]]; then
+    for s in api web; do
+      [[ "$*" == *" $s"* ]] && { grep -qx "$s" "$STUB_STATE_FILE" \
+        || echo "$s" >> "$STUB_STATE_FILE"; }
+    done
+  fi
   exit "${STUB_START_RC:-0}"
 fi
 exit 0

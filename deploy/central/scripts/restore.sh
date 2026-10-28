@@ -2,18 +2,20 @@
 # Restaura um dump pg_dump -Fc no banco desta stack.
 #
 # ATÔMICA: --single-transaction + --exit-on-error — uma falha
-# qualquer desfaz TODAS as alterações, inclusive as já aplicadas; o
-# banco anterior é preservado.
+# qualquer desfaz TODAS as alterações; o banco anterior é preservado.
 #
-# Validação pelo CLIENTE DO CONTÊINER db — pg_restore no host não é
-# requisito. Arquivo ausente/vazio/inválido é recusado ANTES de parar
-# serviços ou tocar no banco; contêiner indisponível é diagnosticado
-# como falha de infraestrutura, nunca como dump corrompido.
+# O estado dos serviços é consultado DE NOVO depois da confirmação —
+# serviços ligados enquanto o operador espera para digitar `sim` são
+# detectados e parados. A parada é CONFIRMADA (com prazo) antes da
+# aplicação; escritor ativo ou estado não verificável aborta o dump.
+# A recuperação (retomada) fica armada ANTES do primeiro `stop` —
+# falha parcial, erro de preparação, falha de restore ou interrupção
+# sempre tentam religar somente o que estava de pé após o `sim`.
 #
 # Códigos de saída: 0 = banco restaurado E serviços retomados; o
-# código do pg_restore é preservado quando a restauração falha;
-# retomada que falha depois de restauração OK também gera erro
-# (nunca anuncia recuperação completa). Uso: restore.sh <dump>
+# código do comando que falhou é preservado; retomada falha vira
+# retorno não-zero mesmo quando é a única falha; "concluído" só sai
+# com restauração + recuperação bem-sucedidas.
 set -euo pipefail
 source "$(dirname "$0")/_lib.sh"
 cd "$CENTRAL_DIR"
@@ -22,8 +24,12 @@ require_file "$DUMP"
 [[ -s "$DUMP" ]] || { echo "ERRO: $DUMP está vazio" >&2; exit 1; }
 source secrets/postgres.env
 
-# valida pelo cliente do contêiner — sem pg_restore no host
-RUNNING="$(compose ps --status running --services 2>/dev/null)" || {
+running_services() {
+  compose ps --status running --services 2>/dev/null
+}
+
+# --- validação pelo cliente do contêiner (antes do destrutivo) -----
+RUNNING="$(running_services)" || {
   echo "ERRO: não consegui listar serviços da stack (etapa: estado)" >&2
   exit 1; }
 grep -qx "db" <<< "$RUNNING" || {
@@ -37,41 +43,70 @@ echo "ATENÇÃO: substitui o conteúdo do banco $POSTGRES_DB desta stack"
 read -r -p "confirmar (sim/não): " ok
 [[ "$ok" == "sim" ]] || { echo "abortado"; exit 1; }
 
-# impede escritas concorrentes: para SÓ os serviços desta stack que
-# estão de pé; nada fora do projeto é tocado
+# --- estado REAL depois do `sim` — nada de captura antiga ----------
+RUNNING="$(running_services)" || {
+  echo "ERRO: não consegui listar serviços após confirmação (etapa: estado)" >&2
+  exit 1; }
 STOPPED=""
 for svc in api web; do
   grep -qx "$svc" <<< "$RUNNING" && STOPPED="$STOPPED $svc"
 done
 
-# em sinal, tenta retomar os serviços parados e sai com 130
-on_signal() {
-  [[ -n "${STOPPED:-}" ]] && compose start $STOPPED >/dev/null 2>&1
-  exit 130
+# --- recuperação armada ANTES de qualquer parada --------------------
+cleanup() {
+  rc=$?
+  trap - EXIT INT TERM HUP
+  start_rc=0
+  if [[ -n "${STOPPED:-}" ]]; then
+    compose start $STOPPED || start_rc=$?
+  fi
+  if (( rc )); then
+    (( start_rc )) && echo "AVISO: retomada dos serviços também falhou ($start_rc)" >&2
+    exit "$rc"
+  fi
+  if (( start_rc )); then
+    echo "ERRO: banco restaurado, mas a retomada de ($STOPPED) falhou ($start_rc) — verifique 'compose ps' antes de usar" >&2
+    exit "$start_rc"
+  fi
+  echo "restore concluído de $DUMP — banco restaurado e serviços retomados"
+  exit 0
 }
-trap 'on_signal' INT TERM HUP
+trap cleanup EXIT INT TERM HUP
 
-[[ -n "$STOPPED" ]] && compose stop $STOPPED
+# --- parada + confirmação com prazo ---------------------------------
+if [[ -n "$STOPPED" ]]; then
+  compose stop $STOPPED || {
+    rc=$?
+    echo "FALHA ($rc): não consegui parar escritores (etapa: parada)" >&2
+    exit "$rc"
+  }
+fi
 
+writers_down() {
+  local now
+  now="$(running_services)" || return 2
+  ! grep -Eqx 'api|web' <<< "$now"
+}
+deadline=$((SECONDS + 15))
+verify_rc=1
+while (( SECONDS <= deadline )); do
+  wrc=0; writers_down || wrc=$?
+  (( wrc == 0 )) && { verify_rc=0; break; }
+  (( wrc == 2 )) && { verify_rc=2; break; }
+  sleep 1
+done
+case $verify_rc in
+  0) ;;
+  2) echo "FALHA: não consegui confirmar estado dos escritores (etapa: verificação)" >&2; exit 1 ;;
+  *) echo "FALHA: escritores ainda ativos após parada (etapa: verificação) — dump não aplicado" >&2; exit 1 ;;
+esac
+
+# --- aplicação ------------------------------------------------------
 restore_rc=0
 cat "$DUMP" | compose exec -T db pg_restore -U "$POSTGRES_USER" \
   -d "$POSTGRES_DB" --clean --if-exists --no-owner \
   --single-transaction --exit-on-error || restore_rc=$?
-
-# retoma SOMENTE o que estava de pé — falha aqui é diagnóstico à
-# parte, nunca rebaixada a `|| true`
-start_rc=0
-[[ -n "$STOPPED" ]] && { compose start $STOPPED || start_rc=$?; }
-trap - INT TERM HUP
-
-if (( restore_rc )); then
-  msg="FALHA ($restore_rc): restauração abortada — transação única desfez tudo; o banco anterior está preservado"
-  (( start_rc )) && msg+="; a retomada dos serviços também falhou ($start_rc)"
-  echo "$msg" >&2
-  exit "$restore_rc"
-fi
-if (( start_rc )); then
-  echo "ERRO: banco restaurado, mas a retomada de ($STOPPED) falhou ($start_rc) — verifique 'compose ps' antes de usar" >&2
-  exit "$start_rc"
-fi
-echo "restore concluído de $DUMP — banco restaurado e serviços retomados"
+(( restore_rc )) && {
+  echo "FALHA ($restore_rc): restauração abortada — transação única desfez tudo; o banco anterior está preservado" >&2
+  exit "$restore_rc"; }
+exit 0

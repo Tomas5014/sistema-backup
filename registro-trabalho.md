@@ -1602,3 +1602,22 @@ Backup/restore: 15 execuções, 11 operadores e 10 agentes preservados.
   combinações e isolamento de serviços parados.
 
 ---
+## restore.sh: estado reconsultado pós-`sim` e recuperação armada
+
+- Estado dos serviços passa a ser consultado DEPOIS da confirmação —
+  serviços ligados durante a espera são detectados e parados;
+  a parada é confirmada com prazo (≤15 s) antes da aplicação e
+  escritor ativo/estado não verificável aborta sem tocar o dump.
+- Recuperação armada ANTES do primeiro `stop` (trap EXIT/INT/TERM):
+  parada parcial, erro de preparação, falha de restore ou sinal
+  sempre tentam religar só o que estava de pé — código da falha
+  principal preservado, retomada falhando vira erro não-zero.
+- Mocks: 51 asserções cobrindo parada parcial (código preservado,
+  recuperação tentada), serviços ligados durante a espera, escritor
+  remanescente, ps falhando pós-confirmação e na verificação.
+- Prova real pelo script mantida: shim com estado realista de
+  serviços; 9 asserções (restauração + falha no meio + rollback por
+  conexão independente). Stack real: restore.sh executado —
+  banco restaurado, api/web retomados, rc 0.
+
+---
