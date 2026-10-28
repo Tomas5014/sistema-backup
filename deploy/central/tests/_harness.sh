@@ -19,6 +19,10 @@ stub_docker() {
   cat > "$dir/docker" <<'EOF'
 #!/usr/bin/env bash
 echo "$*" >> "$STUB_LOG"
+# emula: docker info (acesso ao daemon neste contexto)
+if [[ "$*" == "info" ]]; then
+  exit "${STUB_DOCKER_INFO_RC:-0}"
+fi
 # emula: docker compose ... exec -T db pg_dump ...
 if [[ "$*" == *"pg_dump"* ]]; then
   case "${STUB_PGDUMP_MODE:-ok}" in
@@ -78,6 +82,38 @@ fi
 exit 0
 EOF
   chmod +x "$dir/docker"
+}
+
+# stub restic: registra chamadas, controla snapshots/init/backup e
+# opcionalmente CONGELA no backup (gate) para teste de concorrência
+stub_restic() {
+  local dir="$1"
+  cat > "$dir/restic" <<'EOF'
+#!/usr/bin/env bash
+echo "restic $*" >> "$STUB_LOG"
+all="$*"
+if [[ "$all" == *"snapshots"* && "$all" != *"--json"* ]]; then
+  exit "${STUB_SNAPS_RC:-0}"
+fi
+if [[ "$all" == *"snapshots"* && "$all" == *"--json"* ]]; then
+  echo '[{"short_id":"abc1234"}]'; exit 0
+fi
+if [[ "$all" == *"init"* ]]; then
+  exit "${STUB_INIT_RC:-0}"
+fi
+if [[ "$all" == *"backup"* ]]; then
+  # copia a árvore de staging para inspeção do teste
+  for a in "$@"; do
+    [[ -d "$a" && -n "${STUB_STAGE_COPY:-}" ]] && cp -a "$a/." "$STUB_STAGE_COPY/"
+  done
+  if [[ -n "${STUB_RESTIC_GATE:-}" ]]; then
+    while [[ ! -f "$STUB_RESTIC_GATE" ]]; do sleep 0.05; done
+  fi
+  exit "${STUB_BACKUP_RC:-0}"
+fi
+exit 0
+EOF
+  chmod +x "$dir/restic"
 }
 
 # stub pg_restore para a validação -l do script (aceita qualquer -l)

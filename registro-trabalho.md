@@ -1637,3 +1637,29 @@ Backup/restore: 15 execuções, 11 operadores e 10 agentes preservados.
   o teste usa `set -m` para entregar o sinal.
 
 ---
+## Consolidação operacional da central
+
+- Registro da homologação real em srvdev1 (28/10/2026): portal+CA,
+  backup/check/restore/exclusões, agendamento+sync, fila com API
+  parada (pending/502/backoff) e dreno automático na volta
+  (3 execuções → sent), dump 25.185 bytes conferido por SHA-256 e
+  restaurado em PG temporário (1 cliente, 1 agente, 8 execuções,
+  migrações 1-2). Evidência do operador, distinta dos testes locais.
+- docs/operacao-central-srvdev1.md: comandos para timers da tarefa
+  homologacao-central-srvdev1 (backup hourly, sync a cada 5 min) com
+  MACIP_BIN/MACIP_HOME/MACIP_CONFIG forçando ~/macip-central/src e
+  preservando launcher 0.2.1/piloto.
+- central-backup.sh: dump (backup.sh) + config + TLS efetivo +
+  lab CA + manifesto sem segredos → staging 700 → restic
+  (criptografia nativa, sem forget/prune — cópia anterior sempre
+  preservada). Senha via credentials.py (env/keyring). SFTP com
+  chave + known_hosts strict. Lock por flock; docker testado no
+  contexto do serviço.
+- install-central-backup-timer.sh: par service+timer 02h15
+  Persistent, marcador de propriedade, --enable explícito.
+- Testes: mock 41 asserções (segredos fora de log/argv, staging,
+  SFTP, lock, units alheias) + real 10 (restic real, restore byte a
+  byte, dump em PG descartável). Execução REAL via systemd --user
+  nesta máquina: snapshot c807da26, docker acessível no contexto.
+
+---

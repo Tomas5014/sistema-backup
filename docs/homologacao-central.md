@@ -171,6 +171,13 @@ diagnóstico diz o sinal e a etapa alcançada
 rollback; a retomada ainda é tentada uma única vez e falha adicional
 dela é informada sem mascarar o código do sinal.
 
+## Operação e homologação executada
+
+Ver `docs/operacao-central-srvdev1.md` (registro da homologação real
+em srvdev1, transição dos timers da tarefa de homologação) e
+`docs/backup-central.md` (backup diário da central + runbook de
+recuperação).
+
 ## Diagnóstico
 
 | Sintoma | Comando |
