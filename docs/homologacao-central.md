@@ -48,6 +48,10 @@ cp .env.example .env            # bind, porta, caminhos TLS — não segredo
   80/443, sem expor além do loopback a menos que se mude o bind.
 - `CENTRAL_HOSTNAME`: hostname usado na verificação e no SAN do
   certificado (ver abaixo).
+- `CENTRAL_TLS_CERT`/`CENTRAL_TLS_KEY`: caminhos dos certificados —
+  relativos ao projeto ou absolutos; **valores com espaço exigem
+  aspas** (`CENTRAL_TLS_KEY="./meus certs/key.pem"`), pois `.env` é
+  interpretado como shell pelos scripts.
 - Segredos fora do Git (`.gitignore`) e fora do build do frontend —
   o portal compilado não recebe nenhum valor deste diretório.
 
@@ -85,10 +89,14 @@ nssdb do navegador de teste). Nada é adicionado à confiança do SO.
 ./scripts/down.sh      # para — preserva pgdata
 ```
 
-- `up.sh` falha com mensagem clara se faltar `.env`, `secrets/*.env`,
-  certificados, se as permissões forem > 600, se a senha do banco não
-  casar entre os envs ou se `MACIP_API_SESSION_INSECURE_COOKIE=1`
-  aparecer.
+- `up.sh` falha com mensagem clara — ANTES de qualquer chamada ao
+  Docker — se faltar `.env`, `secrets/*.env`, os certificados nos
+  caminhos configurados, se grupo/outros tiverem qualquer bit de
+  permissão nos arquivos secretos ou na chave privada (`600`/`400`
+  passam; `640`/`644`/`444`/`511`/`604` não), se a senha do banco não
+  for exatamente o componente senha de `MACIP_API_DATABASE_URL`
+  (comparação decodificada, não substring) ou se
+  `MACIP_API_SESSION_INSECURE_COOKIE=1` aparecer.
 - Projeto Compose explícito: `macip-central` (mesmo nome nos scripts).
 - `down.sh` **não** usa `-v` — o volume é dado de homologação.
 - `pg_dump`/`pg_restore` só tocam o banco desta stack — nada além do
@@ -121,12 +129,22 @@ Sem `certutil`/`restic` a etapa correspondente é informada pendente.
 
 ```bash
 ./scripts/backup.sh                       # pg_dump -Fc → backups/*.pgdump
-./scripts/restore.sh backups/<arquivo>    # pg_restore --clean --if-exists
+./scripts/restore.sh backups/<arquivo>    # pg_restore atômico
 ```
 
-Homologado neste ambiente: dump → restore no banco da stack preservou
-operadores, clientes, agentes e execuções (contagens idênticas).
-O restore substitui o conteúdo do banco — exige confirmação "sim".
+**Backup é atômico**: grava em temporário `600` no diretório de
+destino e só publica por rename após sucesso — um destino existente
+nunca é sobrescrito (recusa explícita), arquivo parcial nunca é
+publicado e falha/interrupção remove apenas o temporário.
+
+**Restauração é atômica e isolada**: o arquivo é validado antes,
+api+web (os únicos escritores) são parados durante a aplicação e
+religados ao final — somente os que estavam de pé, nada fora da
+stack. `pg_restore --single-transaction --exit-on-error` desfaz
+TODAS as alterações se qualquer etapa falhar — o banco anterior fica
+intacto (rollback provado no teste real, incluindo alterações já
+aplicadas). O restore substitui o conteúdo do banco — exige
+confirmação `sim`.
 
 ## Diagnóstico
 

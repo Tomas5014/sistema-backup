@@ -1557,3 +1557,29 @@ detalhe, reload, revogação, restart com dados preservados.
 Backup/restore: 15 execuções, 11 operadores e 10 agentes preservados.
 
 ---
+## Endurecimento dos scripts da central
+
+- `check_secret_perms` passa a testar BITS: grupo/outros sem acesso
+  (600/400 ok; 444/511/640/644/604 recusados) — antes `444` passava
+  na comparação numérica.
+- `backup.sh` atômico: temporário 600 no diretório de destino,
+  publicação por rename, recusa de destino existente, remoção só do
+  próprio temporário, código original preservado, dump final 600.
+- `restore.sh` atômico e isolado: valida o arquivo antes, para só
+  api+web que estavam de pé (nada fora da stack), religa ao final,
+  `pg_restore --single-transaction --exit-on-error` desfaz tudo em
+  falha — rollback provado em PG real com falha no meio da aplicação.
+- `up.sh`: senha divergente entre api.env e postgres.env é ERRO antes
+  do Docker (comparação do componente senha decodificado, não
+  substring); TLS validado nos caminhos configurados (relativos,
+  absolutos, com espaço via aspas no .env), chave privada com bits
+  restritos; `.env` é shell — espaço exige aspas.
+- `check.sh`: `--cacert`/`--CAfile` como arrays — caminhos com
+  espaço não quebram.
+- `deploy/central/tests/`: 59 asserções — perms(10), backup(13),
+  up/tls(15), restore-mock(16), restore-real-PG(5, com rollback
+  provado por conexão independente).
+- Stack real revalidada: up→check→prove.sh 1/1 (login HTTPS, CSRF,
+  detalhe, revogação, restart, agente real sync) + backup real.
+
+---
