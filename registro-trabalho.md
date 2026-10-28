@@ -1663,3 +1663,26 @@ Backup/restore: 15 execuções, 11 operadores e 10 agentes preservados.
   nesta máquina: snapshot c807da26, docker acessível no contexto.
 
 ---
+## central-backup: correções da revisão
+
+- TLS: `cp -aL` (desreferencia symlink) em destinos por FUNÇÃO
+  (`config/tls/cert.pem` / `key.pem`) — mesmo basename em diretórios
+  diferentes não colide mais; restauração provada com os originais
+  apagados (mock + real).
+- Senha do repositório: resolvida e injetada por wrapper Python
+  (env do processo filho, bytes exatos — `$(...)` não apara mais
+  quebras de linha). Prova real: senha com `\n`+espaços abre o repo.
+- Init: `restic cat config` decide — init SÓ com código 10 (repo
+  inexistente); senha errada (12)/acesso/bloqueio falham sem init.
+- SFTP: `sftp.args` montado com shlex.join no wrapper (mesma regra
+  do adaptador): BatchMode, StrictHostKeyChecking+UserKnownHostsFile,
+  IdentitiesOnly, publickey-only, -i/-p, ConnectTimeout/ServerAlive —
+  caminhos com espaço chegam como argumento único (testado).
+- Manifesto: sem auto-hash; checksums só de não-secretos; secretos
+  marcados role=secret por função; version= do artefato VERSION
+  (export-subst do git archive) com fallback rev-parse.
+- Runbook: caminho real do staging restaurado (find), reset-password
+  via operator_cli, senha por read -s/keyctl padd interativo/
+  EnvironmentFile 0600, sftp.args na recuperação, tarefa.json real.
+
+---

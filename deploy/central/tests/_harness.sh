@@ -40,7 +40,7 @@ if [[ "$*" == *"ps --status running --services"* ]]; then
     echo "$n" > "$STUB_PS_CNT"
     [[ "$n" == "${STUB_PS_FAIL_AT:--1}" ]] && exit 2
     if [[ "$n" == "${STUB_PS_GATE_AT:--1}" && -n "${STUB_PS_GATE:-}" ]]; then
-      while [[ ! -f "$STUB_PS_GATE" ]]; do sleep 0.05; done
+      for _ in $(seq 1 600); do [[ -f "$STUB_PS_GATE" ]] && break; sleep 0.05; done
     fi
   fi
   [[ "${STUB_PS_RC:-0}" == "0" ]] || exit "$STUB_PS_RC"
@@ -92,8 +92,8 @@ stub_restic() {
 #!/usr/bin/env bash
 echo "restic $*" >> "$STUB_LOG"
 all="$*"
-if [[ "$all" == *"snapshots"* && "$all" != *"--json"* ]]; then
-  exit "${STUB_SNAPS_RC:-0}"
+if [[ "$all" == *"cat config"* ]]; then
+  exit "${STUB_CAT_RC:-0}"
 fi
 if [[ "$all" == *"snapshots"* && "$all" == *"--json"* ]]; then
   echo '[{"short_id":"abc1234"}]'; exit 0
@@ -107,7 +107,7 @@ if [[ "$all" == *"backup"* ]]; then
     [[ -d "$a" && -n "${STUB_STAGE_COPY:-}" ]] && cp -a "$a/." "$STUB_STAGE_COPY/"
   done
   if [[ -n "${STUB_RESTIC_GATE:-}" ]]; then
-    while [[ ! -f "$STUB_RESTIC_GATE" ]]; do sleep 0.05; done
+    for _ in $(seq 1 600); do [[ -f "$STUB_RESTIC_GATE" ]] && break; sleep 0.05; done
   fi
   exit "${STUB_BACKUP_RC:-0}"
 fi

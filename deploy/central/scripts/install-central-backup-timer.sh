@@ -41,7 +41,8 @@ Description=MAC IP Backup — backup diário da central (restic)
 
 [Service]
 Type=oneshot
-${DOCKER_HOST_LINE}ExecStart="$CENTRAL_DIR/scripts/central-backup.sh"
+${DOCKER_HOST_LINE}EnvironmentFile=-$CENTRAL_DIR/secrets/central-backup-runtime.env
+ExecStart="$CENTRAL_DIR/scripts/central-backup.sh"
 EOF
 
 cat > "$UNIT_DIR/$NAME.timer" <<EOF

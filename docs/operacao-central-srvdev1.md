@@ -57,7 +57,7 @@ export PYTHONPATH="$HOME/macip-central/src"
 
 # 1) backup da tarefa a cada hora (vínculo com a central preservado)
 python3 -m macip_backup.cli schedule \
-  "$HOME/macip-validacao-central/<arquivo-da-tarefa>.json" \
+  "$HOME/macip-validacao-central/tarefa.json" \
   --store "$HOME/macip-validacao-central/estado/agent.db" \
   --central "$HOME/macip-validacao-central/central.json" \
   --calendar "hourly" --enable

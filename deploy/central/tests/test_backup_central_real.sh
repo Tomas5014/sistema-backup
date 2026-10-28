@@ -53,6 +53,14 @@ chmod 600 "$CENTRAL/secrets/"*.env
 write_tls "$CENTRAL"
 echo "LAB-CA-PUB-FIXTURE" > "$CENTRAL/tls/lab-ca.pem"
 echo "LAB-CA-KEY-FIXTURE" > "$CENTRAL/tls/lab-ca.key"; chmod 600 "$CENTRAL/tls/lab-ca.key"
+# TLS como symlink para o cert real + chave com o MESMO basename em
+# outro diretório — coleta por função desreferencia e não colide
+mkdir -p "$CENTRAL/alt tls" "$CENTRAL/keys tls"
+mv "$CENTRAL/tls/cert.pem" "$CENTRAL/alt tls/real-cert.pem"
+ln -s "real-cert.pem" "$CENTRAL/alt tls/link.pem"
+mv "$CENTRAL/tls/key.pem" "$CENTRAL/keys tls/link.pem"
+write_env "$CENTRAL" 'CENTRAL_TLS_CERT="./alt tls/link.pem"
+CENTRAL_TLS_KEY="./keys tls/link.pem"'
 
 # shim: compose exec → docker exec real; demais chamadas ok/log
 SHIM="$WORK/shim"; mkdir -p "$SHIM"
@@ -77,16 +85,27 @@ CENTRAL_BACKUP_REPOSITORY=$REPO
 CENTRAL_BACKUP_PASSWORD_NAME=MACIP_CBK_TEST_PW
 EOF
 chmod 600 "$CENTRAL/secrets/central-backup.env"
-export MACIP_CBK_TEST_PW="senha-repo-fixture-1q2w"
+# senha com quebra de linha final + espaços — preservação byte a byte
+export MACIP_CBK_TEST_PW=$'senha repo fixture 1q2w\n'
 export RESTIC_PASSWORD="$MACIP_CBK_TEST_PW" RESTIC_REPOSITORY="$REPO"
 
 "$CENTRAL/scripts/central-backup.sh" > "$WORK/run.out" 2>&1
 rc=$?
 expect_eq "central-backup real = 0" "$rc" "0"
+# confirma: a senha com \n final abre o repositório recém-criado
+"$RESTIC_BIN" -r "$REPO" snapshots >/dev/null 2>&1
+expect_eq "senha com \\n final abre o repo" "$?" "0"
 expect_contains "snapshot anunciado" "$(cat "$WORK/run.out")" "snapshot"
 runlog="$(cat "$STUB_LOG"; cat "$WORK/run.out")"
 case "$runlog" in *senha-repo*|*fixture-sem-segredo*|*fake-token*)
   bad "segredos fora do log";; *) ok "segredos fora do log";; esac
+
+# remove os originais ANTES de restaurar — prova de recuperação real
+CERT_MD5="$(md5sum "$CENTRAL/alt tls/real-cert.pem" | cut -d' ' -f1)"
+KEY_MD5="$(md5sum "$CENTRAL/keys tls/link.pem" | cut -d' ' -f1)"
+LAB_MD5="$(md5sum "$CENTRAL/tls/lab-ca.key" | cut -d' ' -f1)"
+rm -f "$CENTRAL/alt tls/real-cert.pem" "$CENTRAL/alt tls/link.pem" \
+      "$CENTRAL/keys tls/link.pem" "$CENTRAL/tls/lab-ca.key"
 
 # restaura do repositório e compara byte a byte
 OUT="$WORK/restored"; mkdir -p "$OUT"
@@ -96,14 +115,16 @@ expect_file "dump restaurado" "$(dirname "$RC_DIR")/postgres.pgdump"
 expect_eq "postgres.env idêntico" \
   "$(md5sum "$RC_DIR/secrets/postgres.env" | cut -d' ' -f1)" \
   "$(md5sum "$CENTRAL/secrets/postgres.env" | cut -d' ' -f1)"
-expect_eq "key TLS idêntica" \
-  "$(md5sum "$RC_DIR/tls/key.pem" | cut -d' ' -f1)" \
-  "$(md5sum "$CENTRAL/tls/key.pem" | cut -d' ' -f1)"
-expect_eq "lab CA key idêntica" \
-  "$(md5sum "$RC_DIR/tls/lab-ca.key" | cut -d' ' -f1)" \
-  "$(md5sum "$CENTRAL/tls/lab-ca.key" | cut -d' ' -f1)"
+expect_eq "cert TLS idêntico (alvo do symlink, fonte apagada)" \
+  "$(md5sum "$RC_DIR/tls/cert.pem" | cut -d' ' -f1)" "$CERT_MD5"
+expect_eq "key TLS idêntica (mesmo basename, fonte apagada)" \
+  "$(md5sum "$RC_DIR/tls/key.pem" | cut -d' ' -f1)" "$KEY_MD5"
+expect_eq "lab CA key idêntica (fonte apagada)" \
+  "$(md5sum "$RC_DIR/tls/lab-ca.key" | cut -d' ' -f1)" "$LAB_MD5"
 expect_eq "key restaurada 600" \
   "$(stat -c %a "$RC_DIR/tls/lab-ca.key")" "600"
+expect_eq "cert restaurado NÃO é link" \
+  "$([[ -L "$RC_DIR/tls/cert.pem" ]] && echo link || echo file)" "file"
 
 # recuperação do banco em PostgreSQL descartável
 "$REAL_DOCKER" exec "$CTR" createdb -U postgres rst_db2 2>/dev/null
