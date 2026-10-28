@@ -137,14 +137,27 @@ destino e só publica por rename após sucesso — um destino existente
 nunca é sobrescrito (recusa explícita), arquivo parcial nunca é
 publicado e falha/interrupção remove apenas o temporário.
 
-**Restauração é atômica e isolada**: o arquivo é validado antes,
+**Restauração é atômica e isolada**: o arquivo é validado pelo
+`pg_restore` **do contêiner `db`** (não é preciso PostgreSQL no
+host) antes de parar qualquer serviço — arquivo ausente, vazio ou
+inválido é recusado nessa etapa; contêiner indisponível é
+diagnosticado como falha de infraestrutura, não como dump corrompido.
 api+web (os únicos escritores) são parados durante a aplicação e
 religados ao final — somente os que estavam de pé, nada fora da
 stack. `pg_restore --single-transaction --exit-on-error` desfaz
 TODAS as alterações se qualquer etapa falhar — o banco anterior fica
-intacto (rollback provado no teste real, incluindo alterações já
-aplicadas). O restore substitui o conteúdo do banco — exige
+intacto (rollback provado no teste real, com falha no meio da
+aplicação). O restore substitui o conteúdo do banco — exige
 confirmação `sim`.
+
+**Códigos de saída de `restore.sh`**: `0` = banco restaurado E
+serviços retomados. Falha da restauração sai com o código do
+`pg_restore` e a mensagem diz que o banco foi preservado — a retomada
+é tentada mesmo assim e, se também falhar, é citada no diagnóstico.
+Se o banco restaurar mas a retomada falhar, o script sai com o
+código do `compose start` e avisa que os serviços podem estar
+parados — "banco restaurado" e "serviços retomados" são resultados
+distintos, nunca anunciados juntos por engano.
 
 ## Diagnóstico
 

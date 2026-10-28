@@ -31,12 +31,23 @@ if [[ "$*" == *"pg_dump"* ]]; then
 fi
 # emula: docker compose ... ps --status running --services
 if [[ "$*" == *"ps --status running --services"* ]]; then
+  [[ "${STUB_PS_RC:-0}" == "0" ]] || exit "$STUB_PS_RC"
   printf '%s\n' ${STUB_RUNNING_SERVICES:-api web db}
   exit 0
 fi
-# emula: docker compose ... exec -T db pg_restore ...
+# emula: docker compose ... exec -T db pg_restore -l  (validação)
+if [[ "$*" == *"pg_restore -l"* ]]; then
+  cat >/dev/null   # consome o dump do stdin
+  exit "${STUB_L_RC:-0}"
+fi
+# emula: docker compose ... exec -T db pg_restore ...  (restauração)
 if [[ "$*" == *"pg_restore"* ]]; then
+  cat >/dev/null
   exit "${STUB_PGRESTORE_RC:-0}"
+fi
+# emula stop/start com controle de resultado
+if [[ "$*" == *" start "* || "$*" == *"start"* ]]; then
+  exit "${STUB_START_RC:-0}"
 fi
 exit 0
 EOF

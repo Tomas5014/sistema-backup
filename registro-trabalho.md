@@ -1583,3 +1583,22 @@ Backup/restore: 15 execuções, 11 operadores e 10 agentes preservados.
   detalhe, revogação, restart, agente real sync) + backup real.
 
 ---
+## restore.sh: validação pelo contêiner e retomada com erro real
+
+- Validação do dump sai do host para o `pg_restore` do contêiner
+  `db` (`-l` por stdin) — sem PostgreSQL no host; arquivo
+  ausente/vazio/inválido recusado antes de parar serviços; contêiner
+  indisponível vira diagnóstico de infraestrutura, não "dump
+  corrompido".
+- Retomada dos serviços deixa de ser `|| true`: 4 combinações
+  restauração×retomada mapeadas — código original da restauração
+  preservado, retomada falha vira retorno não-zero com aviso de que
+  os serviços podem estar parados; nunca anuncia recuperação
+  completa por engano; só religa o que estava de pé.
+- Prova real reescrita pelo script: shim de `docker` roteia
+  `compose exec` a um PG descartável — 9 asserções (restauração,
+  falha no meio da aplicação, rollback de schema/dados/versão por
+  conexão independente). Mocks: 30 asserções cobrindo validação,
+  combinações e isolamento de serviços parados.
+
+---
