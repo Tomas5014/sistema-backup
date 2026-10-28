@@ -155,13 +155,21 @@ anterior fica intacto (rollback provado no teste real, com falha no
 meio da aplicação).
 
 **Códigos de saída de `restore.sh`**: `0` = banco restaurado E
-serviços retomados. Falha da restauração sai com o código do
-`pg_restore` e a mensagem diz que o banco foi preservado — a retomada
-é tentada mesmo assim e, se também falhar, é citada no diagnóstico.
-Se o banco restaurar mas a retomada falhar, o script sai com o
-código do `compose start` e avisa que os serviços podem estar
-parados — "banco restaurado" e "serviços retomados" são resultados
-distintos, nunca anunciados juntos por engano.
+serviços retomados, anunciado apenas quando a restauração aplicou
+com sucesso (flag interna — sinal nunca produz falso "concluído").
+Falha da restauração sai com o código do `pg_restore` e a mensagem
+diz que o banco foi preservado — a retomada é tentada mesmo assim e,
+se também falhar, é citada no diagnóstico. Se o banco restaurar mas
+a retomada falhar, o script sai com o código do `compose start` e
+avisa que os serviços podem estar parados — "banco restaurado" e
+"serviços retomados" são resultados distintos, nunca anunciados
+juntos por engano.
+
+**Interrupções**: `SIGHUP`=129, `SIGINT`=130, `SIGTERM`=143. O
+diagnóstico diz o sinal e a etapa alcançada
+(`interrompido por SIGTERM (etapa: verificação)`) — não deduz
+rollback; a retomada ainda é tentada uma única vez e falha adicional
+dela é informada sem mascarar o código do sinal.
 
 ## Diagnóstico
 

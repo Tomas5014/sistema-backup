@@ -1621,3 +1621,19 @@ Backup/restore: 15 execuções, 11 operadores e 10 agentes preservados.
   banco restaurado, api/web retomados, rc 0.
 
 ---
+## restore.sh: sinais preservam código (129/130/143)
+
+- `trap cleanup EXIT INT TERM HUP` deixava `$?=0` em sinal —
+  anunciava "banco restaurado" sem ter aplicado. Agora cada sinal
+  tem handler próprio (SIGHUP 129, SIGINT 130, SIGTERM 143) que
+  diagnostica a ETAPA alcançada e sai com o código do sinal — o
+  EXIT trap só trata retomada; "concluído" exige flag
+  DUMP_APPLIED + retomada ok.
+- Mocks: sinais reais enviados ao PID com o script pausado num gate
+  na verificação dos escritores — código correto por sinal, uma
+  única retomada, dump nunca aplicado, sem mensagem de sucesso;
+  SIGTERM + retomada falhando preserva 143 e informa a falha.
+- Detalhe: SIGINT é ignorado em background sem job control (POSIX) —
+  o teste usa `set -m` para entregar o sinal.
+
+---

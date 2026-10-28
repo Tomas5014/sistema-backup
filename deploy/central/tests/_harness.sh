@@ -35,6 +35,9 @@ if [[ "$*" == *"ps --status running --services"* ]]; then
     n=$(( $(cat "$STUB_PS_CNT" 2>/dev/null || echo 0) + 1 ))
     echo "$n" > "$STUB_PS_CNT"
     [[ "$n" == "${STUB_PS_FAIL_AT:--1}" ]] && exit 2
+    if [[ "$n" == "${STUB_PS_GATE_AT:--1}" && -n "${STUB_PS_GATE:-}" ]]; then
+      while [[ ! -f "$STUB_PS_GATE" ]]; do sleep 0.05; done
+    fi
   fi
   [[ "${STUB_PS_RC:-0}" == "0" ]] || exit "$STUB_PS_RC"
   if [[ -n "${STUB_STATE_FILE:-}" ]]; then cat "$STUB_STATE_FILE"

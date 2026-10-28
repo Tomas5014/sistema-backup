@@ -143,7 +143,7 @@ out="$(printf 'sim\n' | "$CENTRAL/scripts/restore.sh" "$WORK/dump.pgdump" 2>&1)"
 rc=$?
 set -e
 expect_eq "estado indetectável aborta" "$rc" "1"
-expect_contains "diagnóstico cita estado" "$out" "estado"
+expect_contains "diagnóstico cita etapa" "$out" "etapa"
 expect_eq "sem chamada de restauração" \
   "$(grep -c 'pg_restore' "$STUB_LOG" || true)" "0"
 unset STUB_PS_RC
@@ -231,6 +231,54 @@ expect_contains "diagnóstico cita verificação" "$out" "verificação"
 expect_eq "dump NÃO aplicado" \
   "$(grep 'pg_restore' "$STUB_LOG" | grep -vc 'pg_restore -l')" "0"
 expect_contains "recuperação tentada" "$(cat "$STUB_LOG")" "start api web"
-unset STUB_PS_CNT STUB_PS_FAIL_AT STUB_STATE_FILE
+unset STUB_PS_CNT STUB_PS_FAIL_AT
+
+# 17) sinais durante a verificação: código correto, uma retomada, sem dump
+for spec in "TERM 143" "INT 130" "HUP 129"; do
+  sig="${spec%% *}"; want="${spec##* }"
+  : > "$STUB_LOG"; printf 'api\nweb\ndb\n' > "$STUB_STATE_FILE"
+  export STUB_PS_CNT="$WORK/ps-$sig.cnt" STUB_PS_GATE_AT=3 \
+         STUB_PS_GATE="$WORK/gate-$sig"
+  : > "$STUB_PS_CNT"; rm -f "$STUB_PS_GATE" "$WORK/err-$sig"
+  set -m   # job control: background não ignora SIGINT
+  printf 'sim\n' | "$CENTRAL/scripts/restore.sh" "$WORK/dump.pgdump" \
+    >/dev/null 2>"$WORK/err-$sig" &
+  PID=$!
+  set +m
+  until [[ "$(cat "$STUB_PS_CNT" 2>/dev/null || echo 0)" -ge 3 ]]; do
+    sleep 0.05
+  done
+  kill -"$sig" "$PID"
+  : > "$STUB_PS_GATE"            # libera — o sinal é tratado
+  wait "$PID" || rc=$?
+  err="$(cat "$WORK/err-$sig")"
+  expect_eq "SIG$sig → código $want" "$rc" "$want"
+  expect_eq "dump NÃO aplicado (SIG$sig)" \
+    "$(grep 'pg_restore' "$STUB_LOG" | grep -vc 'pg_restore -l')" "0"
+  expect_eq "retomada única (SIG$sig)" \
+    "$(grep -c 'start api web' "$STUB_LOG")" "1"
+  expect_contains "diagnóstico cita $sig" "$err" "SIG$sig"
+  case "$err" in *"concluído"*|*"restaurado"*) bad "sem sucesso (SIG$sig)";; \
+    *) ok "sem sucesso (SIG$sig)";; esac
+  unset STUB_PS_CNT STUB_PS_GATE_AT STUB_PS_GATE
+done
+
+# 18) SIGTERM + retomada falhando: código do sinal preservado
+: > "$STUB_LOG"; printf 'api\nweb\ndb\n' > "$STUB_STATE_FILE"
+export STUB_PS_CNT="$WORK/ps-f.cnt" STUB_PS_GATE_AT=3 STUB_PS_GATE="$WORK/gate-f"
+export STUB_START_RC=8
+: > "$STUB_PS_CNT"; rm -f "$STUB_PS_GATE" "$WORK/err-f"
+printf 'sim\n' | "$CENTRAL/scripts/restore.sh" "$WORK/dump.pgdump" \
+  >/dev/null 2>"$WORK/err-f" &
+PID=$!
+until [[ "$(cat "$STUB_PS_CNT" 2>/dev/null || echo 0)" -ge 3 ]]; do sleep 0.05; done
+kill -TERM "$PID"
+: > "$STUB_PS_GATE"
+wait "$PID" || rc=$?
+err="$(cat "$WORK/err-f")"
+expect_eq "SIGTERM + retomada falha → 143" "$rc" "143"
+expect_contains "falha de retomada informada" "$err" "retomada"
+unset STUB_PS_CNT STUB_PS_GATE_AT STUB_PS_GATE STUB_START_RC STUB_STATE_FILE
+
 echo "-- restore mock: $PASS ok, $FAIL falhas"
 (( FAIL == 0 ))
