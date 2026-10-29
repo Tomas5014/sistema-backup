@@ -315,6 +315,115 @@ export async function findClient(id: string): Promise<ClientRow | null> {
   }
 }
 
+// ---- tarefas de backup (cadastro central + revisões) -----------------
+//
+// O JSON da revisão (TaskConfig) segue o envelope da API:
+//   { name, spec: {...TaskSpec sem id/client/device_id}, schedule: {...} }
+// Os UUIDs centrais (tarefa/cliente/agente) NUNCA entram no payload —
+// o servidor deriva do vínculo. Nenhum segredo passa por aqui: apenas
+// referências *_environment e caminhos de arquivos do agente.
+
+export interface TaskRow {
+  id: string;
+  agent_id: string;
+  client_id: string;
+  name: string;
+  current_revision: number;
+  archived: boolean;
+  archived_at: string | null;
+  created_at: string;
+  distributed: boolean; // sempre false nesta etapa — nada vai ao agente
+}
+
+export interface TaskRevision {
+  revision: number;
+  contract_version: number;
+  config: Record<string, unknown>;
+  author_kind: "operator" | "admin";
+  author_ref: string;
+  created_at: string;
+}
+
+export interface TaskDetail extends TaskRow {
+  revision: TaskRevision;
+  unchanged?: boolean;
+}
+
+export async function createTask(
+  agentId: string,
+  config: Record<string, unknown>,
+): Promise<TaskDetail> {
+  const response = await apiFetch(`/api/v1/agents/${agentId}/tasks`, {
+    method: "POST",
+    body: config,
+    csrf: true,
+  });
+  return response.json() as Promise<TaskDetail>;
+}
+
+export async function listTasks(
+  filters: { client_id?: string; agent_id?: string; archived?: boolean },
+  limit = 50,
+  offset = 0,
+): Promise<TaskRow[]> {
+  const params = new URLSearchParams();
+  if (filters.client_id) params.set("client_id", filters.client_id);
+  if (filters.agent_id) params.set("agent_id", filters.agent_id);
+  if (filters.archived !== undefined) {
+    params.set("archived", String(filters.archived));
+  }
+  params.set("limit", String(limit));
+  params.set("offset", String(offset));
+  const response = await apiFetch(`/api/v1/tasks?${params}`);
+  return response.json() as Promise<TaskRow[]>;
+}
+
+export async function getTask(taskId: string): Promise<TaskDetail> {
+  const response = await apiFetch(`/api/v1/tasks/${taskId}`);
+  return response.json() as Promise<TaskDetail>;
+}
+
+export async function createRevision(
+  taskId: string,
+  expectedRevision: number,
+  config: Record<string, unknown>,
+): Promise<TaskDetail> {
+  const response = await apiFetch(`/api/v1/tasks/${taskId}/revisions`, {
+    method: "POST",
+    body: { expected_revision: expectedRevision, config },
+    csrf: true,
+  });
+  return response.json() as Promise<TaskDetail>;
+}
+
+export interface RevisionSummary {
+  revision: number;
+  contract_version: number;
+  author_kind: string;
+  author_ref: string;
+  created_at: string;
+  current: boolean;
+}
+
+export async function listRevisions(
+  taskId: string,
+): Promise<RevisionSummary[]> {
+  const response = await apiFetch(`/api/v1/tasks/${taskId}/revisions`);
+  return response.json() as Promise<RevisionSummary[]>;
+}
+
+export function exportRevisionUrl(taskId: string, revision: number): string {
+  return `/api/v1/tasks/${taskId}/revisions/${revision}/export`;
+}
+
+export async function archiveTask(taskId: string): Promise<TaskRow> {
+  const response = await apiFetch(`/api/v1/tasks/${taskId}/archive`, {
+    method: "POST",
+    csrf: true,
+  });
+  return response.json() as Promise<TaskRow>;
+}
+
 export async function listCredentials(
   agentId: string,
 ): Promise<CredentialInfo[]> {

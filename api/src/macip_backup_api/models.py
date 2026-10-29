@@ -16,7 +16,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -189,6 +189,54 @@ class LoginAttempt(Base):
     attempted_at = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+class Task(Base):
+    """Cadastro central de uma tarefa — identidade estável por UUID.
+
+    O nome atual é desnormalizado da revisão vigente só para listagem;
+    a verdade de cada revisão está em task_revisions.config.
+    """
+
+    __tablename__ = "tasks"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    agent_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("agents.id"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    current_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at = mapped_column(DateTime(timezone=True), server_default=func.now())
+    archived_at = mapped_column(DateTime(timezone=True), nullable=True)
+
+    agent: Mapped[Agent] = relationship()
+    revisions: Mapped[list["TaskRevision"]] = relationship(
+        back_populates="task", order_by="TaskRevision.revision"
+    )
+
+
+class TaskRevision(Base):
+    """Revisão imutável da configuração — snapshot completo por número."""
+
+    __tablename__ = "task_revisions"
+    __table_args__ = (
+        UniqueConstraint("task_id", "revision", name="uq_task_revision"),
+    )
+
+    id = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    task_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tasks.id"), nullable=False, index=True
+    )
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    contract_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    config = mapped_column(JSONB, nullable=False)
+    author_kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    author_ref: Mapped[str] = mapped_column(String(200), nullable=False)
+    created_at = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    task: Mapped[Task] = relationship(back_populates="revisions")
 
 
 class SchemaMigration(Base):

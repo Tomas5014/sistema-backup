@@ -192,6 +192,96 @@ qualquer operador ativo. Escrita administrativa: Bearer admin OU
 operador `admin`. `viewer` recebe `403` em escrita. O Bearer admin
 segue NÃO indo ao navegador — não é substituto da sessão.
 
+## Tarefas (cadastro e versionamento)
+
+O cadastro de tarefa guarda a configuração de backup NA CENTRAL —
+ainda **não é distribuído nem aplicado** ao agente. O JSON exportado é
+compatível com `TaskSpec.from_dict()` do agente atual.
+
+### Modelo
+
+- `tasks` (identidade estável): `id` (UUIDv5 por agente), `agent_id`,
+  `current_revision`, `archived_at`, `created_at`. O vínculo com o
+  cliente deriva do agente (`task.agent.client_id`) e é validado no
+  servidor.
+- `task_revisions`: snapshot imutável (`config` JSONB), `revision`
+  numerada desde 1, `contract_version` (1), `author_kind`
+  (`admin`/`operator`), `author_ref` (login do operador ou `bearer`),
+  `created_at` UTC. Unicidade `(task_id, revision)` no banco; revision
+  e ponteiro avançam na **mesma transação**.
+
+### Envelope de configuração
+
+```json
+{
+  "name": "nome editável (nunca identificador)",
+  "spec":  { "sources": [{"path": "/dados"}], "exclusions": ["*.tmp"],
+             "compression": "auto|off|max",
+             "destinations": [{"id": "d1", "name": "…", "kind":
+                               "local|sftp|smb|s3", "repository": "...",
+                               "password_environment": "PW", "endpoint_url": "...",
+                               "retention": {"keep_last": 7}}],
+             "timeouts": {...}, "retry": {...} },
+  "schedule": { "kind": "manual|hourly|daily|weekly",
+                "timezone": "America/Sao_Paulo", "hour": 2, "minute": 15,
+                "weekday": 1 }
+}
+```
+
+- `spec` é o documento `TaskSpec` SEM `id`/`client`/`device_id` —
+  esses vêm da identidade central na exportação.
+- `schedule` fica no envelope, fora do `TaskSpec` exportado. `hour`
+  0–23, `minute` 0–59, `weekday` 0–6 (0 = segunda, padrão Python),
+  `timezone` IANA válida (ex.: `America/Sao_Paulo`). Nenhum comando
+  shell é aceito; a conversão para timers do agente é entrega futura.
+- `password_environment`/`endpoint_url` apontam para segredos por
+  referência — segredos nunca são persistidos, retornados ou logados.
+
+### Rotas
+
+| Método | Rota | Permissão | Respostas |
+|---|---|---|---|
+| POST | `/api/v1/agents/{agent_id}/tasks` | admin | 201 / 400 agente-cliente / 403 CSRF+role / 422 validação |
+| GET | `/api/v1/tasks` | viewer+ | 200 `[TaskRow]` — `?limit=&offset=&client_id=&agent_id=&archived=` |
+| GET | `/api/v1/tasks/{id}` | viewer+ | 200 TaskDetail (`revision` atual embutida) / 404 |
+| POST | `/api/v1/tasks/{id}/revisions` | admin | 201 / **409** expected_revision obsoleta / 409 arquivada / 404 / 422 |
+| GET | `/api/v1/tasks/{id}/revisions` | viewer+ | 200 `[RevisionRow]` |
+| GET | `/api/v1/tasks/{id}/revisions/{n}` | viewer+ | 200 / 404 |
+| GET | `/api/v1/tasks/{id}/revisions/{n}/export` | viewer+ | 200 `tarefa.json` (attachment) |
+| POST | `/api/v1/tasks/{id}/archive` | admin | 200 / 404 |
+
+Tokens de AGENTE não autorizam nenhuma rota administrativa (403).
+
+### Concorrência otimista
+
+A nova revisão exige `expected_revision`; a atualização do ponteiro é
+condicional (`current_revision = esperada`) — se dois envios partem da
+mesma base, um vence e o outro recebe **409** com a revisão atual; a
+vencedora fica intacta. `409` também é retornado por atualização com
+expected obsoleta e por revisão em tarefa arquivada.
+
+Configuração **idêntica** com expected válido não cria revisão: o
+documento é normalizado (JSON canônico — chaves ordenadas, fontes
+normalizadas para `{"path": …}`, `null`s equivalentes) e comparado ao
+snapshot atual; se idêntico, responde a revisão vigente.
+
+### Exportação (`tarefa.json`)
+
+- `id` = UUID central da tarefa (não o nome);
+- `client` = `{id, name}` central;
+- `device_id` = UUID do agente;
+- `name`/`spec` = snapshot daquela revisão;
+- `schedule` **não** aparece (envelope separado);
+- fontes normalizadas para `{"path": …}`; `password_environment`/`endpoint_url` por referência, sem segredo.
+
+### Arquivamento
+
+`POST …/archive` marca `archived_at` sem apagar histórico — todas as
+revisões ficam consultáveis/exportáveis. Bloqueia novas revisões e a
+edição na central. **Não** interrompe um backup em execução nem mexe
+em agenda já instalada no agente (a config central ainda não é
+distribuída).
+
 ## Segurança
 
 - Token de agente entregue uma vez; armazenado só como SHA-256.

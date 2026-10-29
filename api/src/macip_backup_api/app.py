@@ -18,17 +18,28 @@ from datetime import UTC, datetime
 import math
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi import (
+    Depends,
+    FastAPI,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+)
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from pydantic import BaseModel, ConfigDict, Field, StrictInt
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from . import config
 from .auth import (
+    _admin_bearer_ok,
+    current_operator,
     csrf_guard,
     csrf_pair_guard,
     new_agent_token,
@@ -48,6 +59,14 @@ from .models import (
     Execution,
     Operator,
     OperatorSession,
+    Task,
+    TaskRevision,
+)
+from .task_contract import (
+    CONTRACT_VERSION,
+    TaskConfigIn,
+    export_taskspec,
+    normalize,
 )
 from .operators import (
     CSRF_COOKIE,
@@ -133,6 +152,46 @@ def _json_safe(value: object) -> object:
     if isinstance(value, (list, tuple)):
         return [_json_safe(item) for item in value]
     return value
+
+
+_bearer = HTTPBearer(auto_error=False)
+
+
+class AdminIdentity:
+    """Autor da escrita: sessão de operador admin OU Bearer de
+    automação — gravado como referência, nunca como segredo."""
+
+    def __init__(self, kind: str, ref: str):
+        self.kind = kind
+        self.ref = ref
+
+
+def require_admin_identity(
+    request: Request,
+    db: Session = Depends(session),
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
+) -> AdminIdentity:
+    admin = _admin_bearer_ok(credentials)
+    if admin:
+        return AdminIdentity("admin", "bearer")
+    operator = current_operator(request, db)
+    if operator is not None:
+        if operator.role == "admin":
+            return AdminIdentity("operator", operator.login)
+        raise HTTPException(403, "perfil sem permissão de escrita")
+    if admin is False:
+        raise HTTPException(403, "credencial administrativa inválida")
+    raise HTTPException(401, "credencial administrativa ausente")
+
+
+class TaskRevisionIn(BaseModel):
+    """Edição otimista: a revisão esperada deve ser a vigente — se
+    outra escrita avançou o ponteiro, o conflito é devolvido (409)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    expected_revision: StrictInt = Field(ge=1)
+    config: TaskConfigIn
 
 
 def _canonical_hash(payload: ExecutionIn) -> str:
@@ -352,6 +411,283 @@ def create_app() -> FastAPI:
             credential.revoked_at = datetime.now(UTC)
             db.commit()
         return {"id": str(credential_id), "revoked": True}
+
+    # ---- tarefas de backup (cadastro + revisões) ----------------------
+    #
+    # Cadastro central: a configuração é gravada e versionada aqui —
+    # NADA é distribuído ao agente nesta etapa (nenhum estado "aplicada"
+    # é devolvido). Admin escreve (operador ou Bearer + CSRF em sessão);
+    # viewer consulta; token de agente não autoriza estas rotas.
+
+    def _revision_config(payload: TaskConfigIn) -> dict:
+        # normalização documentada: defaults expandidos e campos None
+        # removidos — o que o banco guarda é o que a comparação vê
+        return payload.model_dump(mode="json", exclude_none=True)
+
+    def _task_out(task: Task, client_id: uuid.UUID | None = None) -> dict:
+        return {
+            "id": str(task.id),
+            "agent_id": str(task.agent_id),
+            "client_id": str(client_id) if client_id else str(task.agent.client_id),
+            "name": task.name,
+            "current_revision": task.current_revision,
+            "archived": task.archived_at is not None,
+            "archived_at": task.archived_at.isoformat() if task.archived_at else None,
+            "created_at": task.created_at.isoformat(),
+            "distributed": False,  # etapa posterior — nunca fingir aplicado
+        }
+
+    def _revision_out(revision: TaskRevision) -> dict:
+        return {
+            "revision": revision.revision,
+            "contract_version": revision.contract_version,
+            "config": revision.config,
+            "author_kind": revision.author_kind,
+            "author_ref": revision.author_ref,
+            "created_at": revision.created_at.isoformat(),
+        }
+
+    def _get_task(db: Session, task_id: uuid.UUID) -> Task:
+        task = db.get(Task, task_id)
+        if task is None:
+            raise HTTPException(404, "tarefa inexistente")
+        return task
+
+    @app.post(
+        "/api/v1/agents/{agent_id}/tasks",
+        status_code=201,
+        dependencies=[Depends(csrf_guard)],
+    )
+    def create_task(
+        agent_id: uuid.UUID,
+        payload: TaskConfigIn,
+        identity: AdminIdentity = Depends(require_admin_identity),
+        db: Session = Depends(session),
+    ) -> dict:
+        agent = db.get(Agent, agent_id)
+        if agent is None:
+            raise HTTPException(404, "agente inexistente")
+        config_doc = _revision_config(payload)
+        task = Task(
+            id=uuid.uuid4(),
+            agent_id=agent.id,
+            name=config_doc["name"],
+            current_revision=1,
+        )
+        revision = TaskRevision(
+            task_id=task.id,
+            revision=1,
+            contract_version=CONTRACT_VERSION,
+            config=config_doc,
+            author_kind=identity.kind,
+            author_ref=identity.ref,
+        )
+        db.add(task)
+        db.add(revision)
+        db.commit()
+        db.refresh(task)
+        result = _task_out(task, client_id=agent.client_id)
+        result["revision"] = _revision_out(revision)
+        return result
+
+    @app.get("/api/v1/tasks", dependencies=[Depends(require_viewer)])
+    def list_tasks(
+        client_id: uuid.UUID | None = None,
+        agent_id: uuid.UUID | None = None,
+        archived: bool | None = None,
+        limit: int = Query(50, ge=1, le=500),
+        offset: int = Query(0, ge=0),
+        db: Session = Depends(session),
+    ) -> list[dict]:
+        query = select(Task).order_by(Task.created_at.desc())
+        if agent_id is not None:
+            query = query.where(Task.agent_id == agent_id)
+        if client_id is not None:
+            query = query.join(Agent, Agent.id == Task.agent_id).where(
+                Agent.client_id == client_id
+            )
+        if archived is False:
+            query = query.where(Task.archived_at.is_(None))
+        elif archived is True:
+            query = query.where(Task.archived_at.is_not(None))
+        rows = db.execute(query.limit(limit).offset(offset)).scalars()
+        return [_task_out(task) for task in rows]
+
+    @app.get("/api/v1/tasks/{task_id}", dependencies=[Depends(require_viewer)])
+    def get_task(
+        task_id: uuid.UUID, db: Session = Depends(session)
+    ) -> dict:
+        task = _get_task(db, task_id)
+        revision = db.execute(
+            select(TaskRevision).where(
+                TaskRevision.task_id == task.id,
+                TaskRevision.revision == task.current_revision,
+            )
+        ).scalar_one()
+        result = _task_out(task)
+        result["revision"] = _revision_out(revision)
+        return result
+
+    @app.post(
+        "/api/v1/tasks/{task_id}/revisions",
+        status_code=201,
+        dependencies=[Depends(csrf_guard)],
+    )
+    def create_revision(
+        task_id: uuid.UUID,
+        payload: TaskRevisionIn,
+        identity: AdminIdentity = Depends(require_admin_identity),
+        db: Session = Depends(session),
+    ) -> dict:
+        task = _get_task(db, task_id)
+        if task.archived_at is not None:
+            raise HTTPException(409, "tarefa arquivada não aceita novas revisões")
+        config_doc = _revision_config(payload.config)
+        current = db.execute(
+            select(TaskRevision).where(
+                TaskRevision.task_id == task.id,
+                TaskRevision.revision == task.current_revision,
+            )
+        ).scalar_one()
+        if normalize(current.config) == normalize(config_doc):
+            # salvamento idêntico com expected válido → nenhuma revisão extra
+            if payload.expected_revision == task.current_revision:
+                task_out = _task_out(task)
+                task_out["revision"] = _revision_out(current)
+                task_out["unchanged"] = True
+                return task_out
+        # conflito otimista: o ponteiro só avança se ainda estiver na
+        # revisão esperada — a vencedora é preservada
+        bumped = db.execute(
+            update(Task)
+            .where(
+                Task.id == task.id,
+                Task.current_revision == payload.expected_revision,
+            )
+            .values(
+                current_revision=payload.expected_revision + 1,
+                name=config_doc["name"],
+            )
+        )
+        if bumped.rowcount == 0:
+            raise HTTPException(
+                409,
+                f"a tarefa já está na revisão {task.current_revision} — "
+                "há uma edição mais recente; recarregue antes de salvar",
+            )
+        revision = TaskRevision(
+            task_id=task.id,
+            revision=payload.expected_revision + 1,
+            contract_version=CONTRACT_VERSION,
+            config=config_doc,
+            author_kind=identity.kind,
+            author_ref=identity.ref,
+        )
+        db.add(revision)
+        db.commit()  # ponteiro + revisão na MESMA transação
+        db.refresh(task)
+        result = _task_out(task)
+        result["revision"] = _revision_out(revision)
+        return result
+
+    @app.get(
+        "/api/v1/tasks/{task_id}/revisions",
+        dependencies=[Depends(require_viewer)],
+    )
+    def list_revisions(
+        task_id: uuid.UUID, db: Session = Depends(session)
+    ) -> list[dict]:
+        task = _get_task(db, task_id)
+        rows = db.execute(
+            select(TaskRevision)
+            .where(TaskRevision.task_id == task.id)
+            .order_by(TaskRevision.revision.desc())
+        ).scalars()
+        return [
+            {
+                "revision": r.revision,
+                "contract_version": r.contract_version,
+                "author_kind": r.author_kind,
+                "author_ref": r.author_ref,
+                "created_at": r.created_at.isoformat(),
+                "current": r.revision == task.current_revision,
+            }
+            for r in rows
+        ]
+
+    def _get_revision(
+        db: Session, task: Task, revision_number: int
+    ) -> TaskRevision:
+        revision = db.execute(
+            select(TaskRevision).where(
+                TaskRevision.task_id == task.id,
+                TaskRevision.revision == revision_number,
+            )
+        ).scalar_one_or_none()
+        if revision is None:
+            raise HTTPException(404, "revisão inexistente")
+        return revision
+
+    @app.get(
+        "/api/v1/tasks/{task_id}/revisions/{revision_number}",
+        dependencies=[Depends(require_viewer)],
+    )
+    def get_revision(
+        task_id: uuid.UUID,
+        revision_number: int,
+        db: Session = Depends(session),
+    ) -> dict:
+        task = _get_task(db, task_id)
+        return _revision_out(_get_revision(db, task, revision_number))
+
+    @app.get(
+        "/api/v1/tasks/{task_id}/revisions/{revision_number}/export",
+        dependencies=[Depends(require_viewer)],
+    )
+    def export_revision(
+        task_id: uuid.UUID,
+        revision_number: int,
+        db: Session = Depends(session),
+    ) -> Response:
+        """`tarefa.json` da revisão: id/device_id/client.id são os UUIDs
+        CENTRAIS; schedule fica fora — pertence ao envelope da central."""
+        task = _get_task(db, task_id)
+        revision = _get_revision(db, task, revision_number)
+        agent = db.get(Agent, task.agent_id)
+        client = db.get(Client, agent.client_id)
+        document = export_taskspec(
+            task_id=task.id,
+            name=revision.config["name"],
+            client_id=client.id,
+            client_name=client.name,
+            agent_id=agent.id,
+            spec=revision.config["spec"],
+        )
+        return JSONResponse(
+            document,
+            headers={
+                "Content-Disposition":
+                    f'attachment; filename="tarefa-{revision_number}.json"'
+            },
+        )
+
+    @app.post(
+        "/api/v1/tasks/{task_id}/archive",
+        dependencies=[Depends(csrf_guard)],
+    )
+    def archive_task(
+        task_id: uuid.UUID,
+        identity: AdminIdentity = Depends(require_admin_identity),
+        db: Session = Depends(session),
+    ) -> dict:
+        """Arquiva o cadastro — revisões preservadas, sem exclusão física.
+        Não desliga backups agendados já instalados no agente."""
+        task = _get_task(db, task_id)
+        if task.archived_at is None:
+            task.archived_at = datetime.now(UTC)
+            db.commit()
+            db.refresh(task)
+        return _task_out(task)
 
     @app.get("/api/v1/executions", dependencies=[Depends(require_viewer)])
     def list_executions(

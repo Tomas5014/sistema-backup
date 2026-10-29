@@ -229,7 +229,14 @@ export function ClientAgentsPage() {
             {agents.map((agent) => (
               <tr key={agent.id}>
                 <td>
-                  <Link to={`/agents/${agent.id}`}>{agent.name}</Link>
+                  <Link to={`/agents/${agent.id}`}>{agent.name}</Link>{" "}
+                  <Link to={`/tasks?agent_id=${agent.id}`}>tarefas</Link>
+                  {operator?.role === "admin" ? (
+                    <>
+                      {" "}
+                      <Link to={`/tasks/new?agent=${agent.id}`}>+ tarefa</Link>
+                    </>
+                  ) : null}
                 </td>
                 <td>{formatDate(agent.last_seen_at)}</td>
                 <td>{formatDate(agent.created_at)}</td>

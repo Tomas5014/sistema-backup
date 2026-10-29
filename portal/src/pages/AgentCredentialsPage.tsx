@@ -89,6 +89,14 @@ export function AgentCredentialsPage() {
           Agente <strong>{agent.name}</strong>{" "}
           <code>{agent.id}</code> — cliente{" "}
           <strong>{clientName ?? agent.client_id}</strong>
+          {" — "}
+          <Link to={`/tasks?agent_id=${agent.id}`}>tarefas do agente</Link>
+          {operator?.role === "admin" ? (
+            <>
+              {" — "}
+              <Link to={`/tasks/new?agent=${agent.id}`}>nova tarefa</Link>
+            </>
+          ) : null}
         </p>
       ) : null}
       {operator?.role === "admin" && agentId && agent ? (

@@ -1757,3 +1757,71 @@ Backup/restore: 15 execuções, 11 operadores e 10 agentes preservados.
   central.json; token da API central ≠ senha do repositório Restic.
 
 ---
+
+---
+
+## 2026-10-29 — Cadastro e versionamento de tarefas (central + portal)
+
+### Contexto recebido
+
+Continuação da POC MAC IP: a partir do commit aprovado `2802894`
+(provisionamento de clientes/agentes/credenciais), implementar o
+cadastro de tarefas de backup na central com versionamento de
+configuração — seguindo a decisão "um motor (Restic) + um cadastro":
+documentos de tarefa únicos, apontadores por agente e histórico de
+revisões. Explícito: não distribuir nem executar.
+
+### Implementado
+
+- **Migração 3** (`api/migrations.py`): `tasks` (UUIDv5 por agente,
+  `current_revision`, `archived_at`) e `task_revisions` (snapshot JSONB
+  imutável, revisão desde 1, `contract_version`, autor
+  `operator`/`admin`, unicidade `(task_id,revision)`, transação única
+  com o ponteiro).
+- **`api/task_contract.py`**: validação do envelope central
+  (name/spec/schedule), normalização canônica para detecção de
+  salvamento idêntico e exportação mapeando UUID central →
+  `TaskSpec.id`, cliente central e `device_id` do agente.
+- **Rotas**: criação por agente, listagem paginada com filtros
+  (cliente/agente/arquivada), detalhe com revisão atual, nova revisão
+  com `expected_revision` (409 otimista + 409 arquivada), histórico,
+  exportação `tarefa.json` por revisão e arquivamento sem deleção.
+  Viewer lê; admin escreve com CSRF; tokens de agente não servem.
+- **Portal**: `/tasks` (lista + filtros), `/tasks/new?agent=`,
+  `/tasks/{id}` (detalhe, edição, histórico, exportação, arquivamento
+  com explicação do alcance). Formulário estruturado com origens SMB,
+  exclusões, destinos por tipo com campos condicionais, retenção,
+  compressão, agenda (IANA) e opções avançadas. Entradas cruzadas nos
+  agentes do cliente e na página de credenciais. Estado sempre
+  "cadastrada — não distribuída"; `409` preserva valores digitados;
+  respostas atrasadas descartadas por geração+`alive`.
+
+### Verificação
+
+- API real (PostgreSQL 17, contêiner descartável em :55433):
+  `test_tasks.py` 30/30 + `test_task_contract.py` 24/24 + suíte total
+  **110/110** — migração 2→3 preserva dados, corrida otimista (um 201,
+  um 409), rollback do ponteiro, autor distinto (operador vs Bearer),
+  segredos ausentes, exportação de revisão antiga idêntica, exemplos
+  dos 4 tipos de destino parseados pelo `TaskSpec` do agente real.
+- Portal simulado: **63/63** (9 novos de tarefas: lista/filtros,
+  criação com contexto+CSRF, edição 409 preservando valores,
+  expected_revision, arquivamento, viewer, resposta atrasada).
+- `tsc --noEmit` limpo; `vite build` ok.
+- **E2E real** (Chrome + API + PG descartável): 3/3 — inclui o fluxo
+  novo: login → cliente/agente → criar → editar (rev 2) → exportar
+  rev 1 com UUIDs centrais → 401 sem sessão → arquivar.
+  Homologation segue skip por ambiente.
+
+### Correção no caminho
+
+Bug encontrado no E2E: `saveEdit` só desligava `pending` em erro — um
+clique de arquivamento após edição bem-sucedida ficava travado.
+Corrigido com `finally` antes do commit.
+
+### Escopo respeitado
+
+Sem distribuição ao agente, sem systemd/agenda aplicada, sem deleção
+física, sem segredos persistidos. Alterações pré-existentes do
+usuário (`atualizações.txt` deletado, `.claude/`, `.trail/`,
+`tarefa-teste.json`) preservadas fora do commit.

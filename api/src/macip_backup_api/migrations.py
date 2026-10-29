@@ -128,6 +128,35 @@ MIGRATIONS: list[tuple[int, str, str]] = [
             ON login_attempts(ip, attempted_at);
         """,
     ),
+    (
+        3,
+        "tasks-revisions",
+        """
+        CREATE TABLE IF NOT EXISTS tasks (
+            id               uuid PRIMARY KEY,
+            agent_id         uuid NOT NULL REFERENCES agents(id),
+            name             varchar(200) NOT NULL,
+            current_revision integer NOT NULL,
+            created_at       timestamptz NOT NULL DEFAULT now(),
+            archived_at      timestamptz
+        );
+        CREATE INDEX IF NOT EXISTS ix_tasks_agent ON tasks(agent_id);
+        CREATE TABLE IF NOT EXISTS task_revisions (
+            id               bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            task_id          uuid NOT NULL REFERENCES tasks(id),
+            revision         integer NOT NULL,
+            contract_version integer NOT NULL,
+            config           jsonb NOT NULL,
+            author_kind      varchar(20) NOT NULL
+                             CHECK (author_kind IN ('operator','admin')),
+            author_ref       varchar(200) NOT NULL,
+            created_at       timestamptz NOT NULL DEFAULT now(),
+            CONSTRAINT uq_task_revision UNIQUE (task_id, revision)
+        );
+        CREATE INDEX IF NOT EXISTS ix_task_revisions_task
+            ON task_revisions(task_id);
+        """,
+    ),
 ]
 
 _ADVISORY_KEY = 727_203_001

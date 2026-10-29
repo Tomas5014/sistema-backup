@@ -65,6 +65,7 @@ export function Layout() {
         <span className="brand">MAC IP Backup</span>
         <nav aria-label="Principal">
           <NavLink to="/clients">Clientes</NavLink>
+          <NavLink to="/tasks">Tarefas</NavLink>
           <NavLink to="/executions">Execuções</NavLink>
         </nav>
         <div className="operator">

@@ -95,11 +95,12 @@ def test_failed_migration_rolls_back_with_full_history(client, agent, monkeypatc
     monkeypatch.setattr(
         migrations,
         "MIGRATIONS",
-        migrations.MIGRATIONS[:2]
-        + [(3, "fail-mid",
+        migrations.MIGRATIONS
+        + [(migrations.MIGRATIONS[-1][0] + 1, "fail-mid",
             "CREATE TABLE mig_test (id int);"
             "SELECT coluna_inexistente FROM agents;")],
     )
+    NEXT = migrations.MIGRATIONS[-1][0]
     with pytest.raises(Exception):
         migrate_now()
 
@@ -118,7 +119,7 @@ def test_failed_migration_rolls_back_with_full_history(client, agent, monkeypatc
             )
         }
     assert created == 0, "DDL da migração falha deveria reverter"
-    assert 3 not in versions, "versão não registrada em falha"
+    assert NEXT not in versions, "versão não registrada em falha"
     assert _history_snapshot() == before, "histórico alterado pelo rollback"
     assert _advisory_locks_held() == 0, "advisory lock preso após falha"
 
@@ -127,10 +128,10 @@ def test_failed_migration_rolls_back_with_full_history(client, agent, monkeypatc
     monkeypatch.setattr(
         migrations,
         "MIGRATIONS",
-        migrations.MIGRATIONS[:2]
-        + [(3, "probe", "CREATE TABLE mig_probe (id int);")],
+        migrations.MIGRATIONS
+        + [(NEXT, "probe", "CREATE TABLE mig_probe (id int);")],
     )
-    assert migrate_now() == [3]
+    assert migrate_now() == [NEXT]
     with engine.connect() as connection:
         present = connection.execute(
             text(
@@ -139,7 +140,8 @@ def test_failed_migration_rolls_back_with_full_history(client, agent, monkeypatc
             )
         ).scalar()
         v2 = connection.execute(
-            text("SELECT count(*) FROM schema_migrations WHERE version=3")
+            text("SELECT count(*) FROM schema_migrations WHERE version=:v"),
+            {"v": NEXT},
         ).scalar()
     assert present == 1, "retentativa não aplicou a migração"
     assert v2 == 1, "versão registrada mais de uma vez"
@@ -156,9 +158,11 @@ def test_concurrent_pending_migration_applies_once(client, monkeypatch):
     monkeypatch.setattr(
         migrations,
         "MIGRATIONS",
-        migrations.MIGRATIONS[:2]
-        + [(3, "concurrent", "CREATE TABLE mig_race (id int);")],
+        migrations.MIGRATIONS
+        + [(migrations.MIGRATIONS[-1][0] + 1, "concurrent",
+            "CREATE TABLE mig_race (id int);")],
     )
+    NEXT = migrations.MIGRATIONS[-1][0]
     results: list = []
 
     def run():
@@ -177,12 +181,13 @@ def test_concurrent_pending_migration_applies_once(client, monkeypatch):
     applied = [r for r in results if isinstance(r, list)]
     errors = [r for r in results if not isinstance(r, list)]
     assert not errors, errors
-    assert sorted(applied[0] + applied[1]) == [3], results  # um aplicou, outro viu
+    assert sorted(applied[0] + applied[1]) == [NEXT], results  # um aplicou, outro viu
 
     engine = _engine()
     with engine.connect() as connection:
         count = connection.execute(
-            text("SELECT count(*) FROM schema_migrations WHERE version=3")
+            text("SELECT count(*) FROM schema_migrations WHERE version=:v"),
+            {"v": NEXT},
         ).scalar()
         present = connection.execute(
             text(
