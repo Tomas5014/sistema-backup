@@ -1742,3 +1742,18 @@ Backup/restore: 15 execuções, 11 operadores e 10 agentes preservados.
   (API+PG17 descartáveis).
 
 ---
+## portal provisioning: correções da revisão
+
+- Cadastro pendente entre clientes: NewAgentForm remontado por
+  key={clientId} — resposta atrasada do POST de A é descartada ao
+  desmontar (alive=false); tela de B preserva título, listagem e não
+  exibe confirmação de A. Pendência de A não bloqueia o form de B.
+- Resolução além da 1ª página: findAgent/findClient varrem a
+  paginação (limit/offset da API, sem GET por id) — agente na
+  posição 501 é encontrado; agente inexistente mostra estado
+  explícito "Agente não encontrado".
+- stubFetch passa a URL ao handler → mocks paginam de verdade.
+- README: credential_name (inexistente) → token_environment do
+  central.json; token da API central ≠ senha do repositório Restic.
+
+---

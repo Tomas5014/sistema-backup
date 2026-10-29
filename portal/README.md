@@ -29,11 +29,16 @@ configuração de backups, comandos remotos.
 O token aparece UMA vez, numa apresentação temporária — o servidor
 guarda só o hash e o portal não persiste o valor (nada de
 localStorage/sessionStorage/URL/caches). Copie-o imediatamente para a
-configuração do agente (`credential_name` → keyctl/EnvironmentFile,
-ver README do agente) e feche a janela. Se o token for perdido, emita
-uma nova credencial e revogue a anterior — ela não pode ser
-reexibida. A revogação é imediata: a mesma credencial passa a ser
-rejeitada nas chamadas do agente.
+configuração do agente e feche a janela: ele é gravado por custódia
+(ambiente ou kernel keyring) e referenciado pelo campo
+`token_environment` do `central.json` (nome da variável/nome no
+keyring — nunca o valor em disco, ver README do agente). Este é o
+**token da API central** (autentica o agente nos envios de execução
+e heartbeat) — distinto da **senha do repositório Restic**, que é
+outra credencial e protege os dados cifrados. Se o token for
+perdido, emita uma nova credencial e revogue a anterior — ela não
+pode ser reexibida. A revogação é imediata: a mesma credencial passa
+a ser rejeitada nas chamadas do agente.
 
 ## Requisitos
 

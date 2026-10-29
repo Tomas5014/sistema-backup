@@ -299,3 +299,96 @@ describe("respostas atrasadas", () => {
     expect(document.body.textContent ?? "").not.toContain("Fantasma");
   });
 });
+
+describe("cadastro pendente entre clientes", () => {
+  it("POST pendente do cliente A não altera a tela do cliente B", async () => {
+    const clientB = { id: "cli-2", name: "Cliente B", created_at: "2026-10-02T10:00:00Z" };
+    const agentB = { ...AGENT, id: "ag-b", client_id: "cli-2", name: "vm-b" };
+    let releasePostA!: (r: Response) => void;
+    const gatePostA = new Promise<Response>((res) => (releasePostA = res));
+    calls = stubFetch({
+      ...baseRoutes(),
+      "GET /api/v1/clients": () => json([CLIENT, clientB]),
+      "GET /api/v1/clients/cli-2/agents": () => json([agentB]),
+      "POST /api/v1/clients/cli-1/agents": () => gatePostA,
+    });
+    portal("/clients/cli-1");
+    await screen.findByText(/Acme Ltda/);
+    // cadastro de A iniciado e PENDENTE
+    await userEvent.click(screen.getByRole("button", { name: "Novo agente" }));
+    await userEvent.type(screen.getByLabelText("Nome do agente"), "vm-a-pendente");
+    await userEvent.click(screen.getByRole("button", { name: "Cadastrar" }));
+    // navegação REAL para o cliente B (mesma árvore de componentes)
+    await userEvent.click(screen.getByRole("link", { name: "← Clientes" }));
+    await screen.findByText("Cliente B");
+    await userEvent.click(screen.getByRole("link", { name: "Cliente B" }));
+    expect(await screen.findByRole("heading")).toHaveTextContent(/Cliente B/);
+    await screen.findByText("vm-b");
+    // libera a resposta atrasada do POST de A — tela de B permanece
+    await act(async () =>
+      releasePostA(
+        json({ id: "ag-a", client_id: "cli-1", name: "vm-a-pendente",
+               created_at: "x", last_seen_at: null }, 201),
+      ),
+    );
+    expect(screen.getByRole("heading")).toHaveTextContent(/Cliente B/);
+    expect(screen.getByText("vm-b")).toBeInTheDocument();
+    expect(screen.queryByText(/vinculado/)).toBeNull();
+  });
+});
+
+describe("agente além da primeira página", () => {
+  const farClient = { id: "cli-far", name: "Cliente Distante", created_at: "x" };
+  const farAgent = {
+    id: "ag-far", client_id: "cli-far", name: "vm-501",
+    created_at: "x", last_seen_at: null,
+  };
+  const filler = (n: number, mk: (i: number) => object) =>
+    new Array(n).fill(null).map((_, i) => mk(i));
+
+  /** Stub paginado real: corta por limit/offset como a API faz. */
+  function paginated<T extends object>(rows: T[]) {
+    return (_init?: RequestInit, url?: URL) => {
+      const limit = Number(url?.searchParams.get("limit") ?? 50);
+      const offset = Number(url?.searchParams.get("offset") ?? 0);
+      return json(rows.slice(offset, offset + limit));
+    };
+  }
+
+  const manyAgents = [
+    ...filler(500, (i) => ({ ...AGENT, id: `filler-${i}`, name: `f${i}` })),
+    farAgent,
+  ];
+  const manyClients = [
+    ...filler(500, (i) => ({ ...CLIENT, id: `cf-${i}`, name: `cf${i}` })),
+    farClient,
+  ];
+
+  it("resolve agente na posição 501 com nome, cliente e emissão", async () => {
+    calls = stubFetch({
+      ...baseRoutes(),
+      "GET /api/v1/agents": paginated(manyAgents),
+      "GET /api/v1/clients": paginated(manyClients),
+      "GET /api/v1/agents/ag-far/credentials": () => json([CRED]),
+    });
+    portal("/agents/ag-far");
+    expect(await screen.findByText(/Cliente Distante/)).toBeInTheDocument();
+    expect(screen.getByText("vm-501")).toBeInTheDocument();
+    expect(screen.getByText("ag-far")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Emitir credencial" }),
+    ).toBeInTheDocument();
+  });
+
+  it("agente inexistente mostra estado explícito", async () => {
+    calls = stubFetch({
+      ...baseRoutes(),
+      "GET /api/v1/agents": paginated(manyAgents.slice(0, 500)),
+      "GET /api/v1/agents/ag-fantasma/credentials": () => json([]),
+    });
+    portal("/agents/ag-fantasma");
+    await waitFor(() =>
+      expect(screen.getByText("Agente não encontrado.")).toBeInTheDocument(),
+    );
+  });
+});

@@ -2,7 +2,10 @@
 
 import { vi } from "vitest";
 
-type Handler = (init?: RequestInit) => Response | Promise<Response>;
+type Handler = (
+  init?: RequestInit,
+  url?: URL,
+) => Response | Promise<Response>;
 
 export const OPERATOR = {
   id: "op-1",
@@ -48,7 +51,7 @@ export function stubFetch(routes: Record<string, Handler>) {
       }
       const handler = routes[key] ?? routes[`${method} *`];
       if (!handler) return json({ detail: `rota não simulada: ${key}` }, 500);
-      return handler(init);
+      return handler(init, url);
     }),
   );
   return calls;

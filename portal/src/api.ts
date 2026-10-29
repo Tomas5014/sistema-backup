@@ -293,6 +293,28 @@ export async function listClientAgents(
   return (await r.json()) as AgentRow[];
 }
 
+/** Resolve um agente varrendo a paginação — não há GET por id. */
+export async function findAgent(id: string): Promise<AgentRow | null> {
+  const PAGE_SIZE = 500;
+  for (let offset = 0; ; offset += PAGE_SIZE) {
+    const page = await listAgents(undefined, PAGE_SIZE, offset);
+    const found = page.find((a) => a.id === id);
+    if (found) return found;
+    if (page.length < PAGE_SIZE) return null; // página curta = fim
+  }
+}
+
+/** Resolve um cliente varrendo a paginação — não há GET por id. */
+export async function findClient(id: string): Promise<ClientRow | null> {
+  const PAGE_SIZE = 500;
+  for (let offset = 0; ; offset += PAGE_SIZE) {
+    const page = await listClients(PAGE_SIZE, offset);
+    const found = page.find((c) => c.id === id);
+    if (found) return found;
+    if (page.length < PAGE_SIZE) return null;
+  }
+}
+
 export async function listCredentials(
   agentId: string,
 ): Promise<CredentialInfo[]> {

@@ -209,7 +209,7 @@ export function ClientAgentsPage() {
       </p>
       <h1>Agentes {clientName ? `de ${clientName}` : "do cliente"}</h1>
       {operator?.role === "admin" && clientId ? (
-        <NewAgentForm clientId={clientId} clientName={clientName} onCreated={() => void load()} />
+        <NewAgentForm key={clientId} clientId={clientId} clientName={clientName} onCreated={() => void load()} />
       ) : null}
       {error ? <ErrorState message={error} onRetry={() => void load()} /> : null}
       {agents === null && !error ? <Loading /> : null}
@@ -263,12 +263,8 @@ function NewAgentForm({
       alive.current = false;
     };
   }, []);
-  // trocou de cliente → formulário e confirmação do anterior somem
-  useEffect(() => {
-    setCreated(null);
-    setError(null);
-    setOpen(false);
-  }, [clientId]);
+  // o componente é remontado por key={clientId} ao trocar de cliente —
+  // alive=false faz a resposta pendente de A ser descartada em B
 
   async function submit(ev: FormEvent) {
     ev.preventDefault();

@@ -10,8 +10,8 @@ import { Link, useParams } from "react-router-dom";
 import {
   ApiError,
   createCredential,
-  listAgents,
-  listClients,
+  findAgent,
+  findClient,
   listCredentials,
   revokeCredential,
   type AgentRow,
@@ -37,19 +37,21 @@ export function AgentCredentialsPage() {
     const wanted = agentId;
     setError(null);
     try {
-      const [clientRows, agentRows, creds] = await Promise.all([
-        listClients(500, 0),
-        listAgents(undefined, 500, 0),
+      // resolve o agente paginando — não há GET por id e a primeira
+      // página pode não contê-lo
+      const [found, creds] = await Promise.all([
+        findAgent(wanted as string),
         listCredentials(wanted as string),
       ]);
       if (gen !== generation.current) return; // agente já mudou
-      const found = agentRows.find((a) => a.id === wanted) ?? null;
       setAgent(found);
-      setClientName(
-        found
-          ? (clientRows.find((c) => c.id === found.client_id)?.name ?? null)
-          : null,
-      );
+      if (found) {
+        const client = await findClient(found.client_id);
+        if (gen !== generation.current) return;
+        setClientName(client?.name ?? null);
+      } else {
+        setClientName(null);
+      }
       setRows(creds);
     } catch (err) {
       if (gen !== generation.current) return;
@@ -79,6 +81,9 @@ export function AgentCredentialsPage() {
         </Link>
       </p>
       <h1>Credenciais do agente</h1>
+      {rows !== null && agent === null && !error ? (
+        <EmptyState message="Agente não encontrado." />
+      ) : null}
       {agent ? (
         <p className="form-context">
           Agente <strong>{agent.name}</strong>{" "}
