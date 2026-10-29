@@ -1,20 +1,24 @@
 /** Clientes: lista paginada + agentes do cliente selecionado. */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
   ApiError,
-  listAgents,
+  createAgent,
+  createClient,
+  listClientAgents,
   listClients,
   type AgentRow,
   type ClientRow,
 } from "../api";
+import { useAuth } from "../auth";
 import { formatDate } from "../format";
 import { EmptyState, ErrorState, Loading, Pagination } from "../components/common";
 
 const PAGE = 50;
 
 export function ClientsPage() {
+  const { operator } = useAuth();
   const [rows, setRows] = useState<ClientRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [offset, setOffset] = useState(0);
@@ -42,6 +46,9 @@ export function ClientsPage() {
   return (
     <main className="page">
       <h1>Clientes</h1>
+      {operator?.role === "admin" ? (
+        <NewClientForm onCreated={() => void load(offset)} />
+      ) : null}
       {error ? <ErrorState message={error} onRetry={() => void load(offset)} /> : null}
       {rows === null && !error ? <Loading /> : null}
       {rows !== null && rows.length === 0 && offset === 0 ? (
@@ -74,8 +81,93 @@ export function ClientsPage() {
   );
 }
 
+function NewClientForm({ onCreated }: { onCreated: (c: ClientRow) => void }) {
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [created, setCreated] = useState<ClientRow | null>(null);
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
+
+  async function submit(ev: FormEvent) {
+    ev.preventDefault();
+    if (pending) return; // bloqueio de envio duplicado
+    setPending(true);
+    setError(null);
+    try {
+      const client = await createClient(name.trim());
+      if (!alive.current) return;
+      setCreated(client);
+      setName("");
+      onCreated(client);
+    } catch (err) {
+      if (!alive.current) return;
+      setError(err instanceof ApiError ? err.message : "Falha inesperada.");
+    } finally {
+      if (alive.current) setPending(false);
+    }
+  }
+
+  if (!open && created === null) {
+    return (
+      <p>
+        <button type="button" className="btn btn-primary" onClick={() => setOpen(true)}>
+          Novo cliente
+        </button>
+      </p>
+    );
+  }
+  if (created !== null) {
+    return (
+      <div className="success-state" role="status">
+        <p>
+          Cliente <strong>{created.name}</strong> criado.{" "}
+          <Link to={`/clients/${created.id}`}>Abrir o cliente →</Link>{" "}
+          <button
+            type="button"
+            className="btn"
+            onClick={() => {
+              setCreated(null);
+              setOpen(false);
+            }}
+          >
+            Fechar
+          </button>
+        </p>
+      </div>
+    );
+  }
+  return (
+    <form className="form-inline" onSubmit={submit}>
+      <label htmlFor="new-client-name">Nome do cliente</label>
+      <input
+        id="new-client-name"
+        value={name}
+        onChange={(ev) => setName(ev.target.value)}
+        required
+        autoFocus
+        disabled={pending}
+      />
+      <button type="submit" className="btn btn-primary" disabled={pending || !name.trim()}>
+        {pending ? "Cadastrando…" : "Cadastrar"}
+      </button>
+      <button type="button" className="btn" disabled={pending} onClick={() => setOpen(false)}>
+        Cancelar
+      </button>
+      {error ? <p className="error-state" role="alert">{error}</p> : null}
+    </form>
+  );
+}
+
 export function ClientAgentsPage() {
   const { clientId } = useParams<{ clientId: string }>();
+  const { operator } = useAuth();
   const [agents, setAgents] = useState<AgentRow[] | null>(null);
   const [clientName, setClientName] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -89,7 +181,7 @@ export function ClientAgentsPage() {
     try {
       const [clientRows, agentRows] = await Promise.all([
         listClients(500, 0),
-        listAgents(wanted, 200, 0),
+        listClientAgents(wanted as string, 200, 0),
       ]);
       if (gen !== generation.current) return; // rota já mudou
       setClientName(
@@ -116,6 +208,9 @@ export function ClientAgentsPage() {
         <Link to="/clients">← Clientes</Link>
       </p>
       <h1>Agentes {clientName ? `de ${clientName}` : "do cliente"}</h1>
+      {operator?.role === "admin" && clientId ? (
+        <NewAgentForm clientId={clientId} clientName={clientName} onCreated={() => void load()} />
+      ) : null}
       {error ? <ErrorState message={error} onRetry={() => void load()} /> : null}
       {agents === null && !error ? <Loading /> : null}
       {agents !== null && agents.length === 0 ? (
@@ -133,7 +228,9 @@ export function ClientAgentsPage() {
           <tbody>
             {agents.map((agent) => (
               <tr key={agent.id}>
-                <td>{agent.name}</td>
+                <td>
+                  <Link to={`/agents/${agent.id}`}>{agent.name}</Link>
+                </td>
                 <td>{formatDate(agent.last_seen_at)}</td>
                 <td>{formatDate(agent.created_at)}</td>
               </tr>
@@ -142,5 +239,99 @@ export function ClientAgentsPage() {
         </table>
       ) : null}
     </main>
+  );
+}
+
+function NewAgentForm({
+  clientId,
+  clientName,
+  onCreated,
+}: {
+  clientId: string;
+  clientName: string | null;
+  onCreated: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [created, setCreated] = useState<AgentRow | null>(null);
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
+  // trocou de cliente → formulário e confirmação do anterior somem
+  useEffect(() => {
+    setCreated(null);
+    setError(null);
+    setOpen(false);
+  }, [clientId]);
+
+  async function submit(ev: FormEvent) {
+    ev.preventDefault();
+    if (pending) return; // bloqueio de envio duplicado
+    setPending(true);
+    setError(null);
+    try {
+      const agent = await createAgent(clientId, name.trim());
+      if (!alive.current || agent.client_id !== clientId) return;
+      setCreated(agent);
+      setName("");
+      onCreated();
+    } catch (err) {
+      if (!alive.current) return;
+      setError(err instanceof ApiError ? err.message : "Falha inesperada.");
+    } finally {
+      if (alive.current) setPending(false);
+    }
+  }
+
+  if (!open && created === null) {
+    return (
+      <p>
+        <button type="button" className="btn btn-primary" onClick={() => setOpen(true)}>
+          Novo agente
+        </button>
+      </p>
+    );
+  }
+  if (created !== null) {
+    return (
+      <div className="success-state" role="status">
+        <p>
+          Agente <strong>{created.name}</strong> vinculado.{" "}
+          <Link to={`/agents/${created.id}`}>Credenciais do agente →</Link>{" "}
+          <button type="button" className="btn" onClick={() => setCreated(null)}>
+            Fechar
+          </button>
+        </p>
+      </div>
+    );
+  }
+  return (
+    <form className="form-inline" onSubmit={submit}>
+      <p className="form-context">
+        Novo agente para o cliente <strong>{clientName ?? clientId}</strong>
+      </p>
+      <label htmlFor="new-agent-name">Nome do agente</label>
+      <input
+        id="new-agent-name"
+        value={name}
+        onChange={(ev) => setName(ev.target.value)}
+        required
+        autoFocus
+        disabled={pending}
+      />
+      <button type="submit" className="btn btn-primary" disabled={pending || !name.trim()}>
+        {pending ? "Cadastrando…" : "Cadastrar"}
+      </button>
+      <button type="button" className="btn" disabled={pending} onClick={() => setOpen(false)}>
+        Cancelar
+      </button>
+      {error ? <p className="error-state" role="alert">{error}</p> : null}
+    </form>
   );
 }

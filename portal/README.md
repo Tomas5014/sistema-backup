@@ -16,9 +16,24 @@ com a API.
   paginação `limit`/`offset` — a API não devolve total global, então o
   portal não inventa um.
 - Detalhe por UUID central com destinos e tentativas.
+- **Cadastramento** (admin): cliente novo a partir da listagem; agente
+  novo no contexto do cliente selecionado.
+- **Credenciais do agente** (admin): listagem com descrição/criação/
+  revogação, emissão com descrição e revogação confirmada.
 
 Fora do escopo: administração de operadores, distribuição de tarefas,
 configuração de backups, comandos remotos.
+
+## Custódia da credencial emitida
+
+O token aparece UMA vez, numa apresentação temporária — o servidor
+guarda só o hash e o portal não persiste o valor (nada de
+localStorage/sessionStorage/URL/caches). Copie-o imediatamente para a
+configuração do agente (`credential_name` → keyctl/EnvironmentFile,
+ver README do agente) e feche a janela. Se o token for perdido, emita
+uma nova credencial e revogue a anterior — ela não pode ser
+reexibida. A revogação é imediata: a mesma credencial passa a ser
+rejeitada nas chamadas do agente.
 
 ## Requisitos
 
@@ -106,3 +121,10 @@ Para homologação local, `vite preview` (ou `npm run preview`) serve
   `execution_id` que o agente envia.
 - **Filtros na URL**: voltar do detalhe preserva a busca; respostas
   antigas são descartadas quando filtros mudam rápido.
+- **Escrita só para admin**: formulários e ações aparecem apenas com
+  `role=admin`; toda escrita leva `X-CSRF-Token`; envio duplicado é
+  bloqueado enquanto a operação está pendente; resultado incerto na
+  emissão (rede) orienta conferir a listagem em vez de repetir o POST.
+- **Token de credencial efêmero**: renderizado só no diálogo pós-emissão;
+  copiado somente por gesto explícito; fechar/sair/trocar de agente o
+  descarta.

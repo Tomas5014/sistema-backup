@@ -126,3 +126,14 @@ input, select {
   .detail-grid dd { margin-bottom: .4rem; }
   .topbar { gap: .75rem; }
 }
+
+/* cadastramento + apresentação temporária de token */
+.form-inline { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin-bottom: 1rem; }
+.form-inline label { font-weight: 500; }
+.form-context { flex-basis: 100%; margin: 0 0 .25rem; color: var(--muted); }
+.success-state { background: #e8f6ec; border: 1px solid #b7e3c3; border-radius: 6px; padding: .6rem .8rem; }
+.modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; z-index: 10; }
+.modal { background: #fff; border-radius: 8px; padding: 1.25rem; max-width: 34rem; width: 90%; box-shadow: 0 8px 30px rgba(0,0,0,.3); }
+.token-box { display: flex; align-items: center; gap: .5rem; margin: .8rem 0; }
+.token-box code { flex: 1; overflow-wrap: anywhere; background: #f3f4f6; padding: .5rem; border-radius: 4px; user-select: all; }
+.confirm-inline { display: inline-flex; align-items: center; gap: .4rem; flex-wrap: wrap; }

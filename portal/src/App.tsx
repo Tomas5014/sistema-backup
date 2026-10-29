@@ -2,6 +2,7 @@ import { Route, Routes } from "react-router-dom";
 import { Layout } from "./components/Layout";
 import { LoginPage } from "./pages/LoginPage";
 import { ClientAgentsPage, ClientsPage } from "./pages/ClientsPage";
+import { AgentCredentialsPage } from "./pages/AgentCredentialsPage";
 import { ExecutionsPage } from "./pages/ExecutionsPage";
 import { ExecutionDetailPage } from "./pages/ExecutionDetailPage";
 
@@ -13,6 +14,7 @@ export function App() {
         <Route index element={<ExecutionsPage />} />
         <Route path="/clients" element={<ClientsPage />} />
         <Route path="/clients/:clientId" element={<ClientAgentsPage />} />
+        <Route path="/agents/:agentId" element={<AgentCredentialsPage />} />
         <Route path="/executions" element={<ExecutionsPage />} />
         <Route path="/executions/:id" element={<ExecutionDetailPage />} />
       </Route>

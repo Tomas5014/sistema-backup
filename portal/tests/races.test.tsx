@@ -87,9 +87,11 @@ function NavButton({ to }: { to: string }) {
 function renderWithRoutes(initial: string, routes: React.ReactNode) {
   return render(
     <MemoryRouter initialEntries={[initial]}>
-      <Routes>{routes}</Routes>
-      <NavButton to="/executions/B" />
-      <NavButton to="/clients/cb" />
+      <AuthProvider>
+        <Routes>{routes}</Routes>
+        <NavButton to="/executions/B" />
+        <NavButton to="/clients/cb" />
+      </AuthProvider>
     </MemoryRouter>,
   );
 }
@@ -394,11 +396,8 @@ describe("agentes do cliente: dados presos à rota", () => {
     controlledFetch({
       "GET /api/v1/clients": () =>
         json([client("ca", "Cliente A"), client("cb", "Cliente B")]),
-      "GET /api/v1/agents": (() => {
-        const perCall = [agentsA.promise, agentsB.promise];
-        let n = 0;
-        return () => perCall[Math.min(n++, 1)];
-      })(),
+      "GET /api/v1/clients/ca/agents": () => agentsA.promise,
+      "GET /api/v1/clients/cb/agents": () => agentsB.promise,
     });
     renderWithRoutes("/clients/ca", (
       <Route path="/clients/:clientId" element={<ClientAgentsPage />} />

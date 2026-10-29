@@ -1720,3 +1720,25 @@ Backup/restore: 15 execuções, 11 operadores e 10 agentes preservados.
 - Nova contagem: 168 simuladas + 22 reais = 190 asserções.
 
 ---
+## portal: cadastramento de clientes/agentes + gestão de credenciais
+
+- "Novo cliente" (admin) na listagem — formulário com validação,
+  erro do servidor visível, link "Abrir o cliente" mesmo fora da
+  página atual.
+- "Novo agente" no contexto do cliente (cliente citado no
+  formulário) — vínculo por POST /clients/{id}/agents; agente vira
+  link para a tela de credenciais.
+- /agents/{id}: contexto cliente+agente+id, listagem com descrição/
+  criação/estado, emissão com label, token em diálogo temporário
+  (Copiar por gesto explícito + falha de cópia informada; aviso de
+  consulta única; descarte ao fechar/sair/trocar), revogação com
+  confirmação nominal e estado atualizado sem ação duplicada.
+- Todo POST com CSRF; pending bloqueia envio duplicado; falha de
+  rede na emissão vira "resultado incerto — consulte a listagem";
+  respostas atrasadas descartadas por geração/agente.
+- Token nunca em storage/URL/console — existe só em estado React.
+- Testes: 15 unitários novos (51 total); e2e novo: login → cliente →
+  agente → emite → heartbeat 204 → revoga → heartbeat rejeitado
+  (API+PG17 descartáveis).
+
+---

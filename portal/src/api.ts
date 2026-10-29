@@ -245,3 +245,79 @@ export async function getExecution(id: string): Promise<ExecutionDetail> {
   const r = await apiFetch(`/api/v1/executions/${encodeURIComponent(id)}`);
   return (await r.json()) as ExecutionDetail;
 }
+
+// ---- cadastramento e credenciais (escrita = admin + CSRF) ---------
+
+export interface CredentialInfo {
+  id: string;
+  agent_id: string;
+  label: string | null;
+  created_at: string;
+  revoked_at: string | null;
+}
+
+export interface CredentialOut {
+  credential_id: string;
+  agent_id: string;
+  token: string; // entregue UMA vez — nunca persista
+}
+
+export async function createClient(name: string): Promise<ClientRow> {
+  const r = await apiFetch("/api/v1/clients", {
+    method: "POST",
+    body: { name },
+    csrf: true,
+  });
+  return (await r.json()) as ClientRow;
+}
+
+export async function createAgent(
+  clientId: string,
+  name: string,
+): Promise<AgentRow> {
+  const r = await apiFetch(
+    `/api/v1/clients/${encodeURIComponent(clientId)}/agents`,
+    { method: "POST", body: { name }, csrf: true },
+  );
+  return (await r.json()) as AgentRow;
+}
+
+export async function listClientAgents(
+  clientId: string,
+  limit = 200,
+  offset = 0,
+): Promise<AgentRow[]> {
+  const r = await apiFetch(
+    `/api/v1/clients/${encodeURIComponent(clientId)}/agents?limit=${limit}&offset=${offset}`,
+  );
+  return (await r.json()) as AgentRow[];
+}
+
+export async function listCredentials(
+  agentId: string,
+): Promise<CredentialInfo[]> {
+  const r = await apiFetch(
+    `/api/v1/agents/${encodeURIComponent(agentId)}/credentials`,
+  );
+  return (await r.json()) as CredentialInfo[];
+}
+
+export async function createCredential(
+  agentId: string,
+  label: string | null,
+): Promise<CredentialOut> {
+  const r = await apiFetch(
+    `/api/v1/agents/${encodeURIComponent(agentId)}/credentials`,
+    { method: "POST", body: { label }, csrf: true },
+  );
+  return (await r.json()) as CredentialOut;
+}
+
+export async function revokeCredential(
+  credentialId: string,
+): Promise<void> {
+  await apiFetch(
+    `/api/v1/credentials/${encodeURIComponent(credentialId)}/revoke`,
+    { method: "POST", csrf: true },
+  );
+}
