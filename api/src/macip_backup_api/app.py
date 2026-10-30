@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import secrets
 import uuid
 from datetime import UTC, datetime
@@ -101,44 +102,61 @@ from .schemas import (
 )
 
 
-_SENSITIVE_FIELDS = {
-    "password", "password_hash", "token", "session", "cookie",
-    "authorization", "secret", "senha",
-}
+# Chaves cujo VALOR é segredo — substrings deliberadamente largas:
+# basta não ser suficiente reconhecer "password"/"secret"; chaves como
+# private_key/access_key/identity_file e campos desconhecidos com
+# sentinela também são mascaradas. Campos públicos como keep_*/,
+# bucket e kind não casam com o padrão.
+_SECRET_KEY_RE = re.compile(
+    r"password|passwd|senha|secret|token|cookie|authorization|"
+    r"credential|private|api_?key|access_?key|secret_?key|identity|"
+    r"session|_key\b"
+)
+_URL_USERINFO_RE = re.compile(r"(://)([^/@\s]+)@")
+
+
+def _secret_key(name: object) -> bool:
+    return bool(_SECRET_KEY_RE.search(str(name).lower()))
 
 
 def _scrub_input(value: object) -> object:
-    """Remove valores sob chaves sensíveis em qualquer profundidade —
-    listas e dicionários aninhados incluídos."""
+    """Remove valores sob chaves sensíveis e credenciais embutidas em
+    URL — em qualquer profundidade de listas e dicionários aninhados."""
     if isinstance(value, dict):
         return {
-            key: ("***" if str(key).lower() in _SENSITIVE_FIELDS
-                  else _scrub_input(item))
+            key: ("***" if _secret_key(key) else _scrub_input(item))
             for key, item in value.items()
         }
     if isinstance(value, (list, tuple)):
         return [_scrub_input(item) for item in value]
+    if isinstance(value, str):
+        # https://usuario:SENHA@host → https://***@host
+        return _URL_USERINFO_RE.sub(r"\1***@", value)
     return value
 
 
 def _mask_sensitive(error: dict) -> dict:
-    """Segredos nunca voltam no `input` de um 422.
+    """Segredos nunca voltam no `input`/`ctx`/`msg` de um 422.
 
     Erro na RAIZ do corpo (loc = só "body") pode devolver o payload
     inteiro — uma lista com senha ou a própria string-senha. Não há
     chave para mascarar: o input some. Erros em campos nomeados
-    mantêm o input, com valores sensíveis escavados e mascarados.
+    mantêm o input, com valores sensíveis escavados e mascarados —
+    inclusive campos DESCONHECIDOS com nome de segredo (extra=forbid)
+    e credenciais embutidas em URLs.
     """
-    if "input" not in error:
-        return error
     loc = [str(part).lower() for part in error.get("loc", ())]
     inner = [part for part in loc if part not in {"body", "query", "path"}]
-    if not inner:
-        error.pop("input", None)  # eco do corpo inteiro — pode ser o segredo
-    elif set(inner) & _SENSITIVE_FIELDS:
-        error["input"] = "***"
-    else:
-        error["input"] = _scrub_input(error["input"])
+    if "input" in error:
+        if not inner:
+            error.pop("input", None)  # eco do corpo inteiro
+        elif any(_secret_key(part) for part in inner):
+            error["input"] = "***"
+        else:
+            error["input"] = _scrub_input(error["input"])
+    for key in ("ctx", "msg"):
+        if key in error:
+            error[key] = _scrub_input(error[key])
     return error
 
 
@@ -479,6 +497,7 @@ def create_app() -> FastAPI:
             revision=1,
             contract_version=CONTRACT_VERSION,
             config=config_doc,
+            client_name=agent.client.name,
             author_kind=identity.kind,
             author_ref=identity.ref,
         )
@@ -539,9 +558,24 @@ def create_app() -> FastAPI:
         identity: AdminIdentity = Depends(require_admin_identity),
         db: Session = Depends(session),
     ) -> dict:
-        task = _get_task(db, task_id)
+        # FOR UPDATE serializa TODA transição de escrita na linha da
+        # tarefa: edição vs arquivamento vs salvamento idêntico leem o
+        # estado vigente de forma atômica — sem janela check→update.
+        task = db.execute(
+            select(Task)
+            .where(Task.id == task_id)
+            .with_for_update()
+        ).scalar_one_or_none()
+        if task is None:
+            raise HTTPException(404, "tarefa inexistente")
         if task.archived_at is not None:
             raise HTTPException(409, "tarefa arquivada não aceita novas revisões")
+        if task.current_revision != payload.expected_revision:
+            raise HTTPException(
+                409,
+                f"a tarefa já está na revisão {task.current_revision} — "
+                "há uma edição mais recente; recarregue antes de salvar",
+            )
         config_doc = _revision_config(payload.config)
         current = db.execute(
             select(TaskRevision).where(
@@ -550,41 +584,35 @@ def create_app() -> FastAPI:
             )
         ).scalar_one()
         if normalize(current.config) == normalize(config_doc):
-            # salvamento idêntico com expected válido → nenhuma revisão extra
-            if payload.expected_revision == task.current_revision:
-                task_out = _task_out(task)
-                task_out["revision"] = _revision_out(current)
-                task_out["unchanged"] = True
-                return task_out
-        # conflito otimista: o ponteiro só avança se ainda estiver na
-        # revisão esperada — a vencedora é preservada
-        bumped = db.execute(
-            update(Task)
-            .where(
-                Task.id == task.id,
-                Task.current_revision == payload.expected_revision,
-            )
-            .values(
-                current_revision=payload.expected_revision + 1,
-                name=config_doc["name"],
-            )
-        )
-        if bumped.rowcount == 0:
-            raise HTTPException(
-                409,
-                f"a tarefa já está na revisão {task.current_revision} — "
-                "há uma edição mais recente; recarregue antes de salvar",
-            )
+            # salvamento idêntico: a expected já foi revalidada SOB o
+            # lock acima — nenhuma revisão extra é criada
+            task_out = _task_out(task)
+            task_out["revision"] = _revision_out(current)
+            task_out["unchanged"] = True
+            db.commit()  # libera o lock sem alterar nada
+            return task_out
+        # esperada conferida sob lock — ponteiro + revisão na MESMA
+        # transação; o vencedor fica intacto, o perdedor recebe 409
+        task.current_revision = payload.expected_revision + 1
+        task.name = config_doc["name"]
         revision = TaskRevision(
             task_id=task.id,
             revision=payload.expected_revision + 1,
             contract_version=CONTRACT_VERSION,
             config=config_doc,
+            client_name=task.agent.client.name,
             author_kind=identity.kind,
             author_ref=identity.ref,
         )
         db.add(revision)
-        db.commit()  # ponteiro + revisão na MESMA transação
+        try:
+            db.commit()
+        except IntegrityError:
+            # unicidade (task_id, revision) é o último guardião
+            db.rollback()
+            raise HTTPException(
+                409, "a tarefa já está em revisão mais recente"
+            )
         db.refresh(task)
         result = _task_out(task)
         result["revision"] = _revision_out(revision)
@@ -654,12 +682,13 @@ def create_app() -> FastAPI:
         task = _get_task(db, task_id)
         revision = _get_revision(db, task, revision_number)
         agent = db.get(Agent, task.agent_id)
-        client = db.get(Client, agent.client_id)
         document = export_taskspec(
             task_id=task.id,
             name=revision.config["name"],
-            client_id=client.id,
-            client_name=client.name,
+            client_id=agent.client_id,
+            # snapshot gravado na revisão — o nome ATUAL do cliente é
+            # editável e não pode vazar para o histórico
+            client_name=revision.client_name or agent.client.name,
             agent_id=agent.id,
             spec=revision.config["spec"],
         )
@@ -682,7 +711,13 @@ def create_app() -> FastAPI:
     ) -> dict:
         """Arquiva o cadastro — revisões preservadas, sem exclusão física.
         Não desliga backups agendados já instalados no agente."""
-        task = _get_task(db, task_id)
+        task = db.execute(
+            select(Task)
+            .where(Task.id == task_id)
+            .with_for_update()
+        ).scalar_one_or_none()
+        if task is None:
+            raise HTTPException(404, "tarefa inexistente")
         if task.archived_at is None:
             task.archived_at = datetime.now(UTC)
             db.commit()

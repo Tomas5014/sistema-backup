@@ -346,3 +346,181 @@ def test_tarefa_inexistente_e_agente_inexistente(client, admin_headers):
     assert client.get(f"/api/v1/tasks/{tid}", headers=admin_headers).status_code == 404
     assert client.post(f"/api/v1/tasks/{tid}/archive",
                        headers=admin_headers).status_code == 404
+
+
+# ---- exportação imutável ------------------------------------------------------
+
+def test_exportacao_historica_nao_depende_do_nome_atual(client, admin_headers):
+    """Exporta rev 1 → renomeia o cliente → exporta rev 1 de novo →
+    documento IDÊNTICO: o nome vem do snapshot da revisão, não do
+    registro editável atual."""
+    client_id, agent_id = create_agent_env(client, admin_headers)
+    task = create_task(client, admin_headers, agent_id).json()
+    url = f"/api/v1/tasks/{task['id']}/revisions/1/export"
+    first = client.get(url, headers=admin_headers)
+    assert first.status_code == 200
+    # renomeia o cliente ATUAL direto no banco (a API não oferece rename)
+    from macip_backup_api import db as db_module
+    with db_module.engine().begin() as conn:
+        conn.execute(text(
+            "UPDATE clients SET name='Nome renomeado depois' WHERE id=:c"),
+            {"c": client_id})
+    second = client.get(url, headers=admin_headers)
+    assert second.status_code == 200
+    assert second.json() == first.json()
+    assert second.json()["client"]["name"] != "Nome renomeado depois"
+
+
+# ---- corridas reais com sessões independentes + locks -------------------------
+#
+# Mecanismo: uma sessão EXTERNA segura `SELECT … FOR UPDATE` na linha da
+# tarefa; as chamadas HTTP (cada uma com a própria sessão) ficam na fila
+# do lock — a observação de `pg_locks` prova a ordem na fila; a ordem de
+# destravamento do PG é FIFO. Sem sleeps arbitrários: esperamos o lock
+# pendente aparecer, não um relógio.
+
+
+import threading  # noqa: E402
+import time  # noqa: E402
+
+from sqlalchemy import create_engine  # noqa: E402
+
+from tests.conftest import TEST_URL  # noqa: E402
+
+
+def _wait_lock_waiters(engine, minimum: int, timeout: float = 10.0):
+    """Espera `minimum` locks NÃO concedidos aparecerem — prova de que
+    as threads estão enfileiradas na linha da tarefa."""
+    deadline = time.monotonic() + timeout
+    with engine.connect() as conn:
+        while time.monotonic() < deadline:
+            # transactionid/tuple conforme a forma do FOR UPDATE —
+            # o que importa é a espera, não o tipo
+            waiting = conn.execute(text(
+                "SELECT count(*) FROM pg_locks WHERE NOT granted"
+            )).scalar_one()
+            if waiting >= minimum:
+                return
+            time.sleep(0.02)
+    raise AssertionError(f"esperados {minimum} locks pendentes")
+
+
+def _race(client, admin_headers, task_id, calls):
+    """Trava a linha FOR UPDATE, enfileira `calls` na ordem dada e
+    solta. Retorna as respostas na ordem de ENFILEIRAMENTO."""
+    engine = create_engine(TEST_URL)
+    holder = engine.connect()
+    holder.execute(text("BEGIN"))
+    holder.execute(text("SELECT id FROM tasks WHERE id=:t FOR UPDATE"),
+                   {"t": task_id})
+    results: dict[int, object] = {}
+    threads = []
+    try:
+        for index, call in enumerate(calls):
+            def run(i=index, c=call):
+                results[i] = c()
+            thread = threading.Thread(target=run, daemon=True)
+            thread.start()
+            threads.append(thread)
+            _wait_lock_waiters(engine, index + 1)
+    finally:
+        holder.execute(text("ROLLBACK"))  # libera o lock mesmo se espera falhar
+        holder.close()
+    for thread in threads:
+        thread.join(timeout=15)
+        assert not thread.is_alive(), "resposta HTTP travada"
+    engine.dispose()
+    return [results[i] for i in range(len(calls))]
+
+
+def _edit_call(client_, task_id, name, headers, expected=1):
+    return lambda: client_.post(
+        f"/api/v1/tasks/{task_id}/revisions",
+        json={"expected_revision": expected,
+              "config": task_payload(name=name)},
+        headers=headers,
+    )
+
+
+def _archive_call(client_, task_id, headers):
+    return lambda: client_.post(
+        f"/api/v1/tasks/{task_id}/archive",
+        headers=headers,
+    )
+
+
+def test_corrida_duas_edicoes_um_201_um_409(client, admin_headers):
+    """Duas edições da MESMA revisão em sessões independentes: a fila
+    do lock decide a ordem — uma vence, outra recebe 409 limpo."""
+    _, agent_id = create_agent_env(client, admin_headers)
+    task = create_task(client, admin_headers, agent_id).json()
+    a, b = _race(client, admin_headers, task["id"], [
+        _edit_call(client, task["id"], "edição vencedora", admin_headers),
+        _edit_call(client, task["id"], "edição perdedora", admin_headers),
+    ])
+    assert a.status_code == 201, a.text
+    assert b.status_code == 409, b.text
+    got = client.get(f"/api/v1/tasks/{task['id']}",
+                     headers=admin_headers).json()
+    assert got["revision"]["config"]["name"] == "edição vencedora"
+    assert got["current_revision"] == 2
+    revs = client.get(f"/api/v1/tasks/{task['id']}/revisions",
+                      headers=admin_headers).json()
+    assert len(revs) == 2  # nenhuma revisão órfã do perdedor
+
+
+def test_corrida_arquivamento_vence_antes_da_edicao(client, admin_headers):
+    _, agent_id = create_agent_env(client, admin_headers)
+    task = create_task(client, admin_headers, agent_id).json()
+    arq, edicao = _race(client, admin_headers, task["id"], [
+        _archive_call(client, task["id"], admin_headers),
+        _edit_call(client, task["id"], "edição tardia", admin_headers),
+    ])
+    assert arq.status_code == 200 and arq.json()["archived"] is True
+    assert edicao.status_code == 409, edicao.text
+    # nenhuma revisão nova: o ponteiro ficou em 1
+    got = client.get(f"/api/v1/tasks/{task['id']}",
+                     headers=admin_headers).json()
+    assert got["current_revision"] == 1
+    assert got["archived"] is True
+
+
+def test_corrida_edicao_vence_antes_do_arquivamento(client, admin_headers):
+    _, agent_id = create_agent_env(client, admin_headers)
+    task = create_task(client, admin_headers, agent_id).json()
+    edicao, arq = _race(client, admin_headers, task["id"], [
+        _edit_call(client, task["id"], "edição vencedora", admin_headers),
+        _archive_call(client, task["id"], admin_headers),
+    ])
+    assert edicao.status_code == 201, edicao.text
+    assert arq.status_code == 200 and arq.json()["archived"] is True
+    got = client.get(f"/api/v1/tasks/{task['id']}",
+                     headers=admin_headers).json()
+    assert got["current_revision"] == 2
+    assert got["revision"]["config"]["name"] == "edição vencedora"
+    revs = client.get(f"/api/v1/tasks/{task['id']}/revisions",
+                      headers=admin_headers).json()
+    assert len(revs) == 2  # rev2 + rev1 preservada
+
+
+def test_salvamento_identico_nao_confirma_expected_obsoleta(
+        client, admin_headers):
+    """Conteúdo IDÊNTICO ao atual mas expected_revision já vencida:
+    depois que outra edição avança o ponteiro, o salvamento idêntico
+    também precisa receber 409 — não um 'unchanged' enganoso."""
+    _, agent_id = create_agent_env(client, admin_headers)
+    task = create_task(client, admin_headers, agent_id).json()
+    # corrida: vencedor sobe para rev 2; perdedor manda o MESMO
+    # documento com expected=1 — deve ser 409, nunca 200 "unchanged"
+    vencedor, identico = _race(client, admin_headers, task["id"], [
+        _edit_call(client, task["id"], "edição que avança", admin_headers),
+        lambda: client.post(
+            f"/api/v1/tasks/{task['id']}/revisions",
+            json={"expected_revision": 1, "config": task_payload()},
+            headers=admin_headers),
+    ])
+    assert vencedor.status_code == 201
+    assert identico.status_code == 409, identico.text
+    got = client.get(f"/api/v1/tasks/{task['id']}",
+                     headers=admin_headers).json()
+    assert got["current_revision"] == 2

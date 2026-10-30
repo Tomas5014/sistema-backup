@@ -42,6 +42,12 @@ def http_client(monkeypatch):
     app.dependency_overrides[require_agent] = lambda: fake_agent
     app.dependency_overrides[require_admin] = lambda: None
     app.dependency_overrides[require_viewer] = lambda: None
+    # identidade administrativa das rotas de tarefa — validação corre
+    # ANTES da rota, mas a identidade precisa existir como dependência
+    from macip_backup_api.app import AdminIdentity, require_admin_identity
+    app.dependency_overrides[require_admin_identity] = (
+        lambda: AdminIdentity("admin", "bearer")
+    )
     # validação deve ser exercitada SEM passar pelo guard CSRF
     app.dependency_overrides[csrf_guard] = lambda: None
     app.dependency_overrides[csrf_pair_guard] = lambda: None
@@ -253,3 +259,95 @@ def test_erro_de_campo_preserva_localizacao_e_tipo(http_client):
     )
     assert response2.status_code == 422
     assert "999" not in response2.text
+
+
+# ---- segredos em campos de TAREFA não ecoam nos 422 --------------------------
+# Não basta reconhecer "password"/"secret": chaves desconhecidas como
+# private_key/access_key e credenciais embutidas em URL vazavam o valor.
+
+
+def _task_doc(**spec_overrides) -> dict:
+    spec = {
+        "sources": ["/dados"],
+        "destinations": [
+            {"id": "d", "name": "d", "kind": "local",
+             "repository": "/srv/b", "password_environment": "PW"},
+        ],
+    }
+    spec.update(spec_overrides)
+    return {
+        "name": "tarefa-x",
+        "spec": spec,
+        "schedule": {"kind": "manual"},
+    }
+
+
+def _post_task(http_client, doc: dict):
+    return http_client.post(
+        f"/api/v1/agents/{uuid.uuid4()}/tasks",
+        content=json.dumps(doc).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+
+
+@pytest.mark.parametrize("key", [
+    "private_key", "secret_key", "access_key", "api_key",
+    "client_secret", "db_password",
+])
+def test_chave_desconhecida_de_segredo_nao_ecoa_sentinela(http_client, key):
+    """Campo EXTRA com nome de segredo (extra=forbid): o valor era
+    devolvido inteiro em `input` — a sentinela vazava."""
+    doc = _task_doc()
+    doc["spec"]["destinations"][0][key] = "SENTINELA-CHAVE-9001"
+    response = _post_task(http_client, doc)
+    assert response.status_code == 422
+    assert "SENTINELA-CHAVE-9001" not in response.text
+    detail = response.json()["detail"]
+    assert detail[0]["loc"][-1] == key  # localização preservada
+    assert detail[0]["input"] == "***"
+
+
+def test_chave_de_segredo_desconhecida_em_nivel_profundo(http_client):
+    doc = _task_doc()
+    doc["spec"]["destinations"][0]["sftp"] = {
+        "private_key": "SENTINELA-NEST-777",
+        "wrapped": {"secret_key": "SENTINELA-NEST-888"},
+    }
+    response = _post_task(http_client, doc)
+    assert response.status_code == 422
+    assert "SENTINELA-NEST" not in response.text
+
+
+def test_url_com_credencial_embutida_nao_ecoa_senha(http_client):
+    """s3.endpoint com user:senha → rejeitado, e a senha não voltava
+    nem no `input`, nem no `ctx`, nem na `msg`."""
+    doc = _task_doc()
+    doc["spec"]["destinations"] = [{
+        "id": "d", "name": "d", "kind": "s3",
+        "password_environment": "PW",
+        "s3": {
+            "endpoint": "https://user:SENTINELA-URL-4242@minio.test",
+            "bucket": "bkt-abc",
+            "access_key_environment": "AK",
+            "secret_key_environment": "SK",
+        },
+    }]
+    response = _post_task(http_client, doc)
+    assert response.status_code == 422
+    assert "SENTINELA-URL-4242" not in response.text
+    assert "SENTINELA" not in response.text
+    detail = response.json()["detail"]
+    assert detail[0]["loc"][-1] == "s3"
+    # parte legítima da URL pode ficar; a senha nunca
+    assert "minio.test" in response.text or "***" in response.text
+
+
+def test_senha_em_campo_conhecido_em_estrutura_aninhada(http_client):
+    """`password` dentro de `extra`/`nested` — o scrub já cobria;
+    garantido para a forma da tarefa também."""
+    doc = _task_doc()
+    doc["spec"]["destinations"][0]["password"] = "SENTINELA-PLANA-55"
+    response = _post_task(http_client, doc)
+    assert response.status_code == 422
+    assert "SENTINELA-PLANA-55" not in response.text
+    assert response.json()["detail"][0]["input"] == "***"

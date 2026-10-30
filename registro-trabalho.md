@@ -1825,3 +1825,46 @@ Sem distribuição ao agente, sem systemd/agenda aplicada, sem deleção
 física, sem segredos persistidos. Alterações pré-existentes do
 usuário (`atualizações.txt` deletado, `.claude/`, `.trail/`,
 `tarefa-teste.json`) preservadas fora do commit.
+
+---
+
+## 2026-10-30 — Revisão do cadastro de tarefas (482f4bc)
+
+Correções da revisão técnica do commit anterior — segredos em 422,
+filtros do portal, rota obsoleta, contrato incompatível, exportação
+mutável e corridas não cobertas.
+
+### Implementado
+
+- **Mascaramento 422** (`app.py`): padrão de chaves secretas
+  (`password|secret|token|private|credential|api/access_key|identity…`)
+  em loc/input/ctx/msg com scrub recursivo + userinfo de URL
+  (`https://u:s@h` → `https://***@h`) — cobre campos desconhecidos
+  com sentinela e credenciais embutidas em URL.
+- **Contrato** (`task_contract.py`): caractere de controle rejeitado em
+  todo texto; `..`/`//`/vazio rejeitado em repository local e origens
+  (lexical, espaços legítimos preservados); `retry.attempts` ≤ 64
+  (teto do recebimento `MAX_ATTEMPTS`).
+- **Migração 4**: `task_revisions.client_name` — snapshot do nome do
+  cliente no momento da revisão; backfill explícito com o nome vigente
+  à época (nomes históricos não eram registrados).
+- **Concorrência**: `FOR UPDATE` na linha da tarefa em toda escrita
+  (revisão e arquivamento) — check e update na mesma transação,
+  salvamento idêntico revalida expected sob o lock.
+- **Portal**: TasksPage com gerações separadas (clientes vs tarefas),
+  retry efetivo e erro explícito de clientes; TaskDetailPage com
+  guarda de geração+taskIdRef em salvar/arquivar e conteúdo preso à
+  rota vigente; TaskNewPage não redireciona nem trava ao trocar
+  `?agent=`; viewer não recebe formulário de criação.
+- **Documento**: identificador é `uuid4` (o relatório dizia UUIDv5).
+
+### Verificação
+
+- API real (PG 17, :55433): tasks 29/29 incluindo corridas com
+  sessões independentes + observação de `pg_locks` (edição×edição,
+  arquivar×editar, editar×arquivar, idêntico×expected obsoleto) e
+  exportação histórica idêntica após rename; contrato 21/21 com
+  bordas; HTTP sem banco 19/19 com sentinelas.
+- Portal simulado: 70/70 (7 novos: seletor, retry, dados/callbacks
+  de rota antiga, viewer).
+- typecheck + `vite build` limpos; E2E real re-executado.

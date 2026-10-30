@@ -31,6 +31,7 @@ export default function TaskDetailPage() {
   const [pending, setPending] = useState(false);
   const [archiveOpen, setArchiveOpen] = useState(false);
   const generation = useRef(0);
+  const taskIdRef = useRef(taskId); // rota vigente — distingue callbacks atrasados
   const alive = useRef(true);
 
   useEffect(() => {
@@ -71,54 +72,75 @@ export default function TaskDetailPage() {
   }
 
   useEffect(() => {
+    taskIdRef.current = taskId;
     setEditing(false);
     setEditError(null);
+    setArchiveOpen(false);
+    setPending(false); // operação pendente da rota anterior não trava a nova
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [taskId]);
 
+  // todo callback de escrita verifica DUAS coisas além do unmount:
+  // a geração de carregamento (qualquer load novo invalida) e a rota
+  // vigente (taskIdRef) — uma resposta atrasada de A nunca toca B
+  function staleSave(gen: number, id: string) {
+    return (
+      !alive.current ||
+      gen !== generation.current ||
+      taskIdRef.current !== id
+    );
+  }
+
   async function saveEdit(config: Record<string, unknown>) {
     if (pending || !task) return;
+    const gen = generation.current;
+    const targetId = task.id;
     setPending(true);
     setEditError(null);
     try {
-      await createRevision(
-        task.id,
-        task.current_revision,
-        config,
-      );
-      if (!alive.current) return;
+      await createRevision(targetId, task.current_revision, config);
+      if (staleSave(gen, targetId)) return;
       setEditing(false);
       await load();
     } catch (err) {
-      if (!alive.current) return;
+      if (staleSave(gen, targetId)) return;
       // 409 preserva os valores digitados — explicamos a revisão nova
       setEditError(
         err instanceof ApiError ? err.message : "Falha inesperada.",
       );
     } finally {
-      if (alive.current) setPending(false);
+      // a própria chamada a load() avança a geração — o reset do
+      // pending usa só a rota vigente, nunca a geração
+      if (alive.current && taskIdRef.current === targetId) {
+        setPending(false);
+      }
     }
   }
 
   async function confirmArchive() {
     if (pending || !task) return;
+    const gen = generation.current;
+    const targetId = task.id;
     setPending(true);
     setError(null);
     try {
-      await archiveTask(task.id);
-      if (!alive.current) return;
+      const updated = await archiveTask(targetId);
+      if (staleSave(gen, targetId)) return;
       setArchiveOpen(false);
-      await load();
+      setTask((t) => (t?.id === targetId ? { ...t, ...updated } : t));
     } catch (err) {
-      if (!alive.current) return;
+      if (staleSave(gen, targetId)) return;
       setError(err instanceof ApiError ? err.message : "Falha inesperada.");
     } finally {
-      if (alive.current) setPending(false);
+      if (alive.current && taskIdRef.current === targetId) {
+        setPending(false);
+      }
     }
   }
 
   const admin = operator?.role === "admin";
+  const shownTask = task?.id === taskId ? task : null;
 
   return (
     <section>
@@ -129,26 +151,26 @@ export default function TaskDetailPage() {
       {resolved && !task && !error ? (
         <EmptyState message="Tarefa não encontrada." />
       ) : null}
-      {task ? (
+      {shownTask ? (
         <>
           <dl>
             <dt>Nome</dt>
-            <dd>{task.name}</dd>
+            <dd>{shownTask.name}</dd>
             <dt>Cliente</dt>
-            <dd>{clientName ?? task.client_id}</dd>
+            <dd>{clientName ?? shownTask.client_id}</dd>
             <dt>Agente</dt>
-            <dd>{agentName ?? task.agent_id} (<code>{task.agent_id}</code>)</dd>
+            <dd>{agentName ?? shownTask.agent_id} (<code>{shownTask.agent_id}</code>)</dd>
             <dt>Revisão atual</dt>
-            <dd>{task.current_revision}</dd>
+            <dd>{shownTask.current_revision}</dd>
             <dt>Situação</dt>
             <dd>
-              {task.archived
+              {shownTask.archived
                 ? "Arquivada na central"
                 : "Cadastrada na central — ainda não distribuída ao agente"}
             </dd>
           </dl>
 
-          {admin && !task.archived && !editing ? (
+          {admin && !shownTask.archived && !editing ? (
             <div className="row">
               <button type="button" onClick={() => setEditing(true)}>
                 Editar configuração
@@ -182,7 +204,7 @@ export default function TaskDetailPage() {
             <>
               <h2>Editar — cria uma nova revisão</h2>
               <TaskForm
-                initial={formFromConfig(task.revision.config)}
+                initial={formFromConfig(shownTask.revision.config)}
                 onSubmit={saveEdit}
                 pending={pending}
                 error={editError}
@@ -210,7 +232,7 @@ export default function TaskDetailPage() {
                   {new Date(r.created_at).toLocaleString("pt-BR")}
                   {" — "}
                   <a
-                    href={exportRevisionUrl(task.id, r.revision)}
+                    href={exportRevisionUrl(shownTask.id, r.revision)}
                     download={`tarefa-rev${r.revision}.json`}
                   >
                     baixar tarefa.json

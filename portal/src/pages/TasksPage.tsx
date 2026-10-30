@@ -10,31 +10,45 @@ import {
 import { EmptyState } from "../components/common";
 
 /** Cadastro central de tarefas — NENHUMA é distribuída ao agente
- * nesta etapa (sem estados fictícios de "aplicada"/"agendada"). */
+ * nesta etapa (sem estados fictícios de "aplicada"/"agendada").
+ * Clientes e tarefas são consultas INDEPENDENTES: cada uma tem sua
+ * própria geração de invalidação e seu próprio retry. */
 export default function TasksPage() {
   const [params, setParams] = useSearchParams();
   const [rows, setRows] = useState<TaskRow[] | null>(null);
   const [clients, setClients] = useState<ClientRow[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [clientsError, setClientsError] = useState<string | null>(null);
   const [nextOffset, setNextOffset] = useState(0);
-  const generation = useRef(0);
+  const [retry, setRetry] = useState(0);
+  const [clientsRetry, setClientsRetry] = useState(0);
+  const tasksGeneration = useRef(0);
+  const clientsGeneration = useRef(0);
 
   const clientId = params.get("client_id") ?? "";
   const agentId = params.get("agent_id") ?? "";
   const archived = params.get("archived") ?? "false";
   const offset = Number(params.get("offset") ?? "0");
 
+  // carga dos clientes: geração própria — a busca de tarefas não a
+  // invalida; falha aparece explicitamente e tem retry próprio
   useEffect(() => {
-    const gen = ++generation.current;
+    const gen = ++clientsGeneration.current;
+    setClientsError(null);
     void listClients(500, 0)
       .then((c) => {
-        if (gen === generation.current) setClients(c);
+        if (gen === clientsGeneration.current) setClients(c);
       })
-      .catch(() => undefined);
-  }, []);
+      .catch((err) => {
+        if (gen !== clientsGeneration.current) return;
+        setClientsError(
+          err instanceof ApiError ? err.message : "Falha inesperada.",
+        );
+      });
+  }, [clientsRetry]);
 
   useEffect(() => {
-    const gen = ++generation.current;
+    const gen = ++tasksGeneration.current;
     setError(null);
     setRows(null);
     const filters: Record<string, string | boolean> = {};
@@ -43,16 +57,16 @@ export default function TasksPage() {
     if (archived !== "all") filters.archived = archived === "true";
     listTasks(filters, 51, offset)
       .then((page) => {
-        if (gen !== generation.current) return;
+        if (gen !== tasksGeneration.current) return;
         setRows(page.slice(0, 50));
         setNextOffset(page.length > 50 ? offset + 50 : 0);
       })
       .catch((err) => {
-        if (gen !== generation.current) return;
+        if (gen !== tasksGeneration.current) return;
         setError(err instanceof ApiError ? err.message : "Falha inesperada.");
         setRows([]);
       });
-  }, [clientId, agentId, archived, offset]);
+  }, [clientId, agentId, archived, offset, retry]);
 
   function patch(next: Record<string, string>) {
     setParams((prev) => {
@@ -102,10 +116,18 @@ export default function TasksPage() {
           <option value="all">Todas</option>
         </select>
       </div>
+      {clientsError ? (
+        <p role="alert" className="error">
+          Não foi possível listar os clientes para o filtro: {clientsError}{" "}
+          <button type="button" onClick={() => setClientsRetry((n) => n + 1)}>
+            Tentar novamente
+          </button>
+        </p>
+      ) : null}
       {error ? (
         <p role="alert" className="error">
           {error}{" "}
-          <button type="button" onClick={() => patch({ offset: String(offset) })}>
+          <button type="button" onClick={() => setRetry((n) => n + 1)}>
             Tentar novamente
           </button>
         </p>

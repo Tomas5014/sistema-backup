@@ -157,6 +157,25 @@ MIGRATIONS: list[tuple[int, str, str]] = [
             ON task_revisions(task_id);
         """,
     ),
+    (
+        4,
+        "task_revisions: snapshot do nome do cliente",
+        # Exportação histórica imutável: client.name é editável e hoje
+        # o JSON da revisão usaria o nome ATUAL. Guardamos o nome no
+        # momento da revisão. Revisões já existentes recebem o nome
+        # vigente na migração — o nome que tinham na criação não foi
+        # registrado e nenhum valor é inventado para elas.
+        """
+        ALTER TABLE task_revisions
+            ADD COLUMN IF NOT EXISTS client_name varchar(200);
+        UPDATE task_revisions r
+            SET client_name = c.name
+            FROM tasks t
+            JOIN agents a ON a.id = t.agent_id
+            JOIN clients c ON c.id = a.client_id
+            WHERE r.task_id = t.id;
+        """,
+    ),
 ]
 
 _ADVISORY_KEY = 727_203_001

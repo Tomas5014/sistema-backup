@@ -46,16 +46,53 @@ def _nonblank(value: str) -> str:
         raise ValueError("valor não pode ser só espaços")
     return value
 
+
+def _no_control_chars(value: str) -> str:
+    """Todo texto persistido precisa sobreviver à viagem central →
+    tarefa.json → TaskSpec.from_dict: controles (newline, NUL etc.)
+    quebram o documento — espaços normais continuam válidos."""
+    if any(ord(character) < 32 or ord(character) == 127
+           for character in value):
+        raise ValueError("valor não pode conter caractere de controle")
+    return value
+
+
+def _safe_segments(value: str, *, absolute: bool, field: str) -> str:
+    """Caminho do AGENTE conferido lexicalmente — nunca no filesystem
+    da central: sem segmento `..`, `//` ou componente vazio. Espaços
+    são legítimos e preservados."""
+    parts = value.split("/")
+    if absolute:
+        if not value.startswith("/"):
+            raise ValueError(f"{field} deve ser caminho absoluto")
+        if value.rstrip("/") == "":
+            raise ValueError(f"{field} não pode ser a raiz")
+    else:
+        if value.startswith(("/", "~")):
+            raise ValueError(f"{field} deve ser caminho relativo")
+    if "//" in value or any(part == ".." for part in parts):
+        raise ValueError(f"{field} contém segmento não permitido")
+    return value
+
+
 CONTRACT_VERSION = 1
 
 Ident = Annotated[
-    StrictStr, Field(min_length=1, max_length=200, pattern=r"^\S+$")
+    StrictStr,
+    Field(min_length=1, max_length=200, pattern=r"^\S+$"),
+    AfterValidator(_no_control_chars),
 ]
 Text = Annotated[
-    StrictStr, Field(min_length=1, max_length=4000), AfterValidator(_nonblank)
+    StrictStr,
+    Field(min_length=1, max_length=4000),
+    AfterValidator(_nonblank),
+    AfterValidator(_no_control_chars),
 ]
 ShortText = Annotated[
-    StrictStr, Field(min_length=1, max_length=200), AfterValidator(_nonblank)
+    StrictStr,
+    Field(min_length=1, max_length=200),
+    AfterValidator(_nonblank),
+    AfterValidator(_no_control_chars),
 ]
 PosInt = Annotated[StrictInt, Field(gt=0)]
 NonNegInt = Annotated[StrictInt, Field(ge=0)]
@@ -120,14 +157,9 @@ class SourceIn(StrictModel):
     @model_validator(mode="after")
     def _checks(self):
         # caminho do AGENTE Linux — conferência lexical, nunca fs local
-        if not self.path.startswith("/"):
-            raise ValueError("sources[].path deve ser caminho absoluto do agente")
-        if self.path.rstrip("/") == "":
-            raise ValueError("sources[].path não pode ser a raiz")
-        if "//" in self.path or any(
-            part == ".." for part in self.path.split("/")
-        ):
-            raise ValueError("sources[].path contém segmento não permitido")
+        _safe_segments(
+            self.path, absolute=True, field="sources[].path"
+        )
         if self.smb is not None:
             mount = self.smb.mount_point.rstrip("/")
             if self.path != mount and not self.path.startswith(mount + "/"):
@@ -236,8 +268,10 @@ class DestinationIn(StrictModel):
         if self.kind == "local":
             if self.repository is None:
                 raise ValueError("destination.repository é obrigatório em local")
-            if not self.repository.startswith("/"):
-                raise ValueError("repository local deve ser caminho absoluto")
+            _safe_segments(
+                self.repository, absolute=True,
+                field="destination.repository",
+            )
         elif self.kind == "smb":
             if self.repository is None:
                 raise ValueError("destination.repository é obrigatório em smb")
@@ -268,7 +302,9 @@ class TimeoutsIn(StrictModel):
 
 
 class RetryIn(StrictModel):
-    attempts: PosInt = 1
+    # 64 é o teto do recebimento de resultados (MAX_ATTEMPTS) — uma
+    # tarefa nunca configura mais tentativas do que a central reporta
+    attempts: Annotated[StrictInt, Field(gt=0, le=64)] = 1
     backoff_seconds: NonNegInt = 0
 
 

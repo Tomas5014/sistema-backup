@@ -230,6 +230,12 @@ class TaskRevision(Base):
     revision: Mapped[int] = mapped_column(Integer, nullable=False)
     contract_version: Mapped[int] = mapped_column(Integer, nullable=False)
     config = mapped_column(JSONB, nullable=False)
+    # snapshot do nome do cliente NA revisão — exportação histórica
+    # não pode depender de um nome editável no presente; revisões
+    # anteriores à migração 4 receberam o nome vigente à época
+    client_name: Mapped[str | None] = mapped_column(
+        String(200), nullable=True
+    )
     author_kind: Mapped[str] = mapped_column(String(20), nullable=False)
     author_ref: Mapped[str] = mapped_column(String(200), nullable=False)
     created_at = mapped_column(

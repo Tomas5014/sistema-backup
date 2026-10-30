@@ -200,15 +200,20 @@ compatível com `TaskSpec.from_dict()` do agente atual.
 
 ### Modelo
 
-- `tasks` (identidade estável): `id` (UUIDv5 por agente), `agent_id`,
+- `tasks` (identidade estável): `id` (UUID aleatório — `uuid4`,
+  gerado na criação e imutável), `agent_id`,
   `current_revision`, `archived_at`, `created_at`. O vínculo com o
   cliente deriva do agente (`task.agent.client_id`) e é validado no
   servidor.
 - `task_revisions`: snapshot imutável (`config` JSONB), `revision`
   numerada desde 1, `contract_version` (1), `author_kind`
   (`admin`/`operator`), `author_ref` (login do operador ou `bearer`),
-  `created_at` UTC. Unicidade `(task_id, revision)` no banco; revision
-  e ponteiro avançam na **mesma transação**.
+  `created_at` UTC, `client_name` (snapshot do nome do cliente —
+  exportações históricas não dependem de nomes editáveis).
+  Unicidade `(task_id, revision)` no banco; revision e ponteiro
+  avançam na **mesma transação**. Revisões criadas antes da
+  migração 4 guardam o nome vigente à época dela — o histórico
+  anterior não era registrado e nada é inventado.
 
 ### Envelope de configuração
 
@@ -236,6 +241,20 @@ compatível com `TaskSpec.from_dict()` do agente atual.
   shell é aceito; a conversão para timers do agente é entrega futura.
 - `password_environment`/`endpoint_url` apontam para segredos por
   referência — segredos nunca são persistidos, retornados ou logados.
+- **Caminhos são conferidos lexicalmente** (nunca no filesystem da
+  central): origens e `repository` local devem ser absolutos, sem
+  `..`, `//` ou componente vazio; caracteres de controle
+  (newline, NUL…) são rejeitados em qualquer campo de texto;
+  espaços em caminhos são legítimos. `sftp.identity_file`,
+  `smb.repository`, `s3.prefix` e `s3.endpoint` seguem regras
+  próprias e credenciais embutidas em URL são proibidas.
+- `retry.attempts` ≤ 64 — o mesmo teto do recebimento de
+  resultados (`MAX_ATTEMPTS` em `schemas.py`).
+- **422 não ecoa segredos**: `input`/`ctx`/`msg` mascaram qualquer
+  chave com nome de segredo (password, private/secret/access_key,
+  token, credential, identity…) em qualquer profundidade, incluindo
+  campos desconhecidos rejeitados por `extra=forbid`, e userinfo de
+  URL (`https://user:senha@host` → `https://***@host`).
 
 ### Rotas
 
@@ -254,16 +273,20 @@ Tokens de AGENTE não autorizam nenhuma rota administrativa (403).
 
 ### Concorrência otimista
 
-A nova revisão exige `expected_revision`; a atualização do ponteiro é
-condicional (`current_revision = esperada`) — se dois envios partem da
-mesma base, um vence e o outro recebe **409** com a revisão atual; a
-vencedora fica intacta. `409` também é retornado por atualização com
-expected obsoleta e por revisão em tarefa arquivada.
+Toda transição de escrita (`POST …/revisions`, `POST …/archive`)
+abre a transação com `SELECT … FOR UPDATE` na linha da tarefa —
+edição, arquivamento e salvamento idêntico leem o estado vigente
+atomicamente e ficam serializados na fila do lock. Não há janela
+check→update: arquivamento que chegou primeiro bloqueia a edição
+ seguinte (409) e vice-versa.
 
-Configuração **idêntica** com expected válido não cria revisão: o
-documento é normalizado (JSON canônico — chaves ordenadas, fontes
-normalizadas para `{"path": …}`, `null`s equivalentes) e comparado ao
-snapshot atual; se idêntico, responde a revisão vigente.
+A nova revisão exige `expected_revision` vigente sob o lock; expected
+obsoleto → **409**; a vencedora fica intacta. Salvamento **idêntico**
+com expected válido não cria revisão: o documento é normalizado
+(JSON canônico — chaves ordenadas, fontes como `{"path": …}`) e
+comparado ao snapshot atual; se idêntico, responde `unchanged` —
+mas só depois da revalidação da expected sob o lock, nunca por uma
+leitura obsoleta.
 
 ### Exportação (`tarefa.json`)
 

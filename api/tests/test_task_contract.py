@@ -154,3 +154,89 @@ def test_origem_smb_fora_do_mount_rejeitada_na_central():
                               "repository": "/srv/r",
                               "password_environment": "PW"}],
         })
+
+
+# ---- entradas de borda que o agente rejeitaria -------------------------------
+# A central não pode aceitar o que o TaskSpec.from_dict recusa depois —
+# conferência LEXICAL apenas: nada de filesystem, Restic, SSH ou SMB.
+
+from pydantic import ValidationError  # noqa: E402
+
+
+def _spec(destinations=None, sources=None, **kw):
+    spec = {
+        "sources": sources or ["/dados/x"],
+        "destinations": destinations or [
+            {"id": "d", "name": "d", "kind": "local",
+             "repository": "/srv/b", "password_environment": "PW"},
+        ],
+    }
+    spec.update(kw)
+    return spec
+
+
+@pytest.mark.parametrize("repository", [
+    "/backup/../dados/x/repository",   # resolve para DENTRO da origem
+    "/backup/sub/../../dados/x/repo",
+    "/srv//backup",                    # separador duplicado
+    "/",                               # raiz inteira
+    "srv/backup",                      # relativo
+])
+def test_repository_local_com_segmento_inseguro_rejeitado(repository):
+    with pytest.raises(ValidationError):
+        _doc(spec=_spec(destinations=[
+            {"id": "d", "name": "d", "kind": "local",
+             "repository": repository, "password_environment": "PW"},
+        ]))
+
+
+def test_repository_local_com_espaco_legitimo_passa():
+    """Espaços são caminhos legítimos no Linux — preservados."""
+    payload = _doc(spec=_spec(destinations=[
+        {"id": "d", "name": "d", "kind": "local",
+         "repository": "/srv/backup dir/rep ository",
+         "password_environment": "PW"},
+    ]))
+    doc = _export(payload)
+    spec = TaskSpec.from_dict(doc)
+    assert str(spec.destinations[0].repository) == "/srv/backup dir/rep ository"
+
+
+@pytest.mark.parametrize("field", [
+    "identity_file", "known_hosts_file", "remote_path",
+])
+def test_sftp_campo_de_caminho_rejeita_controle(field):
+    """newline/caractere de controle quebraria o TaskSpec no agente."""
+    sftp = {
+        "host": "h", "user": "u", "remote_path": "r",
+        "identity_file": "/k", "known_hosts_file": "/kh",
+    }
+    sftp[field] = "/linha\nquebrada"
+    with pytest.raises(ValidationError):
+        _doc(spec=_spec(destinations=[
+            {"id": "d", "name": "d", "kind": "sftp",
+             "password_environment": "PW", "sftp": sftp},
+        ]))
+
+
+@pytest.mark.parametrize("value", [
+    "/dados\nx", "/dados\tx", "/dados\x00x", "nome\tdestino",
+])
+def test_caminhos_e_textos_rejeitam_caractere_de_controle(value):
+    with pytest.raises(ValidationError):
+        _doc(spec=_spec(sources=[value]))
+
+
+def test_retry_attempts_limitado_ao_teto_do_recebimento():
+    """64 é o MAX_ATTEMPTS do schemas.py — acima disso a central
+    receberia tentativas que o relatório não consegue representar."""
+    with pytest.raises(ValidationError):
+        _doc(spec=_spec(retry={"attempts": 65}))
+    # no limite passa
+    _doc(spec=_spec(retry={"attempts": 64}))
+
+
+def test_origem_com_espaco_legitimo_passa():
+    payload = _doc(spec=_spec(sources=["/dados do financeiro"]))
+    spec = TaskSpec.from_dict(_export(payload))
+    assert str(spec.sources[0].path) == "/dados do financeiro"

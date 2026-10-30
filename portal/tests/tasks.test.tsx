@@ -6,7 +6,8 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useNavigate } from "react-router-dom";
+import { useEffect } from "react";
 import { App } from "../src/App";
 import { AuthProvider } from "../src/auth";
 import {
@@ -301,5 +302,238 @@ describe("pendência e respostas atrasadas", () => {
     await act(async () => releaseA(json(TASK_DETAIL)));
     expect(document.body.textContent ?? "").toContain("Tarefa B");
     expect(document.body.textContent ?? "").toContain("automação");
+  });
+});
+
+// ---- seletor de clientes: consulta independente + retry ---------------------
+
+describe("seletor de clientes", () => {
+  it("cliente retornado aparece, pode ser selecionado e muda a consulta", async () => {
+    portal("/tasks");
+    await screen.findByText("Financeiro diário");
+    // o seletor é alimentado por /api/v1/clients — carga independente
+    const select = screen.getByLabelText("Filtrar por cliente");
+    expect(select).toHaveTextContent("Acme Ltda");
+    await userEvent.selectOptions(select, "cli-1");
+    await waitFor(() => {
+      const call = [...calls].reverse().find(
+        (c) => c.key === "GET /api/v1/tasks",
+      );
+      expect(call?.url.searchParams.get("client_id")).toBe("cli-1");
+    });
+  });
+
+  it("falha na carga de clientes é explícita e retry recupera", async () => {
+    let fail = true;
+    calls = stubFetch({
+      ...baseRoutes(),
+      "GET /api/v1/clients": () =>
+        fail ? json({ detail: "erro" }, 500) : json([CLIENT]),
+    });
+    portal("/tasks");
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /listar os clientes/,
+    );
+    fail = false;
+    await userEvent.click(
+      screen.getByRole("button", { name: "Tentar novamente" }),
+    );
+    await waitFor(() =>
+      expect(screen.getByLabelText("Filtrar por cliente"))
+        .toHaveTextContent("Acme Ltda"),
+    );
+  });
+});
+
+describe("retry de tarefas", () => {
+  it("falha inicial → Tentar novamente → nova consulta → lista", async () => {
+    let fail = true;
+    calls = stubFetch({
+      ...baseRoutes(),
+      "GET /api/v1/tasks": () =>
+        fail ? json({ detail: "rede" }, 500) : json([TASK]),
+    });
+    portal("/tasks");
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
+    const before = calls.filter(
+      (c) => c.key === "GET /api/v1/tasks",
+    ).length;
+    fail = false;
+    await userEvent.click(
+      screen.getByRole("button", { name: "Tentar novamente" }),
+    );
+    await screen.findByText("Financeiro diário");
+    // nova requisição REAL — não apenas re-render do mesmo estado
+    expect(
+      calls.filter((c) => c.key === "GET /api/v1/tasks").length,
+    ).toBeGreaterThan(before);
+  });
+});
+
+// ---- rota muda sem desmontar: dados e callbacks ficam na rota certa ----------
+
+function NavProbe({ target }: { target: { current: ((to: string) => void) | null } }) {
+  const navigate = useNavigate();
+  useEffect(() => {
+    target.current = (to: string) => navigate(to);
+    return () => {
+      target.current = null;
+    };
+  });
+  return null;
+}
+
+/** Navega na MESMA árvore — o componente permanece montado e só o
+ * parâmetro da rota muda (reprodução dos callbacks obsoletos). */
+function portalWithNav(
+  path: string,
+  target: { current: ((to: string) => void) | null },
+) {
+  return render(
+    <MemoryRouter initialEntries={[path]}>
+      <AuthProvider>
+        <App />
+        <NavProbe target={target} />
+      </AuthProvider>
+    </MemoryRouter>,
+  );
+}
+
+async function go(
+  target: { current: ((to: string) => void) | null }, to: string,
+) {
+  await act(async () => target.current?.(to));
+}
+
+describe("parâmetro de rota muda com componente montado", () => {
+  const detailB = {
+    ...TASK_DETAIL, id: "task-2", name: "Tarefa B",
+    revision: { ...REV1, config: { ...CONFIG, name: "Tarefa B" } },
+  };
+
+  it("GET atrasado de A não sobrescreve B na rota nova", async () => {
+    let releaseA!: (r: Response) => void;
+    const gateA = new Promise<Response>((res) => (releaseA = res));
+    calls = stubFetch({
+      ...baseRoutes(),
+      "GET /api/v1/tasks/task-1": () => gateA,
+      "GET /api/v1/tasks/task-1/revisions": () => json([]),
+      "GET /api/v1/tasks/task-2": () => json(detailB),
+      "GET /api/v1/tasks/task-2/revisions": () => json([
+        { revision: 1, contract_version: 1, author_kind: "admin",
+          author_ref: "bearer", created_at: "x", current: true },
+      ]),
+    });
+    const target: { current: ((to: string) => void) | null } = {
+      current: null,
+    };
+    portalWithNav("/tasks/task-1", target);
+    await go(target, "/tasks/task-2"); // navega com A pendente
+    await screen.findByText("Tarefa B");
+    await act(async () => releaseA(json(TASK_DETAIL)));
+    // a resposta de A chegou DEPOIS — B continua intocado
+    await screen.findByText("Tarefa B");
+    expect(screen.queryByText("Financeiro diário")).toBeNull();
+  });
+
+  it("salvar A com POST pendente não substitui o conteúdo de B", async () => {
+    let releaseSave!: (r: Response) => void;
+    const gateSave = new Promise<Response>((res) => (releaseSave = res));
+    calls = stubFetch({
+      ...baseRoutes(),
+      "GET /api/v1/tasks/task-2": () => json(detailB),
+      "GET /api/v1/tasks/task-2/revisions": () => json([
+        { revision: 1, contract_version: 1, author_kind: "admin",
+          author_ref: "bearer", created_at: "x", current: true },
+      ]),
+      "POST /api/v1/tasks/task-1/revisions": () => gateSave,
+    });
+    const target: { current: ((to: string) => void) | null } = {
+      current: null,
+    };
+    portalWithNav("/tasks/task-1", target);
+    await screen.findByText("Financeiro diário");
+    await userEvent.click(
+      screen.getByRole("button", { name: "Editar configuração" }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Salvar nova revisão" }),
+    );
+    // POST de A PENDENTE — navega para B, B carrega
+    await go(target, "/tasks/task-2");
+    await screen.findByText("Tarefa B");
+    await act(async () => releaseSave(json(TASK_DETAIL_V2, 201)));
+    // o callback antigo não pode derrubar B nem mostrar dados de A
+    await screen.findByText("Tarefa B");
+    expect(screen.queryByText("Financeiro diário v2")).toBeNull();
+  });
+});
+
+// ---- criação: ?agent= muda com a página montada -------------------------------
+
+describe("novo cadastro com agente trocado no meio", () => {
+  const AGENT2 = { ...AGENT, id: "ag-2", name: "vm-02" };
+
+  it("POST de agente antigo não redireciona nem trava o novo", async () => {
+    let releaseCreate!: (r: Response) => void;
+    const gate = new Promise<Response>((res) => (releaseCreate = res));
+    calls = stubFetch({
+      ...baseRoutes(),
+      "GET /api/v1/agents": () => json([AGENT, AGENT2]),
+      "POST /api/v1/agents/ag-1/tasks": () => gate,
+      "POST /api/v1/agents/ag-2/tasks": () =>
+        json({ ...TASK_DETAIL, id: "task-9" }, 201),
+    });
+    const target: { current: ((to: string) => void) | null } = {
+      current: null,
+    };
+    portalWithNav("/tasks/new?agent=ag-1", target);
+    await screen.findByText(/vm-01/);
+    await userEvent.type(
+      screen.getByLabelText("Nome da tarefa"), "tarefa-a1",
+    );
+    await userEvent.type(
+      screen.getByLabelText("Caminho da origem 1"), "/d",
+    );
+    await userEvent.type(
+      screen.getByLabelText("Identificador do destino 1"), "d",
+    );
+    await userEvent.type(
+      screen.getByLabelText("Nome do destino 1"), "d",
+    );
+    await userEvent.type(
+      screen.getByLabelText("Repositório do destino 1"), "/srv/r",
+    );
+    await userEvent.type(
+      screen.getByLabelText("password_environment do destino 1"), "PW",
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Cadastrar tarefa" }),
+    );
+    // ?agent= troca com o POST pendente — o novo contexto carrega
+    await go(target, "/tasks/new?agent=ag-2");
+    await screen.findByText(/vm-02/);
+    await act(async () => releaseCreate(json(TASK_DETAIL, 201)));
+    // sem redirecionamento tardio: continua no formulário do ag-2
+    await screen.findByText(/vm-02/);
+    expect(
+      screen.getByRole("button", { name: "Cadastrar tarefa" }),
+    ).toBeEnabled();
+    const old = calls.filter(
+      (c) => c.key === "POST /api/v1/agents/ag-1/tasks",
+    );
+    expect(old).toHaveLength(1); // disparou, só não pôde agir
+  });
+
+  it("viewer não recebe o formulário de criação", async () => {
+    calls = stubFetch(baseRoutes(VIEWER));
+    portal("/tasks/new?agent=ag-1");
+    await screen.findByText(/vm-01/);
+    expect(
+      screen.getByText(/Perfil de consulta/),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Cadastrar tarefa" }),
+    ).toBeNull();
   });
 });
