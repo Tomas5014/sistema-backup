@@ -53,6 +53,7 @@ def task_payload(**overrides) -> dict:
 def create_agent_env(client, admin_headers):
     c = client.post("/api/v1/clients", json={"name": f"c-{uuid.uuid4().hex[:6]}"},
                     headers=admin_headers)
+    assert c.status_code == 201, f"criar cliente: {c.status_code} {c.text[:400]}"
     a = client.post(f"/api/v1/clients/{c.json()['id']}/agents",
                     json={"name": "ag-1"}, headers=admin_headers)
     return c.json()["id"], a.json()["id"]

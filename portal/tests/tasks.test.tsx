@@ -691,3 +691,149 @@ describe("visita A→B→A ao mesmo identificador", () => {
       await act(async () => releaseAgents(json([AGENT])));
     });
 });
+
+// ---- distribuição gerenciada: publicar, suspender e exibir --------------
+
+const DIST_NONE = {
+  generation: 0, published_revision: null,
+  desired_action: "none", confirmed: null,
+};
+const DIST_APPLY = {
+  generation: 1, published_revision: 1, desired_action: "apply",
+  updated_at: "2026-10-29T10:00:00Z", confirmed: null,
+};
+const DIST_CONFIRMED = {
+  ...DIST_APPLY,
+  confirmed: {
+    generation: 1, status: "applied", applied_revision: 1,
+    detail: null, agent_time: "2026-10-29T10:05:00Z",
+    received_at: "2026-10-29T10:05:01Z",
+  },
+};
+
+describe("distribuição gerenciada", () => {
+  it("publica a revisão atual com explicação e aguarda aplicação", async () => {
+    const published = {
+      ...TASK_DETAIL, distribution: DIST_APPLY,
+    };
+    calls = stubFetch({
+      ...baseRoutes(),
+      "GET /api/v1/tasks/task-1": () => json({
+        ...TASK_DETAIL, distribution: DIST_NONE,
+      }),
+      "POST /api/v1/tasks/task-1/publish": (init) => {
+        const body = JSON.parse(String(init?.body));
+        expect(body).toEqual({
+          revision: 1, expected_generation: 0,
+        });
+        return json(published);
+      },
+    });
+    portal("/tasks/task-1");
+    await screen.findByText("Distribuição gerenciada");
+    expect(screen.getByText("nenhuma")).toBeInTheDocument();
+    expect(screen.queryByText(/Aguardando a aplicação/)).toBeNull();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Publicar revisão 1" }),
+    );
+    // explicação do efeito ANTES da confirmação
+    expect(screen.getByText("não executa")).toBeInTheDocument();
+    expect(
+      screen.getByText(/publicação será registrada|próxima consulta/),
+    ).toBeInTheDocument();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Confirmar publicação" }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByText(/Aguardando a aplicação pelo agente/),
+      ).toBeInTheDocument(),
+    );
+    expect(screen.getByText("agenda instalada")).toBeInTheDocument();
+  });
+
+  it("confirmação do agente mostra a revisão aplicada", async () => {
+    calls = stubFetch({
+      ...baseRoutes(),
+      "GET /api/v1/tasks/task-1": () => json({
+        ...TASK_DETAIL, distribution: DIST_CONFIRMED,
+      }),
+    });
+    portal("/tasks/task-1");
+    await screen.findByText("Distribuição gerenciada");
+    const cells = screen.getAllByRole("definition");
+    // "Revisão aplicada pelo agente" = 1 — informada pelo agente, não
+    // pelo POST administrativo
+    expect(document.body.textContent ?? "").toContain(
+      "Revisão aplicada pelo agente",
+    );
+    expect(document.body.textContent ?? "").toContain("aplicada (geração 1)");
+  });
+
+  it("suspende com explicação e geração vigente", async () => {
+    const suspended = {
+      ...TASK_DETAIL,
+      distribution: { ...DIST_APPLY, generation: 2,
+                      desired_action: "suspend" },
+    };
+    calls = stubFetch({
+      ...baseRoutes(),
+      "GET /api/v1/tasks/task-1": () => json({
+        ...TASK_DETAIL, distribution: DIST_APPLY,
+      }),
+      "POST /api/v1/tasks/task-1/suspend": (init) => {
+        const body = JSON.parse(String(init?.body));
+        expect(body).toEqual({ expected_generation: 1 });
+        return json(suspended);
+      },
+    });
+    portal("/tasks/task-1");
+    await screen.findByText("Distribuição gerenciada");
+    await userEvent.click(
+      screen.getByRole("button", { name: "Suspender agendamento" }),
+    );
+    expect(screen.getByText("não são afetados")).toBeInTheDocument();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Confirmar suspensão" }),
+    );
+    await screen.findByText("agenda suspensa");
+  });
+
+  it("viewer lê o estado mas não publica nem suspende", async () => {
+    calls = stubFetch({
+      ...baseRoutes(),
+      "GET /api/v1/auth/me": () => json(VIEWER),
+      "GET /api/v1/tasks/task-1": () => json({
+        ...TASK_DETAIL, distribution: DIST_APPLY,
+      }),
+    });
+    portal("/tasks/task-1");
+    await screen.findByText("Distribuição gerenciada");
+    expect(document.body.textContent ?? "").toContain("agenda instalada");
+    expect(
+      screen.queryByRole("button", { name: /Publicar revisão/ }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Suspender agendamento" }),
+    ).toBeNull();
+  });
+
+  it("arquivada mantém suspensão disponível quando há publicada", async () => {
+    calls = stubFetch({
+      ...baseRoutes(),
+      "GET /api/v1/tasks/task-1": () => json({
+        ...TASK_DETAIL, archived: true, archived_at: "x",
+        distribution: DIST_APPLY,
+      }),
+    });
+    portal("/tasks/task-1");
+    await screen.findByText("Distribuição gerenciada");
+    // suspender continua possível na arquivada; publicar não
+    expect(
+      screen.getByRole("button", { name: "Suspender agendamento" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Publicar revisão/ }),
+    ).toBeNull();
+  });
+});

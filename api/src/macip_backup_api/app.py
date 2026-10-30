@@ -17,6 +17,7 @@ import uuid
 from datetime import UTC, datetime
 
 import math
+from typing import Literal
 from contextlib import asynccontextmanager
 
 from fastapi import (
@@ -61,6 +62,8 @@ from .models import (
     Operator,
     OperatorSession,
     Task,
+    TaskConfirmation,
+    TaskDistribution,
     TaskRevision,
 )
 from .task_contract import (
@@ -212,6 +215,40 @@ class TaskRevisionIn(BaseModel):
 
     expected_revision: StrictInt = Field(ge=1)
     config: TaskConfigIn
+
+
+class TaskPublishIn(BaseModel):
+    """Publicação explícita de UMA revisão existente — não é automática.
+    `expected_generation` confirma a decisão vista pelo operador: um
+    POST repetido (retry de rede) vê geração já avançada e recebe 409
+    em vez de gerar uma distribuição espúria."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    revision: StrictInt = Field(ge=1)
+    expected_generation: StrictInt = Field(ge=0)
+
+
+class TaskSuspendIn(BaseModel):
+    """Suspensão explícita do agendamento gerenciado — mesma regra
+    otimista de geração."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    expected_generation: StrictInt = Field(ge=0)
+
+
+class TaskConfirmationIn(BaseModel):
+    """Relato do agente para UMA geração — idempotente por
+    (task_id, generation) com deduplicação por conteúdo."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    generation: StrictInt = Field(ge=1)
+    status: Literal["applied", "failed"]
+    applied_revision: StrictInt | None = Field(default=None, ge=1)
+    detail: str | None = Field(default=None, max_length=1000)
+    agent_time: str | None = Field(default=None, max_length=100)
 
 
 def _canonical_hash(payload: ExecutionIn) -> str:
@@ -545,8 +582,14 @@ def create_app() -> FastAPI:
                 TaskRevision.revision == task.current_revision,
             )
         ).scalar_one()
+        dist = db.execute(
+            select(TaskDistribution).where(
+                TaskDistribution.task_id == task.id
+            )
+        ).scalar_one_or_none()
         result = _task_out(task)
         result["revision"] = _revision_out(revision)
+        result["distribution"] = _distribution_out(dist)
         return result
 
     @app.post(
@@ -725,6 +768,284 @@ def create_app() -> FastAPI:
             db.commit()
             db.refresh(task)
         return _task_out(task)
+
+    # ---- distribuição gerenciada -------------------------------------
+    #
+    # Três conceitos separados: revisão mais recente (task_revisions),
+    # revisão PUBLICADA (task_distributions) e revisão CONFIRMADA pelo
+    # agente (task_confirmations + colunas confirmed_*). Cadastrar ou
+    # editar nunca publica — publicar e suspender são ações admin
+    # explícitas, serializadas por FOR UPDATE na linha da distribuição
+    # com `expected_generation` otimista.
+
+    def _locked_distribution(db: Session, task_id: uuid.UUID) -> TaskDistribution:
+        """Linha da distribuição SOB LOCK — cria-a se ausente
+        (tarefa existente = não publicada) e aplica FOR UPDATE."""
+        db.execute(
+            pg_insert(TaskDistribution)
+            .values(task_id=task_id)
+            .on_conflict_do_nothing()
+        )
+        return db.execute(
+            select(TaskDistribution)
+            .where(TaskDistribution.task_id == task_id)
+            .with_for_update()
+        ).scalar_one()
+
+    def _distribution_out(dist: TaskDistribution | None) -> dict:
+        if dist is None:
+            return {
+                "generation": 0,
+                "published_revision": None,
+                "desired_action": "none",
+                "confirmed": None,
+            }
+        return {
+            "generation": dist.generation,
+            "published_revision": dist.published_revision,
+            "desired_action": dist.desired_action,
+            "updated_at": dist.updated_at.isoformat(),
+            "confirmed": (
+                {
+                    "generation": dist.confirmed_generation,
+                    "status": dist.confirmed_status,
+                    "applied_revision": dist.confirmed_revision,
+                    "detail": dist.confirmed_detail,
+                    "agent_time": dist.confirmed_agent_time,
+                    "received_at": (
+                        dist.confirmed_at.isoformat()
+                        if dist.confirmed_at else None
+                    ),
+                }
+                if dist.confirmed_generation is not None
+                else None
+            ),
+        }
+
+    def _check_expected_generation(dist: TaskDistribution, expected: int):
+        if dist.generation != expected:
+            raise HTTPException(
+                409,
+                f"estado de distribuição está na geração "
+                f"{dist.generation} — a decisão esperada "
+                f"({expected}) ficou obsoleta; recarregue antes de agir",
+            )
+
+    @app.post(
+        "/api/v1/tasks/{task_id}/publish",
+        dependencies=[Depends(csrf_guard)],
+    )
+    def publish_task(
+        task_id: uuid.UUID,
+        payload: TaskPublishIn,
+        identity: AdminIdentity = Depends(require_admin_identity),
+        db: Session = Depends(session),
+    ) -> dict:
+        task = _get_task(db, task_id)
+        if task.archived_at is not None:
+            raise HTTPException(409, "tarefa arquivada não aceita publicação")
+        _get_revision(db, task, payload.revision)  # 404 se inexistente
+        dist = _locked_distribution(db, task_id)
+        _check_expected_generation(dist, payload.expected_generation)
+        dist.generation += 1
+        dist.published_revision = payload.revision
+        dist.desired_action = "apply"
+        dist.author_kind = identity.kind
+        dist.author_ref = identity.ref
+        dist.updated_at = datetime.now(UTC)
+        db.commit()
+        db.refresh(dist)
+        result = _task_out(task)
+        result["distribution"] = _distribution_out(dist)
+        return result
+
+    @app.post(
+        "/api/v1/tasks/{task_id}/suspend",
+        dependencies=[Depends(csrf_guard)],
+    )
+    def suspend_task(
+        task_id: uuid.UUID,
+        payload: TaskSuspendIn,
+        identity: AdminIdentity = Depends(require_admin_identity),
+        db: Session = Depends(session),
+    ) -> dict:
+        """Suspende o agendamento gerenciado — não apaga snapshots,
+        configurações ou histórico e não interrompe backup em execução.
+        Disponível inclusive para tarefa arquivada."""
+        task = _get_task(db, task_id)
+        dist = _locked_distribution(db, task_id)
+        _check_expected_generation(dist, payload.expected_generation)
+        dist.generation += 1
+        dist.desired_action = "suspend"
+        dist.author_kind = identity.kind
+        dist.author_ref = identity.ref
+        dist.updated_at = datetime.now(UTC)
+        db.commit()
+        db.refresh(dist)
+        result = _task_out(task)
+        result["distribution"] = _distribution_out(dist)
+        return result
+
+    # ---- consulta do agente: estado desejado ---------------------------
+
+    def _desired_envelope(
+        db: Session, task: Task, dist: TaskDistribution
+    ) -> dict:
+        # suspend sem publicação: não existe revisão a exportar — o
+        # envelope diz apenas "desative o agendamento gerenciado"
+        revision = (
+            _get_revision(db, task, dist.published_revision)
+            if dist.published_revision is not None
+            else None
+        )
+        envelope = {
+            "task_id": str(task.id),
+            "agent_id": str(task.agent_id),
+            "generation": dist.generation,
+            "action": dist.desired_action,
+            "revision": dist.published_revision,
+            "contract_version": (
+                revision.contract_version if revision is not None else 1
+            ),
+        }
+        if dist.desired_action == "apply":
+            envelope["task"] = export_taskspec(
+                task_id=task.id,
+                name=revision.config["name"],
+                client_id=task.agent.client_id,
+                client_name=(
+                    revision.client_name or task.agent.client.name
+                ),
+                agent_id=task.agent_id,
+                spec=revision.config["spec"],
+            )
+            # agenda fica no envelope — separada do TaskSpec
+            envelope["schedule"] = revision.config["schedule"]
+        envelope["hash"] = hashlib.sha256(
+            json.dumps(envelope, sort_keys=True, separators=(",", ":"))
+            .encode()
+        ).hexdigest()
+        return envelope
+
+    @app.get("/api/v1/agent/tasks/desired")
+    def agent_desired_tasks(
+        limit: int = Query(100, ge=1, le=500),
+        offset: int = Query(0, ge=0),
+        agent: Agent = Depends(require_agent),
+        db: Session = Depends(session),
+    ) -> dict:
+        """Estado desejado DO agente autenticado — paginação explícita:
+        `total` diz se há mais páginas; ausência na página NUNCA é
+        autorização para remover agendamento."""
+        base = (
+            select(TaskDistribution)
+            .join(Task, Task.id == TaskDistribution.task_id)
+            .where(
+                Task.agent_id == agent.id,
+                TaskDistribution.desired_action != "none",
+            )
+        )
+        total = db.execute(
+            select(func.count()).select_from(base.subquery())
+        ).scalar_one()
+        rows = db.execute(
+            base.order_by(TaskDistribution.task_id)
+            .limit(limit)
+            .offset(offset)
+        ).scalars()
+        return {
+            "agent_id": str(agent.id),
+            "offset": offset,
+            "limit": limit,
+            "total": total,
+            "tasks": [
+                _desired_envelope(db, row.task, row) for row in rows
+            ],
+        }
+
+    # ---- confirmação do agente -----------------------------------------
+
+    def _confirmation_hash(task_id: uuid.UUID, payload: TaskConfirmationIn) -> str:
+        blob = json.dumps(
+            {
+                "task_id": str(task_id),
+                **payload.model_dump(mode="json"),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(blob.encode()).hexdigest()
+
+    @app.post("/api/v1/agent/tasks/{task_id}/confirmations")
+    def agent_confirm_task(
+        task_id: uuid.UUID,
+        payload: TaskConfirmationIn,
+        agent: Agent = Depends(require_agent),
+        db: Session = Depends(session),
+    ) -> dict:
+        """Confirmação idempotente por (task_id, generation): mesmo
+        conteúdo → duplicate; conteúdo diferente para a MESMA geração →
+        409. Geração antiga é registrada (log) mas NÃO promove o estado
+        confirmado; geração futura → 409."""
+        task = db.get(Task, task_id)
+        if task is None or task.agent_id != agent.id:
+            # sem vazar existência de tarefas alheias
+            raise HTTPException(404, "tarefa inexistente")
+        dist = _locked_distribution(db, task_id)
+        if payload.generation > dist.generation:
+            raise HTTPException(
+                409,
+                f"geração {payload.generation} ainda não existe — "
+                f"vigente: {dist.generation}",
+            )
+        digest = _confirmation_hash(task_id, payload)
+        row = db.execute(
+            pg_insert(TaskConfirmation)
+            .values(
+                task_id=task_id,
+                generation=payload.generation,
+                status=payload.status,
+                applied_revision=payload.applied_revision,
+                detail=payload.detail,
+                agent_time=payload.agent_time,
+                payload_hash=digest,
+            )
+            .on_conflict_do_nothing(constraint="uq_task_confirmation")
+            .returning(TaskConfirmation.id)
+        ).scalar_one_or_none()
+        if row is None:
+            existing = db.execute(
+                select(TaskConfirmation).where(
+                    TaskConfirmation.task_id == task_id,
+                    TaskConfirmation.generation == payload.generation,
+                )
+            ).scalar_one()
+            if existing.payload_hash != digest:
+                raise HTTPException(
+                    409,
+                    "confirmação já recebida com conteúdo diferente",
+                )
+            outcome = "duplicate"
+        else:
+            outcome = "recorded"
+        # só a geração VIGENTE pode promover o estado confirmado —
+        # uma confirmação atrasada fica no log, nunca rebaixa o mostrado
+        promoted = payload.generation == dist.generation
+        if promoted:
+            dist.confirmed_generation = payload.generation
+            dist.confirmed_status = payload.status
+            dist.confirmed_revision = payload.applied_revision
+            dist.confirmed_detail = payload.detail
+            dist.confirmed_agent_time = payload.agent_time
+            dist.confirmed_at = datetime.now(UTC)
+            db.commit()
+        else:
+            db.commit()  # só o log
+        return {
+            "status": outcome,
+            "promoted": promoted,
+            "current_generation": dist.generation,
+        }
 
     @app.get("/api/v1/executions", dependencies=[Depends(require_viewer)])
     def list_executions(

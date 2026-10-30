@@ -1905,3 +1905,60 @@ Consolida os três pontos restantes da revisão do 25df71e.
 - HTTP sem banco: 23/23 — URLs com `@`/espaço na senha, aninhadas.
 - Portal: 73/73 vitest; typecheck + build limpos.
 - E2E real (Chromium + PG): 3/3, homologação HTTPS pulada.
+
+---
+
+## 2026-10-30 — Distribuição gerenciada de tarefas (agente Linux)
+
+Incremento separando três estados: revisão cadastrada ≠ revisão
+publicada ≠ revisão aplicada confirmada pelo agente.
+
+### Central (API + migração 5)
+
+- `task_distributions`: estado desejado por tarefa — `generation`
+  monotônica (publicar/atualizar/suspender na mesma revisão são
+  distintos), `published_revision`, `desired_action`
+  (none/apply/suspend), autor e colunas `confirmed_*` da geração
+  vigente.
+- `task_confirmations`: log por (task_id, generation) com
+  payload_hash — deduplicação idêntica às execuções.
+- `POST /tasks/{id}/publish {revision, expected_generation}` e
+  `POST /tasks/{id}/suspend {expected_generation}`: admin+CSRF,
+  FOR UPDATE na distribuição — corrida resolve uma única decisão.
+  Arquivar NÃO suspende; suspender funciona em arquivada.
+- `GET /agent/tasks/desired`: paginado (total explícito), envelopes
+  com TaskSpec exportado (só referências de credencial), agenda
+  separada, contract_version e hash canônico.
+- `POST /agent/tasks/{id}/confirmations`: identidade pela credencial;
+  geração antiga fica no log (sem promover); futura → 409; received_at
+  do servidor.
+
+### Agente Linux
+
+- `distribution.py`: consulta paginada, validação de
+  identidade/geração/hash/contrato + TaskSpec real, journal durável
+  em `<state>/managed/tasks.d/<id>/` (gen-N imutável, journal.jsonl,
+  current.json atômico), confirmações na fila SQLite `confirmations`
+  (v6, separada da outbox), locks maintenance SH + manage-vínculo EX,
+  vínculo `binding.json` (troca de central exige --rebind).
+- `systemd.py`: units `macip-backup-managed-<id>` com marcadores de
+  vínculo; agenda manual/hourly/daily/weekly → OnCalendar com fuso
+  IANA + Persistent=true; manual = só service; suspensão = só disable
+  do timer; timer independente de consulta `macip-backup-pull-<bond>`.
+- CLI: `pull-check`, `pull-tasks`, `pull-status`, `schedule-pull`,
+  `unschedule-pull`.
+
+### Portal
+
+Seção de distribuição no detalhe: revisão cadastrada/publicada/
+aplicada, geração, ação desejada, última confirmação; "Publicar" e
+"Suspender" com explicação prévia e controle de identidade de
+visita/mutação; viewer lê sem escrever.
+
+### Prova integrada (descartável)
+
+`tests/test_e2e_distribution.py`: API real (uvicorn) + PG real +
+`pull-tasks`/`agent`/`sync` como subprocessos + backup Restic local
+real + units em HOME descartável + systemd --user real (enable/
+disable) — fluxo cadastro→publish→pull→units→backup→resultado→
+aplicada→update→suspend.

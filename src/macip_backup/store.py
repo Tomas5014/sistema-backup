@@ -37,7 +37,7 @@ if TYPE_CHECKING:
     from .models import TaskSpec
     from .orchestrator import AttemptResult, DestinationResult, ExecutionResult
 
-_SCHEMA_VERSION = 5
+_SCHEMA_VERSION = 6
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS executions (
@@ -86,6 +86,20 @@ CREATE TABLE IF NOT EXISTS attempts (
     FOREIGN KEY (execution_id) REFERENCES executions(execution_id)
 );
 CREATE INDEX IF NOT EXISTS idx_executions_task ON executions(task_id, started_at_utc);
+CREATE TABLE IF NOT EXISTS confirmations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    bond TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    generation INTEGER NOT NULL,
+    payload TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT,
+    last_error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (bond, task_id, generation)
+);
 CREATE TABLE IF NOT EXISTS outbox (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     execution_id TEXT NOT NULL UNIQUE,
@@ -161,6 +175,8 @@ class ExecutionStore:
                 self._migrate_v3()
             if version < 5:
                 self._migrate_v4()
+            if version < 6:
+                self._migrate_v5()
             self._connection.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             self._connection.execute("COMMIT")
         except Exception:
@@ -344,6 +360,109 @@ class ExecutionStore:
                 self._connection.execute(
                     f"ALTER TABLE executions ADD COLUMN {name} {definition}"
                 )
+
+    def _migrate_v5(self) -> None:
+        """v5 → v6: fila de confirmações de distribuição — SEPARADA da
+        outbox de execuções (payload daquela é imutável)."""
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS confirmations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                bond TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                generation INTEGER NOT NULL,
+                payload TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at TEXT,
+                last_error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE (bond, task_id, generation)
+            )
+            """
+        )
+
+    # -- confirmações de distribuição ---------------------------------------
+    #
+    # `bond` = identidade do vínculo (endpoint + UUID central) já normalizada
+    # pelo chamador — uma confirmação só volta para a central que a gerou.
+    # UNIQUE(bond, task_id, generation): o reenvio de uma resposta HTTP
+    # perdida é seguro — a linha já existe, sem duplicar.
+
+    def enqueue_confirmation(
+        self, bond: str, task_id: str, generation: int, payload: str
+    ) -> None:
+        now = _utcnow()
+        self._connection.execute(
+            "INSERT OR IGNORE INTO confirmations "
+            "(bond, task_id, generation, payload, status, attempts, "
+            "created_at, updated_at) VALUES (?, ?, ?, ?, 'pending', 0, ?, ?)",
+            (bond, task_id, generation, payload, now, now),
+        )
+        self._connection.commit()
+
+    def pending_confirmations(
+        self, bond: str, now: str, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        rows = self._connection.execute(
+            "SELECT id, task_id, generation, payload, attempts "
+            "FROM confirmations WHERE bond = ? AND status = 'pending' "
+            "AND (next_attempt_at IS NULL OR next_attempt_at <= ?) "
+            "ORDER BY id LIMIT ?",
+            (bond, now, limit),
+        ).fetchall()
+        return [
+            {
+                "id": row[0],
+                "task_id": row[1],
+                "generation": row[2],
+                "payload": row[3],
+                "attempts": row[4],
+            }
+            for row in rows
+        ]
+
+    def _confirmation_update(
+        self, row_id: int, status: str, error: str | None,
+        next_attempt_at: str | None = None,
+    ) -> None:
+        self._connection.execute(
+            "UPDATE confirmations SET status = ?, attempts = attempts + 1, "
+            "next_attempt_at = ?, last_error = ?, updated_at = ? WHERE id = ?",
+            (status, next_attempt_at, error, _utcnow(), row_id),
+        )
+        self._connection.commit()
+
+    def confirmation_sent(self, row_id: int) -> None:
+        self._connection.execute(
+            "UPDATE confirmations SET status = 'sent', updated_at = ? "
+            "WHERE id = ?",
+            (_utcnow(), row_id),
+        )
+        self._connection.commit()
+
+    def confirmation_retry(
+        self, row_id: int, error: str, next_attempt_at: str
+    ) -> None:
+        self._confirmation_update(row_id, "pending", error, next_attempt_at)
+
+    def confirmation_blocked(self, row_id: int, error: str) -> None:
+        self._confirmation_update(row_id, "blocked", error)
+
+    def confirmation_state(self) -> list[dict[str, Any]]:
+        rows = self._connection.execute(
+            "SELECT bond, task_id, generation, status, attempts, "
+            "last_error, updated_at FROM confirmations ORDER BY id"
+        ).fetchall()
+        return [
+            {
+                "bond": row[0], "task_id": row[1], "generation": row[2],
+                "status": row[3], "attempts": row[4],
+                "last_error": row[5], "updated_at": row[6],
+            }
+            for row in rows
+        ]
 
     # -- outbox: vinculado à identidade/endpoint do enfileiramento -----------
 

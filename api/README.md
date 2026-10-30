@@ -292,6 +292,48 @@ comparado ao snapshot atual; se idêntico, responde `unchanged` —
 mas só depois da revalidação da expected sob o lock, nunca por uma
 leitura obsoleta.
 
+### Distribuição gerenciada
+
+Três conceitos separados: revisão **cadastrada** (mais recente),
+revisão **publicada** e revisão **confirmada aplicada** pelo agente.
+Criar/editar nunca publica — publicação e suspensão são ações
+administrativas explícitas com CSRF + controle otimista de geração.
+
+- `task_distributions` (1 linha/tarefa, criada sob demanda):
+  `generation` monotônica que distingue publicação, atualização e
+  suspensão mesmo com a mesma revisão; `published_revision`;
+  `desired_action` (`none`/`apply`/`suspend`); colunas `confirmed_*`
+  com a última confirmação **da geração vigente**.
+- `task_confirmations`: log idempotente por `(task_id, generation)`
+  com `payload_hash` — mesmo conteúdo → `duplicate`; conteúdo diverso
+  para a mesma geração → 409.
+
+**Rotas administrativas** (`require_admin_identity` + `csrf_guard`,
+`FOR UPDATE` na linha da distribuição):
+
+- `POST /api/v1/tasks/{id}/publish` `{revision, expected_generation}`
+  — 409 em geração obsoleta, revisão inexistente → 404, arquivada → 409.
+- `POST /api/v1/tasks/{id}/suspend` `{expected_generation}` —
+  suspende só a agenda gerenciada: não apaga snapshots, configurações
+  ou histórico e não interrompe execução. Disponível também em tarefa
+  arquivada (arquivar não suspende por si).
+
+**Rotas do agente** (identidade exclusivamente da credencial Bearer —
+o agente só vê/confirma tarefas vinculadas a ele):
+
+- `GET /api/v1/agent/tasks/desired?limit&offset` →
+  `{agent_id, offset, limit, total, tasks[]}` — paginação explícita;
+  ausência numa página não é autorização para desinstalar nada.
+  Cada envelope traz `task_id`, `agent_id`, `generation`, `action`,
+  `revision`, `contract_version`, `hash` (sha256 do JSON canônico do
+  envelope sem hash) e, em `apply`, `task` (TaskSpec exportado —
+  somente referências de credencial) + `schedule` separado.
+- `POST /api/v1/agent/tasks/{id}/confirmations`
+  `{generation, status: applied|failed, applied_revision?, detail?,
+  agent_time?}` — geração futura → 409; geração antiga é registrada no
+  log (`promoted: false`) sem rebaixar o estado confirmado; a vigente
+  promove `confirmed_*`. `received_at` usa horário do servidor.
+
 ### Exportação (`tarefa.json`)
 
 - `id` = UUID central da tarefa (não o nome);

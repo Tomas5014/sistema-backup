@@ -52,6 +52,9 @@ def client():
 
     os.environ["MACIP_API_DATABASE_URL"] = TEST_URL
     os.environ["MACIP_API_ADMIN_TOKEN"] = ADMIN_TOKEN
+    # testes de limite ajustam o env global — cada teste começa com o
+    # limite padrão, sem vazar configuração para o próximo
+    os.environ.pop("MACIP_API_MAX_BODY_BYTES", None)
     from macip_backup_api import app as app_module
     from macip_backup_api import db as db_module
 
@@ -61,6 +64,8 @@ def client():
         engine = db_module.engine()
         with engine.begin() as connection:
             for table in (
+                "task_confirmations",
+                "task_distributions",
                 "task_revisions",
                 "tasks",
                 "login_attempts",

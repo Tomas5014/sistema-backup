@@ -532,7 +532,7 @@ class OutboxTestCase(OutboxBase):
         version = sqlite3.connect(self.db).execute(
             "PRAGMA user_version"
         ).fetchone()[0]
-        self.assertEqual(version, 5)
+        self.assertEqual(version, 6)
         columns = {row[1] for row in sqlite3.connect(self.db).execute("PRAGMA table_info(executions)")}
         self.assertIn("outbox_endpoint", columns)
         self.assertEqual(self._outbox(), before)

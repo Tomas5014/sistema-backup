@@ -390,6 +390,70 @@ units existentes. Cada unit tem marcador exato da instalação; geração e remo
 recusam arquivos de outra instalação ou sem marcador. `unschedule` desativa o
 timer antes de apagar arquivos; se a desativação falhar, nada é removido.
 
+## Gerenciamento central (opcional)
+
+Com `central.json` configurado, a central pode **publicar revisões** de
+tarefas para o agente. Nada muda sem ativação local explícita: sem
+`central.json` o agente funciona exatamente como antes.
+
+```jsonc
+// ~/.config/macip-backup/central.json — o token NUNCA vai no arquivo;
+// token_environment NOMEIA a variável (resolvida env → kernel keyring)
+// só durante as chamadas HTTP.
+{
+  "url": "https://central.exemplo.local",
+  "agent_id": "<uuid-central-do-agente>",
+  "token_environment": "MACIP_API_TOKEN"
+}
+```
+
+```bash
+# Inspeção SEM efeitos — mostra o desejado vs. o aplicado sem tocar
+# em configurações, units ou confirmações:
+macip-backup-poc pull-check --central central.json --store agent.db
+
+# Reconciliação: consulta páginas do estado desejado, valida cada
+# envelope (identidade, geração, hash canônico, contract_version,
+# TaskSpec real), instala configuração+agenda gerenciada e confirma:
+macip-backup-poc pull-tasks --central central.json --store agent.db
+
+# Estado local (offline): vínculo, journal por tarefa e fila de
+# confirmações:
+macip-backup-poc pull-status --central central.json --store agent.db
+
+# Timer INDEPENDENTE de consulta periódica (não substitui backup/sync):
+macip-backup-poc schedule-pull --central central.json --store agent.db   --calendar '*-*-* *:10:00' --enable
+
+# Troca de central exige adoção explícita — rebind não é automático:
+macip-backup-poc pull-tasks --central nova-central.json   --store agent.db --rebind
+```
+
+**Estado local gerenciado** em `<MACIP_STATE>/managed/`:
+
+- `binding.json` — vínculo (endpoint normalizado + UUID central);
+- `tasks.d/<id>/gen-<N>.json` — envelopes imutáveis recebidos;
+- `tasks.d/<id>/journal.jsonl` — passos duráveis (received →
+  validated → units → applied) — interrupção retoma no passo que falta;
+- `tasks.d/<id>/current.json` — a configuração que as units executam;
+  só avança DEPOIS de todos os efeitos locais — configuração inaplicável
+  preserva a última funcional.
+
+**Units gerenciadas** `macip-backup-managed-<uuid>` carregam marcadores
+de vínculo (`managed-task`, `central-agent`): units alheias com o mesmo
+nome nunca são sobrescritas nem removidas. `manual` mantém só o service
+(configuração disponível sem timer). Suspensão desabilita **apenas** o
+timer daquela tarefa — snapshots, configuração e backup em execução
+permanecem. `Persistent=true` recupera disparos perdidos com a máquina
+desligada — nunca dispara backup ao baixar a configuração.
+
+**Confirmações** ficam na fila `confirmations` do SQLite (separada da
+outbox de execuções): resposta HTTP perdida → reenvio na rodada
+seguinte com deduplicação por (task_id, geração) na central.
+
+**Falhas transitórias** (central fora, token ausente/revogado, rede)
+produzem diagnóstico e nova tentativa — nunca suspendem nem removem o
+que já está configurado.
+
 ## Testes
 
 ```bash

@@ -9,6 +9,8 @@ import {
   findClient,
   getTask,
   listRevisions,
+  publishTask,
+  suspendTask,
   type RevisionSummary,
   type TaskDetail,
 } from "../api";
@@ -30,6 +32,8 @@ export default function TaskDetailPage() {
   const [editError, setEditError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [archiveOpen, setArchiveOpen] = useState(false);
+  const [publishOpen, setPublishOpen] = useState(false);
+  const [suspendOpen, setSuspendOpen] = useState(false);
   const generation = useRef(0);
   const taskIdRef = useRef(taskId); // rota vigente — distingue callbacks atrasados
   // identidade da VISITA à rota: A→B→A são visitas diferentes — um
@@ -87,6 +91,8 @@ export default function TaskDetailPage() {
     setEditing(false);
     setEditError(null);
     setArchiveOpen(false);
+    setPublishOpen(false);
+    setSuspendOpen(false);
     setPending(false); // operação pendente da rota anterior não trava a nova
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -158,8 +164,66 @@ export default function TaskDetailPage() {
     }
   }
 
+  async function confirmPublish() {
+    if (pending || !task || !task.distribution) return;
+    const gen = generation.current;
+    const visit = visitRef.current;
+    const op = ++mutationRef.current;
+    const targetId = task.id;
+    const expected = task.distribution.generation;
+    const revision = task.current_revision;
+    setPending(true);
+    setError(null);
+    try {
+      const updated = await publishTask(targetId, revision, expected);
+      if (staleSave(gen, targetId, visit)) return;
+      setPublishOpen(false);
+      setTask((t) => (t?.id === targetId ? { ...t, ...updated } : t));
+    } catch (err) {
+      if (staleSave(gen, targetId, visit)) return;
+      setError(err instanceof ApiError ? err.message : "Falha inesperada.");
+    } finally {
+      releasePending(op);
+    }
+  }
+
+  async function confirmSuspend() {
+    if (pending || !task || !task.distribution) return;
+    const gen = generation.current;
+    const visit = visitRef.current;
+    const op = ++mutationRef.current;
+    const targetId = task.id;
+    const expected = task.distribution.generation;
+    setPending(true);
+    setError(null);
+    try {
+      const updated = await suspendTask(targetId, expected);
+      if (staleSave(gen, targetId, visit)) return;
+      setSuspendOpen(false);
+      setTask((t) => (t?.id === targetId ? { ...t, ...updated } : t));
+    } catch (err) {
+      if (staleSave(gen, targetId, visit)) return;
+      setError(err instanceof ApiError ? err.message : "Falha inesperada.");
+    } finally {
+      releasePending(op);
+    }
+  }
+
   const admin = operator?.role === "admin";
   const shownTask = task?.id === taskId ? task : null;
+  const dist = shownTask?.distribution;
+  // aplicada = confirmação do agente para a geração vigente
+  const appliedRevision =
+    dist?.confirmed?.status === "applied" &&
+    dist.confirmed.generation === dist.generation
+      ? dist.confirmed.applied_revision
+      : null;
+  const awaitingApply =
+    dist !== undefined &&
+    dist !== null &&
+    dist.desired_action === "apply" &&
+    (dist.confirmed === null ||
+      dist.confirmed.generation !== dist.generation);
 
   return (
     <section>
@@ -198,6 +262,111 @@ export default function TaskDetailPage() {
                 Arquivar tarefa
               </button>
             </div>
+          ) : null}
+
+          <h2>Distribuição gerenciada</h2>
+          {dist ? (
+            <>
+              <dl>
+                <dt>Revisão cadastrada</dt>
+                <dd>{shownTask.current_revision}</dd>
+                <dt>Revisão publicada</dt>
+                <dd>{dist.published_revision ?? "nenhuma"}</dd>
+                <dt>Revisão aplicada pelo agente</dt>
+                <dd>{appliedRevision ?? "—"}</dd>
+                <dt>Geração</dt>
+                <dd>{dist.generation}</dd>
+                <dt>Ação desejada</dt>
+                <dd>
+                  {dist.desired_action === "apply"
+                    ? "agenda instalada"
+                    : dist.desired_action === "suspend"
+                      ? "agenda suspensa"
+                      : "não publicada"}
+                </dd>
+                <dt>Última confirmação</dt>
+                <dd>
+                  {dist.confirmed ? (
+                    <>
+                      {dist.confirmed.status === "applied"
+                        ? "aplicada"
+                        : "falha"}{" "}
+                      (geração {dist.confirmed.generation})
+                      {dist.confirmed.received_at
+                        ? ` — ${new Date(dist.confirmed.received_at).toLocaleString("pt-BR")}`
+                        : ""}
+                      {dist.confirmed.status === "failed" &&
+                      dist.confirmed.detail
+                        ? ` — ${dist.confirmed.detail}`
+                        : ""}
+                    </>
+                  ) : (
+                    "nenhuma confirmação ainda"
+                  )}
+                </dd>
+              </dl>
+              {awaitingApply ? (
+                <p>
+                  Aguardando a aplicação pelo agente — a publicação foi
+                  registrada na central; a agenda só é efetiva quando o
+                  agente confirmar.
+                </p>
+              ) : null}
+              {admin && (!shownTask.archived || dist.published_revision !== null) ? (
+                <div className="row">
+                  {!shownTask.archived ? (
+                    <button type="button" onClick={() => setPublishOpen(true)}>
+                      Publicar revisão {shownTask.current_revision}
+                    </button>
+                  ) : null}
+                  {dist.published_revision !== null ? (
+                    <button type="button" onClick={() => setSuspendOpen(true)}>
+                      Suspender agendamento
+                    </button>
+                  ) : null}
+                </div>
+              ) : null}
+            </>
+          ) : null}
+
+          {publishOpen && dist ? (
+            <fieldset className="box">
+              <legend>Confirmar publicação</legend>
+              <p>
+                A revisão {shownTask.current_revision} será publicada para
+                o agente (geração {dist.generation + 1}). O agente instala
+                a configuração e a agenda na próxima consulta —
+                publicar <strong>não executa</strong> backup imediato e
+                não interrompe uma execução em andamento. Senhas e
+                credenciais permanecem no agente.
+              </p>
+              <button type="button" disabled={pending} onClick={confirmPublish}>
+                {pending ? "Publicando…" : "Confirmar publicação"}
+              </button>
+              <button type="button" onClick={() => setPublishOpen(false)}>
+                Cancelar
+              </button>
+            </fieldset>
+          ) : null}
+
+          {suspendOpen && dist ? (
+            <fieldset className="box">
+              <legend>Confirmar suspensão</legend>
+              <p>
+                O agendamento gerenciado será suspenso na próxima consulta
+                do agente (geração {dist.generation + 1}): o timer da
+                tarefa é desabilitado, mas a configuração, os snapshots,
+                o histórico e um backup em execução{" "}
+                <strong>não são afetados</strong>. Suspensão não apaga a
+                tarefa — uma nova publicação a reativa.
+              </p>
+              <button type="button" disabled={pending} onClick={confirmSuspend}>
+                {pending ? "Suspendendo…" : "Confirmar suspensão"}
+              </button>
+              <button type="button" onClick={() => setSuspendOpen(false)}>
+                Cancelar
+              </button>
+            </fieldset>
           ) : null}
 
           {archiveOpen ? (

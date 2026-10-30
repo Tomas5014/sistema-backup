@@ -150,6 +150,61 @@ def main() -> int:
     )
     unsync_schedule_parser.add_argument("--store", type=Path, required=True)
     unsync_schedule_parser.add_argument("--central", type=Path, required=True)
+
+    # ---- gerenciamento central (opcional e explicitamente ativado) ----
+    pull_check = subcommands.add_parser(
+        "pull-check",
+        help="inspeciona o que a reconciliação aplicaria — SEM efeitos "
+             "(não toca configurações, units nem confirmações)",
+    )
+    pull_check.add_argument("--central", type=Path, required=True)
+    pull_check.add_argument(
+        "--store", type=Path, default=Path("/var/lib/macip-backup/agent.db"),
+    )
+    pull_check.add_argument(
+        "--rebind", action="store_true",
+        help="adota explicitamente um novo vínculo (o anterior para de "
+             "administrar as tarefas)",
+    )
+    pull_tasks = subcommands.add_parser(
+        "pull-tasks",
+        help="consulta a central, aplica o estado desejado e confirma "
+             "a revisão aplicada",
+    )
+    pull_tasks.add_argument("--central", type=Path, required=True)
+    pull_tasks.add_argument(
+        "--store", type=Path, default=Path("/var/lib/macip-backup/agent.db"),
+    )
+    pull_tasks.add_argument("--rebind", action="store_true")
+    pull_tasks.add_argument(
+        "--no-activate", action="store_true",
+        help="escreve e valida as units sem daemon-reload/enable "
+             "(prova sem sessão systemd de usuário)",
+    )
+    pull_status = subcommands.add_parser(
+        "pull-status",
+        help="estado local gerenciado: vínculo, journals e fila de "
+             "confirmações (offline)",
+    )
+    pull_status.add_argument("--central", type=Path, required=True)
+    pull_status.add_argument(
+        "--store", type=Path, default=Path("/var/lib/macip-backup/agent.db"),
+    )
+    pull_schedule = subcommands.add_parser(
+        "schedule-pull",
+        help="instala timer INDEPENDENTE para consulta/reconciliação "
+             "periódica (não substitui backup nem sync)",
+    )
+    pull_schedule.add_argument("--store", type=Path, required=True)
+    pull_schedule.add_argument("--central", type=Path, required=True)
+    pull_schedule.add_argument("--calendar", required=True)
+    pull_schedule.add_argument("--enable", action="store_true")
+    pull_unschedule = subcommands.add_parser(
+        "unschedule-pull",
+        help="remove somente o timer de consulta do vínculo informado",
+    )
+    pull_unschedule.add_argument("--store", type=Path, required=True)
+    pull_unschedule.add_argument("--central", type=Path, required=True)
     arguments = parser.parse_args()
 
     try:
@@ -163,6 +218,44 @@ def main() -> int:
             from .systemd import schedule_json, uninstall_schedule
 
             print(schedule_json(uninstall_schedule(arguments.task_id)))
+            return 0
+        if arguments.command == "pull-check":
+            from .distribution import inspect
+
+            print(json.dumps(
+                inspect(arguments.central, arguments.store,
+                        rebind=arguments.rebind),
+                ensure_ascii=False))
+            return 0
+        if arguments.command == "pull-tasks":
+            from .distribution import reconcile
+
+            summary = reconcile(
+                arguments.central, arguments.store,
+                activate=not arguments.no_activate,
+                rebind=arguments.rebind,
+            )
+            print(json.dumps(summary, ensure_ascii=False))
+            return 0
+        if arguments.command == "pull-status":
+            from .distribution import status
+
+            print(json.dumps(
+                status(arguments.central, arguments.store),
+                ensure_ascii=False))
+            return 0
+        if arguments.command == "schedule-pull":
+            from .distribution import schedule_pull
+
+            print(schedule_json(schedule_pull(
+                arguments.store, arguments.central, arguments.calendar,
+                enable=arguments.enable)))
+            return 0
+        if arguments.command == "unschedule-pull":
+            from .distribution import unschedule_pull
+
+            print(schedule_json(unschedule_pull(
+                arguments.store, arguments.central)))
             return 0
         if arguments.command == "unschedule-sync":
             from .systemd import schedule_json, uninstall_sync_schedule

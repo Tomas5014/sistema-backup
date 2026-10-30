@@ -335,6 +335,24 @@ export interface TaskRow {
   distributed: boolean; // sempre false nesta etapa — nada vai ao agente
 }
 
+/** Estado de distribuição informado pela central — a aplicação real
+ * acontece quando o AGENTE confirma (`confirmed`), nunca quando o
+ * POST administrativo retorna. */
+export interface TaskDistribution {
+  generation: number;
+  published_revision: number | null;
+  desired_action: "none" | "apply" | "suspend";
+  updated_at?: string;
+  confirmed: {
+    generation: number;
+    status: "applied" | "failed";
+    applied_revision: number | null;
+    detail: string | null;
+    agent_time: string | null;
+    received_at: string | null;
+  } | null;
+}
+
 export interface TaskRevision {
   revision: number;
   contract_version: number;
@@ -346,6 +364,7 @@ export interface TaskRevision {
 
 export interface TaskDetail extends TaskRow {
   revision: TaskRevision;
+  distribution?: TaskDistribution;
   unchanged?: boolean;
 }
 
@@ -422,6 +441,31 @@ export async function archiveTask(taskId: string): Promise<TaskRow> {
     csrf: true,
   });
   return response.json() as Promise<TaskRow>;
+}
+
+export async function publishTask(
+  taskId: string,
+  revision: number,
+  expectedGeneration: number,
+): Promise<TaskDetail> {
+  const response = await apiFetch(`/api/v1/tasks/${taskId}/publish`, {
+    method: "POST",
+    body: { revision, expected_generation: expectedGeneration },
+    csrf: true,
+  });
+  return response.json() as Promise<TaskDetail>;
+}
+
+export async function suspendTask(
+  taskId: string,
+  expectedGeneration: number,
+): Promise<TaskDetail> {
+  const response = await apiFetch(`/api/v1/tasks/${taskId}/suspend`, {
+    method: "POST",
+    body: { expected_generation: expectedGeneration },
+    csrf: true,
+  });
+  return response.json() as Promise<TaskDetail>;
 }
 
 export async function listCredentials(

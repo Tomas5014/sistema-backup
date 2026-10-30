@@ -245,6 +245,73 @@ class TaskRevision(Base):
     task: Mapped[Task] = relationship(back_populates="revisions")
 
 
+class TaskDistribution(Base):
+    """Estado DESEJADO de distribuição — separado das revisões
+    imutáveis. `generation` é monotônica e distingue publicação,
+    atualização e suspensão mesmo com a mesma revisão. As colunas
+    `confirmed_*` guardam a última confirmação CUJA geração é a
+    vigente — confirmações antigas ficam só no log."""
+
+    __tablename__ = "task_distributions"
+
+    task_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tasks.id"), primary_key=True
+    )
+    generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    published_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # none = nunca publicada; apply = agenda instalada; suspend = timer desligado
+    desired_action: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="none"
+    )
+    author_kind: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    author_ref: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    updated_at = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    confirmed_generation: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+    confirmed_status: Mapped[str | None] = mapped_column(
+        String(20), nullable=True
+    )
+    confirmed_revision: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+    confirmed_detail: Mapped[str | None] = mapped_column(
+        String(1000), nullable=True
+    )
+    confirmed_agent_time: Mapped[str | None] = mapped_column(
+        String(100), nullable=True
+    )
+    confirmed_at = mapped_column(DateTime(timezone=True), nullable=True)
+
+    task: Mapped[Task] = relationship()
+
+
+class TaskConfirmation(Base):
+    """Log durável de confirmações — (task_id, generation) único com
+    hash do conteúdo, como a deduplicação das execuções."""
+
+    __tablename__ = "task_confirmations"
+    __table_args__ = (
+        UniqueConstraint("task_id", "generation", name="uq_task_confirmation"),
+    )
+
+    id = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    task_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tasks.id"), nullable=False, index=True
+    )
+    generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    applied_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    detail: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    agent_time: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    received_at = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
 class SchemaMigration(Base):
     __tablename__ = "schema_migrations"
 

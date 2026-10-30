@@ -55,7 +55,11 @@ class OutboxIntegrationTestCase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tempdir = Path(tempfile.mkdtemp())
-        cls.port = 18443
+        # porta livre sob demanda — um número fixo colide com túneis
+        # e outros serviços do host de desenvolvimento
+        with __import__("socket").socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            cls.port = probe.getsockname()[1]
         env = dict(
             os.environ,
             MACIP_API_DATABASE_URL=TEST_DB,

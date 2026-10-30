@@ -23,6 +23,10 @@ from .models import ConfigurationError, TaskSpec
 
 _UNIT_PREFIX = "macip-backup-agent-"
 _SYNC_UNIT_PREFIX = "macip-backup-sync-"
+_MANAGED_PREFIX = "macip-backup-managed-"
+_PULL_PREFIX = "macip-backup-pull-"
+
+_WEEKDAY_NAMES = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
 
 def unit_directory() -> Path:
@@ -84,6 +88,37 @@ def _assert_writable_units(paths: tuple[Path, ...], install_root: str) -> None:
             raise ConfigurationError(
                 f"{path} existe e sua propriedade não é desta instalação — conteúdo preservado"
             )
+
+
+def schedule_to_calendar(schedule: dict) -> str | None:
+    """Agenda estruturada (contrato central v1) → expressão OnCalendar.
+
+    - manual → None (configuração disponível, sem timer automático);
+    - hourly/daily/weekly → expressão com fuso IANA sufixado
+      (systemd aceita `<expr> <TIMEZONE>`; `systemd-analyze calendar`
+      valida antes de qualquer escrita).
+
+    `Persistent=true` é aplicado pelo par service+timer padrão: um
+    disparo vencido com a máquina desligada corre NA PRÓXIMA ativação —
+    nunca como efeito imediato de baixar a configuração.
+    """
+    kind = schedule.get("kind")
+    if kind == "manual" or kind is None:
+        return None
+    if kind not in {"hourly", "daily", "weekly"}:
+        raise ConfigurationError(f"schedule.kind desconhecido: {kind}")
+    timezone = schedule["timezone"]
+    if kind == "hourly":
+        return f"*-*-* *:{schedule['minute']:02d}:00 {timezone}"
+    if kind == "daily":
+        return f"*-*-* {schedule['hour']:02d}:{schedule['minute']:02d}:00 {timezone}"
+    days = ",".join(
+        sorted(_WEEKDAY_NAMES[day - 1] for day in schedule["weekdays"])
+    )
+    return (
+        f"{days} {schedule['hour']:02d}:{schedule['minute']:02d}:00 "
+        f"{timezone}"
+    )
 
 
 def _sync_identity(store_path: Path, central_path: Path) -> str:
@@ -320,6 +355,247 @@ def install_sync_schedule(
             f"{name}.timer"
         ),
     }
+
+
+def _managed_markers(task_id: str, agent_uuid: str) -> tuple[str, ...]:
+    return (
+        f"# macip-backup: managed-task={task_id}",
+        f"# macip-backup: central-agent={agent_uuid}",
+    )
+
+
+def _assert_managed_units(
+    task_id: str, agent_uuid: str, install_root: str
+) -> None:
+    """Unit gerenciada é propriedade VINCULADA: pertence a esta
+    instalação, àquela tarefa e àquele vínculo central. Units sem
+    marcador ou de outro vínculo NUNCA são sobrescritas/removidas."""
+    unit_dir = unit_directory()
+    expected = set(_managed_markers(task_id, agent_uuid))
+    for suffix in ("service", "timer"):
+        path = unit_dir / f"{_MANAGED_PREFIX}{task_id}.{suffix}"
+        if not path.exists():
+            continue
+        if not _owns_unit(path, install_root):
+            raise ConfigurationError(
+                f"{path} existe e não pertence a esta instalação — "
+                "conteúdo preservado"
+            )
+        markers = set(path.read_text(encoding="utf-8").splitlines())
+        if not expected.issubset(markers):
+            raise ConfigurationError(
+                f"{path} pertence a outra tarefa ou vínculo central — "
+                "conteúdo preservado"
+            )
+
+
+def install_managed_task(
+    task_id: str,
+    config_path: Path,
+    store_path: Path,
+    central_path: Path,
+    agent_uuid: str,
+    schedule: dict,
+    *,
+    activate: bool = True,
+) -> dict[str, str]:
+    """Escreve service (+timer quando a agenda é automática) para a
+    tarefa GERENCIADA. O ExecStart aponta para `current.json` — caminho
+    estável cujo conteúdo só avança depois dos efeitos locais.
+
+    `activate=False` escreve e valida as units sem daemon-reload/
+    enable (prova/inspeção sem sessão systemd)."""
+    config_path = Path(config_path).resolve()
+    store_path = Path(store_path).resolve()
+    central_path = Path(central_path).resolve()
+    calendar = schedule_to_calendar(schedule)
+    if calendar is not None:
+        _validate_calendar(calendar)  # antes de tocar nas units
+    launcher = _installed_launcher()
+    install_root = _installation_root(launcher)
+    _assert_managed_units(task_id, agent_uuid, install_root)
+    name = f"{_MANAGED_PREFIX}{task_id}"
+    exec_line, pythonpath_line = _execution_lines(
+        "agent",
+        f"{_unit_value(config_path)} --store {_unit_value(store_path)}"
+        f" --central {_unit_value(central_path)}",
+        install_root,
+    )
+    unit_dir = unit_directory()
+    unit_dir.mkdir(parents=True, exist_ok=True)
+    service_path = unit_dir / f"{name}.service"
+    timer_path = unit_dir / f"{name}.timer"
+    markers = "\n".join(
+        (_ownership_marker(install_root),
+         *_managed_markers(task_id, agent_uuid))
+    )
+    service_path.write_text(
+        f"""{markers}
+[Unit]
+Description=MAC IP Backup agent — tarefa gerenciada {task_id}
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+{pythonpath_line}{_environment_file_line()}
+{exec_line}
+""",
+        encoding="utf-8",
+    )
+    timer_written = False
+    if calendar is not None:
+        timer_path.write_text(
+            f"""{markers}
+[Unit]
+Description=Agendamento gerenciado: tarefa {task_id}
+
+[Timer]
+OnCalendar={calendar}
+Persistent=true
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target
+""",
+            encoding="utf-8",
+        )
+        timer_written = True
+    elif timer_path.exists():
+        # agenda virou `manual` (ou ficou manual): o timer desta tarefa
+        # — e só ele — sai do caminho, sem tocar no backup em execução
+        _assert_managed_units(task_id, agent_uuid, install_root)
+        if activate:
+            _systemctl("disable", "--now", f"{name}.timer")
+        timer_path.unlink()
+    if activate:
+        _systemctl("daemon-reload")
+        if timer_written:
+            _systemctl("enable", "--now", f"{name}.timer")
+    return {
+        "task_id": task_id,
+        "service": str(service_path),
+        "timer": str(timer_path) if timer_written else None,
+        "timer_name": f"{name}.timer" if timer_written else None,
+        "activated": activate and timer_written,
+    }
+
+
+def suspend_managed_task(
+    task_id: str, agent_uuid: str, *, activate: bool = True
+) -> dict[str, str]:
+    """Suspensão: DESABILITA o timer da tarefa gerenciada — e nada
+    mais. Configuração, unit e backups em execução seguem intocados."""
+    install_root = _installation_root(_installed_launcher())
+    _assert_managed_units(task_id, agent_uuid, install_root)
+    name = f"{_MANAGED_PREFIX}{task_id}"
+    timer_path = unit_directory() / f"{name}.timer"
+    disabled = False
+    if timer_path.exists() and activate:
+        _systemctl("disable", "--now", f"{name}.timer")
+        disabled = True
+    return {
+        "task_id": task_id,
+        "timer_name": f"{name}.timer",
+        "disabled": disabled,
+        "preserved": str(timer_path),
+    }
+
+
+def _pull_identity(store_path: Path, central_path: Path) -> str:
+    """Identidade do vínculo de consulta — sem segredo."""
+    material = f"pull\0{store_path}\0{central_path}".encode("utf-8")
+    return hashlib.sha256(material).hexdigest()
+
+
+def _pull_unit_name(identity: str) -> str:
+    return f"{_PULL_PREFIX}{identity[:16]}"
+
+
+def install_pull_schedule(
+    store_path: Path,
+    central_path: Path,
+    calendar: str,
+    enable: bool = False,
+) -> dict[str, str]:
+    """Timer INDEPENDENTE para a consulta/reconciliação — não substitui
+    os timers de backup nem o de sincronização da outbox."""
+    _validate_calendar(calendar)
+    store_path = Path(store_path).resolve()
+    central_path = Path(central_path).resolve()
+    from .central import load_central
+
+    load_central(central_path)
+    launcher = _installed_launcher()
+    install_root = _installation_root(launcher)
+    identity = _pull_identity(store_path, central_path)
+    name = _pull_unit_name(identity)
+    unit_dir = unit_directory()
+    pull_paths = tuple(
+        unit_dir / f"{name}.{suffix}" for suffix in ("service", "timer")
+    )
+    marker = f"# macip-backup: pull-id={identity}"
+    for path in pull_paths:
+        if path.exists() and _owns_unit(path, install_root):
+            if marker not in path.read_text(encoding="utf-8").splitlines():
+                raise ConfigurationError(
+                    f"{path} tem identidade de consulta inválida"
+                )
+    _assert_writable_units(pull_paths, install_root)
+    exec_line, pythonpath_line = _execution_lines(
+        "pull-tasks",
+        f"--store {_unit_value(store_path)} --central {_unit_value(central_path)}",
+        install_root,
+    )
+    service_path, timer_path = _write_unit_pair(
+        name,
+        "MAC IP Backup — consulta de tarefas gerenciadas",
+        f"{pythonpath_line}{_environment_file_line()}\n{exec_line}\n",
+        calendar,
+        install_root,
+        ("# macip-backup: schedule=pull", f"# macip-backup: pull-id={identity}"),
+    )
+    if enable:
+        _systemctl("daemon-reload")
+        _systemctl("enable", "--now", f"{name}.timer")
+    return {
+        "store": str(store_path),
+        "central": str(central_path),
+        "service": str(service_path),
+        "timer": str(timer_path),
+        "timer_name": f"{name}.timer",
+        "enabled": enable,
+    }
+
+
+def uninstall_pull_schedule(
+    store_path: Path, central_path: Path
+) -> dict[str, str]:
+    """Remove SOMENTE o timer de consulta do vínculo informado."""
+    store_path = Path(store_path).resolve()
+    central_path = Path(central_path).resolve()
+    install_root = _installation_root(_installed_launcher())
+    identity = _pull_identity(store_path, central_path)
+    name = _pull_unit_name(identity)
+    pull_paths = tuple(
+        unit_directory() / f"{name}.{suffix}" for suffix in ("service", "timer")
+    )
+    expected = f"# macip-backup: pull-id={identity}"
+    for path in pull_paths:
+        if not path.exists():
+            continue
+        if not _owns_unit(path, install_root):
+            raise ConfigurationError(
+                f"{path} existe e sua propriedade não é desta instalação — "
+                "conteúdo preservado"
+            )
+        if expected not in path.read_text(encoding="utf-8").splitlines():
+            raise ConfigurationError(
+                "timer de consulta pertence a outro vínculo — conteúdo preservado"
+            )
+    return _uninstall_unit_pair(
+        name, {"store": str(store_path), "central": str(central_path)}
+    )
 
 
 def uninstall_schedule(task_id: str) -> dict[str, str]:
