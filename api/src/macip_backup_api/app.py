@@ -112,7 +112,9 @@ _SECRET_KEY_RE = re.compile(
     r"credential|private|api_?key|access_?key|secret_?key|identity|"
     r"session|_key\b"
 )
-_URL_USERINFO_RE = re.compile(r"(://)([^/@\s]+)@")
+# userinfo = tudo antes do último "@" no segmento autoridade — cobre
+# senhas com "@" embutido e espaços (URL malformada ainda é segredo)
+_URL_USERINFO_RE = re.compile(r"(://)([^/]*)@")
 
 
 def _secret_key(name: object) -> bool:

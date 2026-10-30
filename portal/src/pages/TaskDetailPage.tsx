@@ -32,6 +32,11 @@ export default function TaskDetailPage() {
   const [archiveOpen, setArchiveOpen] = useState(false);
   const generation = useRef(0);
   const taskIdRef = useRef(taskId); // rota vigente — distingue callbacks atrasados
+  // identidade da VISITA à rota: A→B→A são visitas diferentes — um
+  // callback antigo não volta a valer quando a rota "retorna"
+  const visitRef = useRef(0);
+  // identidade da MUTAÇÃO em voo: só a mais recente libera `pending`
+  const mutationRef = useRef(0);
   const alive = useRef(true);
 
   useEffect(() => {
@@ -46,6 +51,11 @@ export default function TaskDetailPage() {
     const wanted = taskId;
     setError(null);
     setResolved(false);
+    // metadados pertencem ao contexto — nunca "emprestados" da rota
+    // anterior enquanto o novo carrega
+    setAgentName(null);
+    setClientName(null);
+    setRevisions(null);
     try {
       const [detail, revs] = await Promise.all([
         getTask(wanted as string),
@@ -73,6 +83,7 @@ export default function TaskDetailPage() {
 
   useEffect(() => {
     taskIdRef.current = taskId;
+    visitRef.current += 1; // cada visita à rota é uma identidade nova
     setEditing(false);
     setEditError(null);
     setArchiveOpen(false);
@@ -81,61 +92,69 @@ export default function TaskDetailPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [taskId]);
 
-  // todo callback de escrita verifica DUAS coisas além do unmount:
-  // a geração de carregamento (qualquer load novo invalida) e a rota
-  // vigente (taskIdRef) — uma resposta atrasada de A nunca toca B
-  function staleSave(gen: number, id: string) {
+  // callbacks de escrita verificam: unmount, geração de carregamento
+  // (qualquer load novo invalida), rota vigente E visita — um
+  // callback de A não volta a valer após A→B→A
+  function staleSave(gen: number, id: string, visit: number) {
     return (
       !alive.current ||
       gen !== generation.current ||
-      taskIdRef.current !== id
+      taskIdRef.current !== id ||
+      visitRef.current !== visit
     );
+  }
+
+  // `pending` pertence à mutação mais recente — um finally antigo
+  // nunca libera uma operação nova; a mesma operação libera mesmo
+  // depois do load() que ela própria disparou
+  function releasePending(op: number) {
+    if (alive.current && mutationRef.current === op) {
+      setPending(false);
+    }
   }
 
   async function saveEdit(config: Record<string, unknown>) {
     if (pending || !task) return;
     const gen = generation.current;
+    const visit = visitRef.current;
+    const op = ++mutationRef.current;
     const targetId = task.id;
     setPending(true);
     setEditError(null);
     try {
       await createRevision(targetId, task.current_revision, config);
-      if (staleSave(gen, targetId)) return;
+      if (staleSave(gen, targetId, visit)) return;
       setEditing(false);
       await load();
     } catch (err) {
-      if (staleSave(gen, targetId)) return;
+      if (staleSave(gen, targetId, visit)) return;
       // 409 preserva os valores digitados — explicamos a revisão nova
       setEditError(
         err instanceof ApiError ? err.message : "Falha inesperada.",
       );
     } finally {
-      // a própria chamada a load() avança a geração — o reset do
-      // pending usa só a rota vigente, nunca a geração
-      if (alive.current && taskIdRef.current === targetId) {
-        setPending(false);
-      }
+      releasePending(op);
     }
   }
 
   async function confirmArchive() {
     if (pending || !task) return;
     const gen = generation.current;
+    const visit = visitRef.current;
+    const op = ++mutationRef.current;
     const targetId = task.id;
     setPending(true);
     setError(null);
     try {
       const updated = await archiveTask(targetId);
-      if (staleSave(gen, targetId)) return;
+      if (staleSave(gen, targetId, visit)) return;
       setArchiveOpen(false);
       setTask((t) => (t?.id === targetId ? { ...t, ...updated } : t));
     } catch (err) {
-      if (staleSave(gen, targetId)) return;
+      if (staleSave(gen, targetId, visit)) return;
       setError(err instanceof ApiError ? err.message : "Falha inesperada.");
     } finally {
-      if (alive.current && taskIdRef.current === targetId) {
-        setPending(false);
-      }
+      releasePending(op);
     }
   }
 

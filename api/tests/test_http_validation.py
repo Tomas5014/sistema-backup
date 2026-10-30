@@ -351,3 +351,50 @@ def test_senha_em_campo_conhecido_em_estrutura_aninhada(http_client):
     assert response.status_code == 422
     assert "SENTINELA-PLANA-55" not in response.text
     assert response.json()["detail"][0]["input"] == "***"
+
+
+@pytest.mark.parametrize("endpoint", [
+    # senha contendo "@" — a regex antiga parava no primeiro
+    "https://user:prefix@SENTINELA-DOBLE@minio.test",
+    # senha contendo espaço — "@" escapava do padrão \S
+    "https://user:prefix SENTINELA-ESPACO@minio.test",
+    # combinação: espaço + "@" dentro da senha
+    "https://u:p@w ord@SENTINELA-FINAL@minio.test",
+])
+def test_url_com_credencial_malformada_nao_revela_partes(
+        http_client, endpoint, caplog):
+    doc = _task_doc()
+    doc["spec"]["destinations"] = [{
+        "id": "d", "name": "d", "kind": "s3",
+        "password_environment": "PW",
+        "s3": {
+            "endpoint": endpoint,
+            "bucket": "bkt-abc",
+            "access_key_environment": "AK",
+            "secret_key_environment": "SK",
+        },
+    }]
+    response = _post_task(http_client, doc)
+    assert response.status_code == 422
+    assert "SENTINELA" not in response.text
+    detail = response.json()["detail"]
+    assert detail[0]["loc"][-1] == "s3"  # localização preservada
+    assert "type" in detail[0]
+    assert all(
+        "SENTINELA" not in r.getMessage() for r in caplog.records
+    )
+
+
+def test_url_malformada_em_estrutura_aninhada(http_client):
+    """A sentinela em dict/lista desconhecido também é escavada."""
+    doc = _task_doc()
+    doc["spec"]["destinations"][0]["extra_field"] = {
+        "endpoints": [
+            "https://user:pw@SENTINELA-NEST@h1",
+            {"backup_url": "https://u:p W SENTINELA-NEST@h2"},
+        ],
+    }
+    response = _post_task(http_client, doc)
+    assert response.status_code == 422
+    assert "SENTINELA-NEST" not in response.text
+    assert "SENTINELA" not in response.text

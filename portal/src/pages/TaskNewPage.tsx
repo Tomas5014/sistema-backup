@@ -19,6 +19,9 @@ export default function TaskNewPage() {
   const { operator } = useAuth();
   const agentId = params.get("agent") ?? "";
   const agentIdRef = useRef(agentId);
+  // cada visita a ?agent= tem identidade própria — A→B→A não
+  // ressuscita o POST da visita anterior
+  const visitRef = useRef(0);
   const [agent, setAgent] = useState<AgentRow | null>(null);
   const [clientName, setClientName] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -38,6 +41,7 @@ export default function TaskNewPage() {
   useEffect(() => {
     const gen = ++generation.current;
     agentIdRef.current = agentId;
+    visitRef.current += 1;
     setPending(false); // um POST antigo não pode travar o novo contexto
     setSubmitError(null);
     setResolved(false);
@@ -71,16 +75,21 @@ export default function TaskNewPage() {
   async function submit(config: Record<string, unknown>) {
     if (pending || !agent) return;
     const submittedAgent = agent.id;
+    const visit = visitRef.current;
     setPending(true);
     setSubmitError(null);
+    // conclusão de um cadastro de OUTRA visita não redireciona nem
+    // toca o contexto atual — A→B→A mantém identidades distintas
+    const stale = () =>
+      !alive.current ||
+      visitRef.current !== visit ||
+      agentIdRef.current !== submittedAgent;
     try {
       const task = await createTask(submittedAgent, config);
-      // conclusão de um cadastro ANTIGO não redireciona a navegação
-      // atual nem toca o estado do novo ?agent=
-      if (!alive.current || agentIdRef.current !== submittedAgent) return;
+      if (stale()) return;
       navigate(`/tasks/${task.id}`, { replace: true });
     } catch (err) {
-      if (!alive.current || agentIdRef.current !== submittedAgent) return;
+      if (stale()) return;
       setSubmitError(
         err instanceof ApiError ? err.message : "Falha inesperada.",
       );

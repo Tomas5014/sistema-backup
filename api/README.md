@@ -242,8 +242,10 @@ compatível com `TaskSpec.from_dict()` do agente atual.
 - `password_environment`/`endpoint_url` apontam para segredos por
   referência — segredos nunca são persistidos, retornados ou logados.
 - **Caminhos são conferidos lexicalmente** (nunca no filesystem da
-  central): origens e `repository` local devem ser absolutos, sem
-  `..`, `//` ou componente vazio; caracteres de controle
+  central): origens, `repository` local e `smb.mount_point` devem
+  ser absolutos, sem `.`, `..`, `//` ou componente vazio — alias
+  que o agente resolveria para dentro de uma origem é rejeitado;
+  caracteres de controle
   (newline, NUL…) são rejeitados em qualquer campo de texto;
   espaços em caminhos são legítimos. `sftp.identity_file`,
   `smb.repository`, `s3.prefix` e `s3.endpoint` seguem regras
@@ -254,7 +256,9 @@ compatível com `TaskSpec.from_dict()` do agente atual.
   chave com nome de segredo (password, private/secret/access_key,
   token, credential, identity…) em qualquer profundidade, incluindo
   campos desconhecidos rejeitados por `extra=forbid`, e userinfo de
-  URL (`https://user:senha@host` → `https://***@host`).
+  URL — o userinfo inteiro até o último `@` do segmento de
+  autoridade é removido (`https://u:se@nha@host` →
+  `https://***@host`), mesmo em URLs malformadas.
 
 ### Rotas
 

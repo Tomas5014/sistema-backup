@@ -70,7 +70,9 @@ def _safe_segments(value: str, *, absolute: bool, field: str) -> str:
     else:
         if value.startswith(("/", "~")):
             raise ValueError(f"{field} deve ser caminho relativo")
-    if "//" in value or any(part == ".." for part in parts):
+    if "//" in value or any(part in {".", ".."} for part in parts):
+        # `.`/`..` são ALIASES — o agente resolve os dois; sem isso a
+        # comparação origem↔repositório divergiria do caminho real
         raise ValueError(f"{field} contém segmento não permitido")
     return value
 
@@ -132,6 +134,7 @@ class SMBMountIn(StrictModel):
     server: Annotated[
         StrictStr,
         Field(min_length=1, max_length=200, pattern=r"^[^\s/\\@?#;:]+$"),
+        AfterValidator(_no_control_chars),
     ]
     share: Annotated[
         StrictStr,
@@ -143,8 +146,9 @@ class SMBMountIn(StrictModel):
 
     @model_validator(mode="after")
     def _checks(self):
-        if not self.mount_point.startswith("/"):
-            raise ValueError("smb.mount_point deve ser caminho absoluto")
+        _safe_segments(
+            self.mount_point, absolute=True, field="smb.mount_point"
+        )
         if self.marker is not None and not _relative_subpath_ok(self.marker):
             raise ValueError("smb.marker deve ser caminho relativo seguro")
         return self
@@ -171,6 +175,7 @@ class SFTPIn(StrictModel):
     host: Annotated[
         StrictStr,
         Field(min_length=1, max_length=200, pattern=r"^[^\s/@?#\\;]+$"),
+        AfterValidator(_no_control_chars),
     ]
     port: Port = 22
     user: Annotated[

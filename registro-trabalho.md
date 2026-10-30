@@ -1868,3 +1868,40 @@ mutável e corridas não cobertas.
 - Portal simulado: 70/70 (7 novos: seletor, retry, dados/callbacks
   de rota antiga, viewer).
 - typecheck + `vite build` limpos; E2E real re-executado.
+
+---
+
+## 2026-10-30 — Segunda rodada de revisão do cadastro de tarefas
+
+Consolida os três pontos restantes da revisão do 25df71e.
+
+### Implementado
+
+- **Userinfo de URL no 422**: a regex antiga parava no primeiro `@`
+  ou em espaço — senhas como `pre@SENHA@h` e `pre SENHA@h` vazavam.
+  Agora o userinfo inteiro (até o último `@` do segmento de
+  autoridade) é removido; localização e tipo do erro preservados.
+- **Aliases `.` em caminhos**: o agente resolve `.` lexicalmente e
+  vê o repositório dentro da origem — a central passou a rejeitar
+  segmentos `.`/`..` em origem, `repository` local e
+  `smb.mount_point`. NUL e demais controles agora também em
+  `sftp.host` e `smb.server` (tipos próprios, paridade com
+  `_require_sftp_host`/`_require_smb_server` do agente).
+- **Identidade de visita e de mutação no portal**: `visitRef`
+  incrementa a cada visita à rota (`A→B→A` são identidades
+  diferentes) — um callback antigo não volta a valer ao "retornar".
+  `mutationRef` faz `pending` pertencer à mutação mais recente —
+  o `finally` de uma operação antiga não libera uma nova, mas a
+  própria operação libera normalmente após o `load()` que dispara.
+  `agentName`/`clientName`/`revisions` são limpos a cada `load()` —
+  metadados de A não aparecem como contexto de B.
+
+### Verificação
+
+- API real (PG 17): 151/151 — corridas FOR UPDATE e exportação
+  imutável preservadas.
+- Contrato: 29/29 — aliases `.` nos dois lados, NUL em host/server,
+  comparação com `validate_recovery_for_execution` do agente.
+- HTTP sem banco: 23/23 — URLs com `@`/espaço na senha, aninhadas.
+- Portal: 73/73 vitest; typecheck + build limpos.
+- E2E real (Chromium + PG): 3/3, homologação HTTPS pulada.

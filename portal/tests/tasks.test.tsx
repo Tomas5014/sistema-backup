@@ -537,3 +537,157 @@ describe("novo cadastro com agente trocado no meio", () => {
     ).toBeNull();
   });
 });
+
+// ---- A→B→A: voltar ao mesmo identificador não ressuscita operações ----------
+
+describe("visita A→B→A ao mesmo identificador", () => {
+  const AGENT2 = { ...AGENT, id: "ag-2", client_id: "cli-2",
+    name: "vm-02" };
+  const detailB = {
+    ...TASK_DETAIL, id: "task-2", name: "Tarefa B",
+    revision: { ...REV1, config: { ...CONFIG, name: "Tarefa B" } },
+  };
+
+  it("POST antigo de criação não redireciona na volta a A", async () => {
+    let releaseCreate!: (r: Response) => void;
+    const gate = new Promise<Response>((res) => (releaseCreate = res));
+    calls = stubFetch({
+      ...baseRoutes(),
+      "GET /api/v1/agents": () => json([AGENT, AGENT2]),
+      "POST /api/v1/agents/ag-1/tasks": () => gate,
+    });
+    const target: { current: ((to: string) => void) | null } = {
+      current: null,
+    };
+    portalWithNav("/tasks/new?agent=ag-1", target);
+    await screen.findByText(/vm-01/);
+    await userEvent.type(
+      screen.getByLabelText("Nome da tarefa"), "tarefa-a1",
+    );
+    await userEvent.type(
+      screen.getByLabelText("Caminho da origem 1"), "/d",
+    );
+    await userEvent.type(
+      screen.getByLabelText("Identificador do destino 1"), "d",
+    );
+    await userEvent.type(
+      screen.getByLabelText("Nome do destino 1"), "d",
+    );
+    await userEvent.type(
+      screen.getByLabelText("Repositório do destino 1"), "/srv/r",
+    );
+    await userEvent.type(
+      screen.getByLabelText("password_environment do destino 1"), "PW",
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Cadastrar tarefa" }),
+    );
+    // A → B → A com o POST pendente
+    await go(target, "/tasks/new?agent=ag-2");
+    await screen.findByText(/vm-02/);
+    await go(target, "/tasks/new?agent=ag-1");
+    await screen.findByText(/vm-01/);
+    await act(async () => releaseCreate(json(TASK_DETAIL, 201)));
+    // continua no formulário de A — NÃO redireciona para a tarefa criada
+    await screen.findByText(/vm-01/);
+    expect(
+      screen.getByRole("button", { name: "Cadastrar tarefa" }),
+    ).toBeEnabled();
+  });
+
+  it("finally de salvamento antigo não libera pending de salvamento novo",
+    async () => {
+      let releaseOld!: (r: Response) => void;
+      let releaseNew!: (r: Response) => void;
+      const gateOld = new Promise<Response>((res) => (releaseOld = res));
+      const gateNew = new Promise<Response>((res) => (releaseNew = res));
+      let saves = 0;
+      calls = stubFetch({
+        ...baseRoutes(),
+        "GET /api/v1/tasks/task-2": () => json(detailB),
+        "GET /api/v1/tasks/task-2/revisions": () => json([
+          { revision: 1, contract_version: 1, author_kind: "admin",
+            author_ref: "bearer", created_at: "x", current: true },
+        ]),
+        "POST /api/v1/tasks/task-1/revisions": () =>
+          ++saves === 1 ? gateOld : gateNew,
+      });
+      const target: { current: ((to: string) => void) | null } = {
+        current: null,
+      };
+      portalWithNav("/tasks/task-1", target);
+      await screen.findByText("Financeiro diário");
+      await userEvent.click(
+        screen.getByRole("button", { name: "Editar configuração" }),
+      );
+      await userEvent.click(
+        screen.getByRole("button", { name: "Salvar nova revisão" }),
+      );
+      // salva A → B → volta a A → novo salvamento — dois pendentes
+      await go(target, "/tasks/task-2");
+      await screen.findByText("Tarefa B");
+      await go(target, "/tasks/task-1");
+      await screen.findByText("Financeiro diário");
+      await userEvent.click(
+        screen.getByRole("button", { name: "Editar configuração" }),
+      );
+      await userEvent.click(
+        screen.getByRole("button", { name: "Salvar nova revisão" }),
+      );
+      expect(saves).toBe(2);
+      // o ANTIGO conclui — não pode destravar a operação nova
+      await act(async () => releaseOld(json(TASK_DETAIL_V2, 201)));
+      const button = screen.getByRole("button", {
+        name: /Salvar nova revisão|Salvando/,
+      });
+      expect(button).toBeDisabled(); // nova operação segue bloqueada
+      // nenhum POST extra enquanto ela estiver pendente
+      expect(saves).toBe(2);
+      await act(async () => releaseNew(json(TASK_DETAIL_V2, 201)));
+      await waitFor(() =>
+        expect(
+          screen.getByRole("button", { name: "Editar configuração" }),
+        ).toBeEnabled(),
+      );
+    });
+
+  it("nomes de cliente/agente de A não aparecem no contexto de B",
+    async () => {
+      let releaseAgents!: (r: Response) => void;
+      const gateAgents = new Promise<Response>((res) => (releaseAgents = res));
+      const detailB = {
+        ...TASK_DETAIL, id: "task-2", name: "Tarefa B",
+        agent_id: "ag-9", client_id: "cli-9",
+        revision: { ...REV1, config: { ...CONFIG, name: "Tarefa B" } },
+      };
+      calls = stubFetch({
+        ...baseRoutes(),
+        "GET /api/v1/tasks/task-2": () => json(detailB),
+        "GET /api/v1/tasks/task-2/revisions": () => json([
+          { revision: 1, contract_version: 1, author_kind: "admin",
+            author_ref: "bearer", created_at: "x", current: true },
+        ]),
+      });
+      const target: { current: ((to: string) => void) | null } = {
+        current: null,
+      };
+      portalWithNav("/tasks/task-1", target);
+      await screen.findByText("Acme Ltda"); // contexto de A completo
+      // navega para B — detalhe resolve, agente/cliente ficam pendentes
+      calls = stubFetch({
+        ...baseRoutes(),
+        "GET /api/v1/tasks/task-2": () => json(detailB),
+        "GET /api/v1/tasks/task-2/revisions": () => json([
+          { revision: 1, contract_version: 1, author_kind: "admin",
+            author_ref: "bearer", created_at: "x", current: true },
+        ]),
+        "GET /api/v1/agents": () => gateAgents,
+      });
+      await go(target, "/tasks/task-2");
+      await screen.findByText("Tarefa B");
+      // o cliente de A NÃO pode aparecer como contexto de B
+      expect(screen.queryByText("Acme Ltda")).toBeNull();
+      expect(screen.queryByText("vm-01")).toBeNull();
+      await act(async () => releaseAgents(json([AGENT])));
+    });
+});

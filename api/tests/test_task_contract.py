@@ -240,3 +240,89 @@ def test_origem_com_espaco_legitimo_passa():
     payload = _doc(spec=_spec(sources=["/dados do financeiro"]))
     spec = TaskSpec.from_dict(_export(payload))
     assert str(spec.sources[0].path) == "/dados do financeiro"
+
+
+def _local_dest(repository: str):
+    return {"id": "d", "name": "d", "kind": "local",
+            "repository": repository, "password_environment": "PW"}
+
+
+@pytest.mark.parametrize("source,repository", [
+    ("/dados/.", "/dados/repository"),      # alias "." na ORIGEM
+    ("/dados", "/./dados/repository"),      # alias "." no REPOSITÓRIO
+    ("/dados/./x", "/dados/repository"),    # alias "." no meio
+])
+def test_alias_ponto_rejeitado_como_o_agente_resolve(source, repository):
+    """O agente resolve `.` lexicalmente (Path.resolve) e enxerga o
+    repositório DENTRO da origem — a central rejeita o alias em vez
+    de divergir."""
+    with pytest.raises(ValidationError):
+        _doc(spec=_spec(sources=[source],
+                        destinations=[_local_dest(repository)]))
+
+
+def test_agente_rejeita_alias_ponto_tambem():
+    """Confirma a premissa: o agente resolve `/dados/.` → `/dados` e
+    `/./dados/repository` → `/dados/repository`, marcando o
+    repositório interno como inválido."""
+    from macip_backup.models import (
+        Client, ConfigurationError, Destination, DestinationKind, TaskSpec,
+    )
+    for source, repository in [
+        ("/dados/.", "/dados/repository"),
+        ("/dados", "/./dados/repository"),
+    ]:
+        spec = TaskSpec(
+            id="t1", name="t", device_id="dev-1",
+            client=Client(id="c1", name="c"),
+            sources=(source,),
+            exclusions=(),
+            compression="auto",
+            destinations=(Destination(
+                id="d1", name="d", kind=DestinationKind.LOCAL,
+                repository=repository, password_environment="PW",
+            ),),
+        )
+        with pytest.raises(ConfigurationError, match="origem"):
+            # mesma conferência que o backup executa — só o invariante
+            # de repositório, sem tocar no filesystem da origem
+            spec.validate_recovery_for_execution()
+
+
+@pytest.mark.parametrize("field,value", [
+    ("host", "vm\x00host"),
+    ("host", "vm\x01host"),
+])
+def test_sftp_host_com_nul_rejeitado(field, value):
+    """TaskSpec._require_sftp_host rejeita ord<32 — a central idem."""
+    sftp = {"host": "h", "user": "u", "remote_path": "r",
+            "identity_file": "/k", "known_hosts_file": "/kh"}
+    sftp[field] = value
+    with pytest.raises(ValidationError):
+        _doc(spec=_spec(destinations=[
+            {"id": "d", "name": "d", "kind": "sftp",
+             "password_environment": "PW", "sftp": sftp},
+        ]))
+
+
+def test_smb_server_com_nul_rejeitado():
+    sftp = {"server": "srv\x00x", "share": "bkp",
+            "mount_point": "/mnt/mb"}
+    with pytest.raises(ValidationError):
+        _doc(spec=_spec(destinations=[
+            {"id": "d", "name": "d", "kind": "smb",
+             "repository": "repo/x", "password_environment": "PW",
+             "smb": sftp},
+        ]))
+
+
+def test_smb_mount_point_com_alias_ponto_rejeitado():
+    """mount_point compõe o caminho repositório↔origem — aliás "." não
+    pode escapar da comparação."""
+    with pytest.raises(ValidationError):
+        _doc(spec=_spec(destinations=[
+            {"id": "d", "name": "d", "kind": "smb",
+             "repository": "repo/x", "password_environment": "PW",
+             "smb": {"server": "srv", "share": "bkp",
+                     "mount_point": "/mnt/./mb"}},
+        ]))
