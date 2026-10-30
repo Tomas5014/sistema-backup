@@ -391,6 +391,112 @@ def test_viewer_le_distribuicao_mas_nao_escreve(client, admin_headers):
 
 # ---- corrida FOR UPDATE entre decisões ----------------------------------------
 
+def test_evolucao_falha_para_sucesso_mesma_geracao(client, admin_headers):
+    """Tentativa 1 falha (pré-requisito local), tentativa 2 aplica —
+    ambas registradas, confirmed evolui, last_applied aponta o sucesso."""
+    _, agent_id = create_agent_env(client, admin_headers)
+    task = create_task(client, admin_headers, agent_id).json()
+    cred = _agent_token(client, admin_headers, agent_id)
+    headers = {"Authorization": f"Bearer {cred['token']}"}
+    client.post(f"/api/v1/tasks/{task['id']}/publish",
+                json={"revision": 1, "expected_generation": 0},
+                headers=admin_headers)
+
+    r = _confirm(client, headers, task["id"], generation=1, attempt=1,
+                 status="failed", detail="origem ausente")
+    assert r.status_code == 200 and r.json()["promoted"]
+    detail = client.get(f"/api/v1/tasks/{task['id']}", headers=admin_headers).json()
+    assert detail["distribution"]["confirmed"]["status"] == "failed"
+    assert detail["distribution"]["last_applied"] is None
+
+    r = _confirm(client, headers, task["id"], generation=1, attempt=2,
+                 status="applied", applied_revision=1)
+    assert r.status_code == 200 and r.json()["promoted"]
+    detail = client.get(f"/api/v1/tasks/{task['id']}", headers=admin_headers).json()
+    dist = detail["distribution"]
+    assert dist["confirmed"]["status"] == "applied"
+    assert dist["confirmed"]["attempt"] == 2
+    assert dist["last_applied"]["revision"] == 1
+
+    # evento atrasado da tentativa 1 (mesmo conteúdo) → duplicate, sem
+    # rebaixar a tentativa 2
+    r = _confirm(client, headers, task["id"], generation=1, attempt=1,
+                 status="failed", detail="origem ausente")
+    assert r.status_code == 200
+    assert r.json()["status"] == "duplicate"
+    detail = client.get(f"/api/v1/tasks/{task['id']}", headers=admin_headers).json()
+    assert detail["distribution"]["confirmed"]["attempt"] == 2
+    assert detail["distribution"]["confirmed"]["status"] == "applied"
+
+
+def test_confirmacao_antiga_nao_rebaixa_nem_revoga_sucesso(
+        client, admin_headers):
+    """Falha na tentativa 3 depois de sucesso na 2: confirmed vira
+    failed, mas last_applied preserva o sucesso da tentativa 2."""
+    _, agent_id = create_agent_env(client, admin_headers)
+    task = create_task(client, admin_headers, agent_id).json()
+    cred = _agent_token(client, admin_headers, agent_id)
+    headers = {"Authorization": f"Bearer {cred['token']}"}
+    client.post(f"/api/v1/tasks/{task['id']}/publish",
+                json={"revision": 1, "expected_generation": 0},
+                headers=admin_headers)
+    _confirm(client, headers, task["id"], generation=1, attempt=1,
+             status="failed", detail="disco cheio")
+    _confirm(client, headers, task["id"], generation=1, attempt=2,
+             status="applied", applied_revision=1)
+    _confirm(client, headers, task["id"], generation=1, attempt=3,
+             status="failed", detail="systemd indisponível")
+    dist = client.get(f"/api/v1/tasks/{task['id']}", headers=admin_headers).json()["distribution"]
+    assert dist["confirmed"]["status"] == "failed"
+    assert dist["confirmed"]["attempt"] == 3
+    assert dist["last_applied"]["revision"] == 1
+    assert dist["last_applied"]["attempt"] == 2
+
+
+def test_mesma_tentativa_conteudo_divergente_409(client, admin_headers):
+    """Idempotência por identidade (gen, attempt): conteúdo diferente
+    para a MESMA tentativa é conflito, nunca sobrescrita."""
+    _, agent_id = create_agent_env(client, admin_headers)
+    task = create_task(client, admin_headers, agent_id).json()
+    cred = _agent_token(client, admin_headers, agent_id)
+    headers = {"Authorization": f"Bearer {cred['token']}"}
+    client.post(f"/api/v1/tasks/{task['id']}/publish",
+                json={"revision": 1, "expected_generation": 0},
+                headers=admin_headers)
+    _confirm(client, headers, task["id"], generation=1, attempt=1,
+             status="applied", applied_revision=1)
+    r = _confirm(client, headers, task["id"], generation=1, attempt=1,
+                 status="failed", detail="outro resultado")
+    assert r.status_code == 409
+
+
+def test_entrega_fora_de_ordem_preserva_mais_recente(
+        client, admin_headers):
+    """attempt 3 chega antes da 2 (página/rede reordenou): a 2 fica no
+    log sem regredir confirmed; last_applied segue a ordem (gen,attempt)."""
+    _, agent_id = create_agent_env(client, admin_headers)
+    task = create_task(client, admin_headers, agent_id).json()
+    cred = _agent_token(client, admin_headers, agent_id)
+    headers = {"Authorization": f"Bearer {cred['token']}"}
+    client.post(f"/api/v1/tasks/{task['id']}/publish",
+                json={"revision": 1, "expected_generation": 0},
+                headers=admin_headers)
+    _confirm(client, headers, task["id"], generation=1, attempt=1,
+             status="failed", detail="f1")
+    _confirm(client, headers, task["id"], generation=1, attempt=3,
+             status="failed", detail="f3")
+    # chegada atrasada da tentativa 2 — sucesso "antigo" relativo à 3
+    r = _confirm(client, headers, task["id"], generation=1, attempt=2,
+                 status="applied", applied_revision=1)
+    assert r.json()["promoted"] is False
+    dist = client.get(f"/api/v1/tasks/{task['id']}", headers=admin_headers).json()["distribution"]
+    assert dist["confirmed"]["attempt"] == 3
+    assert dist["confirmed"]["status"] == "failed"
+    # last_applied tem ordenação própria: 2 é o sucesso mais novo visto
+    assert dist["last_applied"]["attempt"] == 2
+    assert dist["last_applied"]["revision"] == 1
+
+
 def test_suspend_sem_publicacao_gera_envelope_suspend(client, admin_headers):
     """Suspender tarefa nunca publicada produz envelope suspend sem
     revisão — o agente só desativa o que houver gerenciado."""

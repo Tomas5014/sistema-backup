@@ -37,7 +37,7 @@ if TYPE_CHECKING:
     from .models import TaskSpec
     from .orchestrator import AttemptResult, DestinationResult, ExecutionResult
 
-_SCHEMA_VERSION = 6
+_SCHEMA_VERSION = 7
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS executions (
@@ -91,6 +91,7 @@ CREATE TABLE IF NOT EXISTS confirmations (
     bond TEXT NOT NULL,
     task_id TEXT NOT NULL,
     generation INTEGER NOT NULL,
+    apply_attempt INTEGER NOT NULL DEFAULT 1,
     payload TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',
     attempts INTEGER NOT NULL DEFAULT 0,
@@ -98,7 +99,7 @@ CREATE TABLE IF NOT EXISTS confirmations (
     last_error TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    UNIQUE (bond, task_id, generation)
+    UNIQUE (bond, task_id, generation, apply_attempt)
 );
 CREATE TABLE IF NOT EXISTS outbox (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -140,6 +141,11 @@ class ExecutionStore:
             self._connection.close()
             raise
 
+    @property
+    def path(self) -> Path:
+        """Caminho do banco — parte da identidade do vínculo."""
+        return self._path
+
     def close(self) -> None:
         self._connection.close()
 
@@ -177,6 +183,8 @@ class ExecutionStore:
                 self._migrate_v4()
             if version < 6:
                 self._migrate_v5()
+            if version < 7:
+                self._migrate_v6()
             self._connection.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             self._connection.execute("COMMIT")
         except Exception:
@@ -371,6 +379,7 @@ class ExecutionStore:
                 bond TEXT NOT NULL,
                 task_id TEXT NOT NULL,
                 generation INTEGER NOT NULL,
+                apply_attempt INTEGER NOT NULL DEFAULT 1,
                 payload TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'pending',
                 attempts INTEGER NOT NULL DEFAULT 0,
@@ -378,35 +387,94 @@ class ExecutionStore:
                 last_error TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
-                UNIQUE (bond, task_id, generation)
+                UNIQUE (bond, task_id, generation, apply_attempt)
             )
             """
         )
 
+    def _migrate_v6(self) -> None:
+        """v6 -> v7: apply_attempt identifica a TENTATIVA de aplicação —
+        a mesma geração pode evoluir falha para sucesso. O rebuild
+        preserva todas as linhas existentes com tentativa 1."""
+        if not self._table_exists("confirmations"):
+            return
+        columns = {
+            row[1]
+            for row in self._connection.execute(
+                "PRAGMA table_info(confirmations)"
+            ).fetchall()
+        }
+        if "apply_attempt" in columns:
+            return
+        self._connection.execute(
+            "ALTER TABLE confirmations RENAME TO confirmations_v6"
+        )
+        self._connection.execute(
+            """
+            CREATE TABLE confirmations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                bond TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                generation INTEGER NOT NULL,
+                apply_attempt INTEGER NOT NULL DEFAULT 1,
+                payload TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at TEXT,
+                last_error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE (bond, task_id, generation, apply_attempt)
+            )
+            """
+        )
+        self._connection.execute(
+            "INSERT INTO confirmations "
+            "(bond, task_id, generation, apply_attempt, payload, status, "
+            "attempts, next_attempt_at, last_error, created_at, updated_at) "
+            "SELECT bond, task_id, generation, 1, payload, status, "
+            "attempts, next_attempt_at, last_error, created_at, updated_at "
+            "FROM confirmations_v6"
+        )
+        self._connection.execute("DROP TABLE confirmations_v6")
+
     # -- confirmações de distribuição ---------------------------------------
     #
-    # `bond` = identidade do vínculo (endpoint + UUID central) já normalizada
-    # pelo chamador — uma confirmação só volta para a central que a gerou.
-    # UNIQUE(bond, task_id, generation): o reenvio de uma resposta HTTP
-    # perdida é seguro — a linha já existe, sem duplicar.
+    # `bond` = identidade do vínculo (endpoint + UUID central + banco) já
+    # normalizada pelo chamador — uma confirmação só volta para a central
+    # que a gerou. `apply_attempt` = qual tentativa de aplicação o evento
+    # relata: UNIQUE(bond, task_id, generation, apply_attempt) faz o
+    # reenvio de resposta perdida ser seguro SEM impedir a evolução
+    # falha para sucesso na mesma geração (tentativa nova = linha nova).
 
     def enqueue_confirmation(
-        self, bond: str, task_id: str, generation: int, payload: str
+        self, bond: str, task_id: str, generation: int,
+        apply_attempt: int, payload: str,
     ) -> None:
         now = _utcnow()
         self._connection.execute(
             "INSERT OR IGNORE INTO confirmations "
-            "(bond, task_id, generation, payload, status, attempts, "
-            "created_at, updated_at) VALUES (?, ?, ?, ?, 'pending', 0, ?, ?)",
-            (bond, task_id, generation, payload, now, now),
+            "(bond, task_id, generation, apply_attempt, payload, status, "
+            "attempts, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?)",
+            (bond, task_id, generation, apply_attempt, payload, now, now),
         )
         self._connection.commit()
+
+    def confirmation_exists(
+        self, bond: str, task_id: str, generation: int, apply_attempt: int
+    ) -> bool:
+        return bool(self._connection.execute(
+            "SELECT 1 FROM confirmations WHERE bond = ? AND task_id = ? "
+            "AND generation = ? AND apply_attempt = ?",
+            (bond, task_id, generation, apply_attempt),
+        ).fetchone())
 
     def pending_confirmations(
         self, bond: str, now: str, limit: int = 50
     ) -> list[dict[str, Any]]:
         rows = self._connection.execute(
-            "SELECT id, task_id, generation, payload, attempts "
+            "SELECT id, task_id, generation, apply_attempt, payload, attempts "
             "FROM confirmations WHERE bond = ? AND status = 'pending' "
             "AND (next_attempt_at IS NULL OR next_attempt_at <= ?) "
             "ORDER BY id LIMIT ?",
@@ -417,8 +485,9 @@ class ExecutionStore:
                 "id": row[0],
                 "task_id": row[1],
                 "generation": row[2],
-                "payload": row[3],
-                "attempts": row[4],
+                "apply_attempt": row[3],
+                "payload": row[4],
+                "attempts": row[5],
             }
             for row in rows
         ]
@@ -450,16 +519,29 @@ class ExecutionStore:
     def confirmation_blocked(self, row_id: int, error: str) -> None:
         self._confirmation_update(row_id, "blocked", error)
 
+    def unblock_confirmations(self, bond: str) -> int:
+        """Volta linhas 'blocked' para 'pending' — intervenção operada
+        (ex.: credencial reemitida). Erros de rede nunca bloqueiam."""
+        cursor = self._connection.execute(
+            "UPDATE confirmations SET status = 'pending', "
+            "next_attempt_at = NULL, updated_at = ? "
+            "WHERE bond = ? AND status = 'blocked'",
+            (_utcnow(), bond),
+        )
+        self._connection.commit()
+        return cursor.rowcount
+
     def confirmation_state(self) -> list[dict[str, Any]]:
         rows = self._connection.execute(
-            "SELECT bond, task_id, generation, status, attempts, "
-            "last_error, updated_at FROM confirmations ORDER BY id"
+            "SELECT bond, task_id, generation, apply_attempt, status, "
+            "attempts, last_error, updated_at "
+            "FROM confirmations ORDER BY id"
         ).fetchall()
         return [
             {
                 "bond": row[0], "task_id": row[1], "generation": row[2],
-                "status": row[3], "attempts": row[4],
-                "last_error": row[5], "updated_at": row[6],
+                "apply_attempt": row[3], "status": row[4], "attempts": row[5],
+                "last_error": row[6], "updated_at": row[7],
             }
             for row in rows
         ]

@@ -413,46 +413,82 @@ tarefas para o agente. Nada muda sem ativação local explícita: sem
 macip-backup-poc pull-check --central central.json --store agent.db
 
 # Reconciliação: consulta páginas do estado desejado, valida cada
-# envelope (identidade, geração, hash canônico, contract_version,
-# TaskSpec real), instala configuração+agenda gerenciada e confirma:
+# envelope (identidades doc/envelope, geração, hash canônico,
+# contract_version, TaskSpec real + pré-requisitos locais — origens
+# existentes, repositório fora da origem, arquivos SFTP/montagem SMB),
+# instala configuração+agenda gerenciada e confirma:
 macip-backup-poc pull-tasks --central central.json --store agent.db
+
+# Modo PREPARAÇÃO: grava envelope, configuração candidata e units —
+# SEM daemon-reload/enable, SEM marcar aplicado e SEM confirmação.
+# A próxima execução normal conclui a aplicação:
+macip-backup-poc pull-tasks --central central.json --store agent.db   --no-activate
 
 # Estado local (offline): vínculo, journal por tarefa e fila de
 # confirmações:
 macip-backup-poc pull-status --central central.json --store agent.db
 
+# Devolve confirmações 'blocked' (rejeição definitiva — credencial
+# revogada, tarefa removida, conteúdo rejeitado) para a fila depois
+# de corrigir a causa — ex.: credencial reemitida:
+macip-backup-poc pull-unblock --central central.json --store agent.db
+
 # Timer INDEPENDENTE de consulta periódica (não substitui backup/sync):
 macip-backup-poc schedule-pull --central central.json --store agent.db   --calendar '*-*-* *:10:00' --enable
 
 # Troca de central exige adoção explícita — rebind não é automático:
+# desativa os timers do vínculo anterior (arquivos/journals ficam) e
+# só então aponta o vínculo ativo para a nova central:
 macip-backup-poc pull-tasks --central nova-central.json   --store agent.db --rebind
 ```
 
-**Estado local gerenciado** em `<MACIP_STATE>/managed/`:
+**Estado local gerenciado** em `<MACIP_STATE>/managed/` — tudo é
+chaveado pelo VÍNCULO completo (endpoint + UUID central + banco):
 
-- `binding.json` — vínculo (endpoint normalizado + UUID central);
-- `tasks.d/<id>/gen-<N>.json` — envelopes imutáveis recebidos;
-- `tasks.d/<id>/journal.jsonl` — passos duráveis (received →
-  validated → units → applied) — interrupção retoma no passo que falta;
-- `tasks.d/<id>/current.json` — a configuração que as units executam;
-  só avança DEPOIS de todos os efeitos locais — configuração inaplicável
-  preserva a última funcional.
+- `active.json` — vínculo ativo; a troca exige `--rebind` e acontece
+  sob lock global, depois de desativar os timers do vínculo anterior;
+- `<bond>/binding.json` — dados do vínculo;
+- `<bond>/tasks.d/<id>/gen-<N>.json` — envelopes imutáveis por geração;
+- `<bond>/tasks.d/<id>/config-<N>.json` — configuração candidata
+  imutável da geração N;
+- `<bond>/tasks.d/<id>/journal.jsonl` — passos duráveis com a tentativa
+  (`apply_attempt`): received → validated → config → timer_off → units
+  → published → enabled → applied. Interrupção retoma no passo que
+  falta; falha nos efeitos faz ROLLBACK para a última geração aplicada
+  (configuração + agenda + estado do timer voltam juntos — não basta o
+  current.json) ou remove o resíduo quando não havia aplicação boa;
+- `<bond>/tasks.d/<id>/current.json` — o que as units executam; só é
+  publicado depois das units escritas e ANTES do enable — nenhum
+  disparo encontra configuração incompleta nem agenda nova com
+  configuração antiga.
 
 **Units gerenciadas** `macip-backup-managed-<uuid>` carregam marcadores
-de vínculo (`managed-task`, `central-agent`): units alheias com o mesmo
-nome nunca são sobrescritas nem removidas. `manual` mantém só o service
-(configuração disponível sem timer). Suspensão desabilita **apenas** o
-timer daquela tarefa — snapshots, configuração e backup em execução
-permanecem. `Persistent=true` recupera disparos perdidos com a máquina
-desligada — nunca dispara backup ao baixar a configuração.
+(`managed-task`, `central-agent`, `managed-bond`): units alheias com o
+mesmo nome nunca são sobrescritas nem removidas, e uma unit de vínculo
+anterior só é adotada por adoção explícita. `manual` mantém só o
+service (configuração disponível sem timer). Suspensão desabilita
+**apenas** o timer daquela tarefa — snapshots, configuração e backup
+em execução permanecem. `Persistent=true` recupera disparos perdidos
+com a máquina desligada — nunca dispara backup ao baixar a
+configuração.
 
-**Confirmações** ficam na fila `confirmations` do SQLite (separada da
-outbox de execuções): resposta HTTP perdida → reenvio na rodada
-seguinte com deduplicação por (task_id, geração) na central.
+**Confirmações e tentativas** — a mesma geração pode evoluir falha →
+sucesso (pré-requisito corrigido depois): a identidade do evento é
+(task_id, geração, apply_attempt) no SQLite local e na central. A fila
+`confirmations` é reconstruível a partir do journal — um corte entre a
+aplicação local e o enfileiramento não perde o relato: a próxima
+rodada regrava o MESMO evento e reenvia. Resposta HTTP perdida →
+reenvio na rodada seguinte, deduplicado por conteúdo na central.
+A central mostra `confirmed` (última tentativa da geração vigente,
+ordenada por attempt) e `last_applied` (último sucesso — nunca
+regride).
 
-**Falhas transitórias** (central fora, token ausente/revogado, rede)
-produzem diagnóstico e nova tentativa — nunca suspendem nem removem o
-que já está configurado.
+**Falhas transitórias** (central fora, rede, timeout, HTTP 5xx/429)
+produzem diagnóstico e nova tentativa com backoff capado em 1h —
+NUNCA viram bloqueio permanente. Rejeições definitivas (401/403,
+404, 409, 422) marcam `blocked` e pedem intervenção: corrija a causa
+(credencial reemitida, tarefa recriada) e rode `pull-unblock`.
+Transitório nunca suspende nem remove o que já está configurado.
 
 ## Testes
 

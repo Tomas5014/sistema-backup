@@ -303,10 +303,14 @@ administrativas explícitas com CSRF + controle otimista de geração.
   `generation` monotônica que distingue publicação, atualização e
   suspensão mesmo com a mesma revisão; `published_revision`;
   `desired_action` (`none`/`apply`/`suspend`); colunas `confirmed_*`
-  com a última confirmação **da geração vigente**.
-- `task_confirmations`: log idempotente por `(task_id, generation)`
-  com `payload_hash` — mesmo conteúdo → `duplicate`; conteúdo diverso
-  para a mesma geração → 409.
+  com a última confirmação **da geração vigente, ordenada por
+  tentativa**; colunas `last_applied_*` com o último SUCESSO relatado
+  — nunca regridem, mesmo que a tentativa seguinte falhe.
+- `task_confirmations`: log idempotente por
+  `(task_id, generation, attempt)` com `payload_hash` — mesmo
+  conteúdo → `duplicate`; conteúdo diverso para a mesma tentativa →
+  409; uma tentativa nova na mesma geração → evento novo (permite
+  falha → pré-requisito corrigido → sucesso).
 
 **Rotas administrativas** (`require_admin_identity` + `csrf_guard`,
 `FOR UPDATE` na linha da distribuição):
@@ -329,10 +333,13 @@ o agente só vê/confirma tarefas vinculadas a ele):
   envelope sem hash) e, em `apply`, `task` (TaskSpec exportado —
   somente referências de credencial) + `schedule` separado.
 - `POST /api/v1/agent/tasks/{id}/confirmations`
-  `{generation, status: applied|failed, applied_revision?, detail?,
-  agent_time?}` — geração futura → 409; geração antiga é registrada no
-  log (`promoted: false`) sem rebaixar o estado confirmado; a vigente
-  promove `confirmed_*`. `received_at` usa horário do servidor.
+  `{generation, attempt?, status: applied|failed, applied_revision?,
+  detail?, agent_time?}` — geração futura → 409; geração antiga fica
+  no log (`promoted: false`) sem rebaixar o estado confirmado; dentro
+  da geração vigente só promove tentativa MAIOR que a já confirmada —
+  resposta atrasada não regride. `status=applied` alimenta
+  `last_applied_*` por ordenação (geração, tentativa).
+  `received_at` usa horário do servidor.
 
 ### Exportação (`tarefa.json`)
 

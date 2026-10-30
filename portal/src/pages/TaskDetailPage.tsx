@@ -291,7 +291,10 @@ export default function TaskDetailPage() {
                       {dist.confirmed.status === "applied"
                         ? "aplicada"
                         : "falha"}{" "}
-                      (geração {dist.confirmed.generation})
+                      (geração {dist.confirmed.generation}
+                      {dist.confirmed.attempt
+                        ? `, tentativa ${dist.confirmed.attempt}`
+                        : ""})
                       {dist.confirmed.received_at
                         ? ` — ${new Date(dist.confirmed.received_at).toLocaleString("pt-BR")}`
                         : ""}
@@ -304,6 +307,19 @@ export default function TaskDetailPage() {
                     "nenhuma confirmação ainda"
                   )}
                 </dd>
+                {dist.last_applied ? (
+                  <>
+                    <dt>Último sucesso aplicado</dt>
+                    <dd>
+                      revisão {dist.last_applied.revision ?? "—"} (geração{" "}
+                      {dist.last_applied.generation}, tentativa{" "}
+                      {dist.last_applied.attempt})
+                      {dist.last_applied.at
+                        ? ` — ${new Date(dist.last_applied.at).toLocaleString("pt-BR")}`
+                        : ""}
+                    </dd>
+                  </>
+                ) : null}
               </dl>
               {awaitingApply ? (
                 <p>

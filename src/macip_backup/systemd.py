@@ -357,21 +357,38 @@ def install_sync_schedule(
     }
 
 
-def _managed_markers(task_id: str, agent_uuid: str) -> tuple[str, ...]:
+def _managed_markers(
+    task_id: str, agent_uuid: str, bond: str
+) -> tuple[str, ...]:
     return (
         f"# macip-backup: managed-task={task_id}",
         f"# macip-backup: central-agent={agent_uuid}",
+        f"# macip-backup: managed-bond={bond[:16]}",
     )
 
 
 def _assert_managed_units(
-    task_id: str, agent_uuid: str, install_root: str
+    task_id: str,
+    agent_uuid: str,
+    bond: str,
+    install_root: str,
+    *,
+    allow_bond_replacement: bool = False,
 ) -> None:
     """Unit gerenciada é propriedade VINCULADA: pertence a esta
-    instalação, àquela tarefa e àquele vínculo central. Units sem
-    marcador ou de outro vínculo NUNCA são sobrescritas/removidas."""
+    instalação, àquela tarefa, àquele agente e àquele vínculo.
+
+    - unit sem marcador de instalação → recusa (conteúdo preservado);
+    - managed-task de OUTRA tarefa ou central-agent de OUTRO agente →
+      recusa;
+    - managed-bond de vínculo anterior → recusa, a menos que o chamador
+      tenha autorizado explicitamente a adoção (`allow_bond_replacement`
+      — só verdadeiro logo após `--rebind` consumido)."""
     unit_dir = unit_directory()
-    expected = set(_managed_markers(task_id, agent_uuid))
+    task_marker = f"# macip-backup: managed-task={task_id}"
+    agent_marker = f"# macip-backup: central-agent={agent_uuid}"
+    bond_prefix = "# macip-backup: managed-bond="
+    expected_bond = f"{bond_prefix}{bond[:16]}"
     for suffix in ("service", "timer"):
         path = unit_dir / f"{_MANAGED_PREFIX}{task_id}.{suffix}"
         if not path.exists():
@@ -382,29 +399,49 @@ def _assert_managed_units(
                 "conteúdo preservado"
             )
         markers = set(path.read_text(encoding="utf-8").splitlines())
-        if not expected.issubset(markers):
+        task_marked = any(
+            line.startswith("# macip-backup: managed-task=")
+            for line in markers
+        )
+        if task_marked and task_marker not in markers:
             raise ConfigurationError(
-                f"{path} pertence a outra tarefa ou vínculo central — "
-                "conteúdo preservado"
+                f"{path} pertence a outra tarefa — conteúdo preservado"
+            )
+        agent_marked = any(
+            line.startswith("# macip-backup: central-agent=")
+            for line in markers
+        )
+        if agent_marked and agent_marker not in markers:
+            raise ConfigurationError(
+                f"{path} pertence a outro agente — conteúdo preservado"
+            )
+        bond_markers = [
+            line for line in markers if line.startswith(bond_prefix)
+        ]
+        if bond_markers and expected_bond not in bond_markers                 and not allow_bond_replacement:
+            raise ConfigurationError(
+                f"{path} pertence a um vínculo central anterior — "
+                "adição exige reconciliação com vínculo ativo"
             )
 
 
-def install_managed_task(
+def write_managed_task_units(
     task_id: str,
     config_path: Path,
     store_path: Path,
     central_path: Path,
     agent_uuid: str,
+    bond: str,
     schedule: dict,
     *,
-    activate: bool = True,
+    allow_bond_replacement: bool = False,
 ) -> dict[str, str]:
-    """Escreve service (+timer quando a agenda é automática) para a
-    tarefa GERENCIADA. O ExecStart aponta para `current.json` — caminho
-    estável cujo conteúdo só avança depois dos efeitos locais.
+    """APENAS escreve service (+timer quando a agenda é automática) —
+    nenhuma chamada systemctl: o gerenciador continua com as units já
+    carregadas, mantendo coerência agenda↔configuração até a ativação.
 
-    `activate=False` escreve e valida as units sem daemon-reload/
-    enable (prova/inspeção sem sessão systemd)."""
+    O ExecStart aponta para `current.json` — caminho estável cujo
+    conteúdo só avança quando TODOS os efeitos estiverem no lugar."""
     config_path = Path(config_path).resolve()
     store_path = Path(store_path).resolve()
     central_path = Path(central_path).resolve()
@@ -413,7 +450,10 @@ def install_managed_task(
         _validate_calendar(calendar)  # antes de tocar nas units
     launcher = _installed_launcher()
     install_root = _installation_root(launcher)
-    _assert_managed_units(task_id, agent_uuid, install_root)
+    _assert_managed_units(
+        task_id, agent_uuid, bond, install_root,
+        allow_bond_replacement=allow_bond_replacement,
+    )
     name = f"{_MANAGED_PREFIX}{task_id}"
     exec_line, pythonpath_line = _execution_lines(
         "agent",
@@ -427,7 +467,7 @@ def install_managed_task(
     timer_path = unit_dir / f"{name}.timer"
     markers = "\n".join(
         (_ownership_marker(install_root),
-         *_managed_markers(task_id, agent_uuid))
+         *_managed_markers(task_id, agent_uuid, bond))
     )
     service_path.write_text(
         f"""{markers}
@@ -462,37 +502,55 @@ WantedBy=timers.target
         )
         timer_written = True
     elif timer_path.exists():
-        # agenda virou `manual` (ou ficou manual): o timer desta tarefa
-        # — e só ele — sai do caminho, sem tocar no backup em execução
-        _assert_managed_units(task_id, agent_uuid, install_root)
-        if activate:
-            _systemctl("disable", "--now", f"{name}.timer")
+        # agenda virou `manual`: o timer desta tarefa — e só ele —
+        # sai do caminho; o backup em execução não é tocado
         timer_path.unlink()
-    if activate:
-        _systemctl("daemon-reload")
-        if timer_written:
-            _systemctl("enable", "--now", f"{name}.timer")
     return {
         "task_id": task_id,
         "service": str(service_path),
         "timer": str(timer_path) if timer_written else None,
         "timer_name": f"{name}.timer" if timer_written else None,
-        "activated": activate and timer_written,
+        "calendar": calendar,
     }
 
 
-def suspend_managed_task(
-    task_id: str, agent_uuid: str, *, activate: bool = True
+def managed_timer_enabled(task_id: str) -> bool | None:
+    """True/False conforme `is-enabled` — None se a unit não existe."""
+    name = f"{_MANAGED_PREFIX}{task_id}.timer"
+    completed = subprocess.run(
+        [shutil.which("systemctl") or "systemctl", "--user",
+         "is-enabled", name],
+        capture_output=True, text=True, timeout=30,
+    )
+    if completed.returncode != 0:
+        return None
+    return "enabled" in completed.stdout
+
+
+def activate_managed_task(task_id: str, timer_written: bool) -> None:
+    """Único ponto de ativação: daemon-reload + enable --now — chamado
+    DEPOIS de `current.json` publicado, para que qualquer disparo
+    encontre configuração e agenda coerentes."""
+    _systemctl("daemon-reload")
+    if timer_written:
+        _systemctl("enable", "--now", f"{_MANAGED_PREFIX}{task_id}.timer")
+
+
+def disable_managed_timer(
+    task_id: str, agent_uuid: str, bond: str, *, now: bool = True
 ) -> dict[str, str]:
-    """Suspensão: DESABILITA o timer da tarefa gerenciada — e nada
-    mais. Configuração, unit e backups em execução seguem intocados."""
+    """Desativa o timer da tarefa gerenciada — e nada mais.
+    `now=False` só desabilita (sem parar disparo iminente — usado no
+    início da transição entre gerações para impedir agenda nova com
+    configuração antiga)."""
     install_root = _installation_root(_installed_launcher())
-    _assert_managed_units(task_id, agent_uuid, install_root)
+    _assert_managed_units(task_id, agent_uuid, bond, install_root)
     name = f"{_MANAGED_PREFIX}{task_id}"
     timer_path = unit_directory() / f"{name}.timer"
     disabled = False
-    if timer_path.exists() and activate:
-        _systemctl("disable", "--now", f"{name}.timer")
+    if timer_path.exists():
+        args = ("disable", f"{name}.timer") if not now else             ("disable", "--now", f"{name}.timer")
+        _systemctl(*args)
         disabled = True
     return {
         "task_id": task_id,
@@ -500,6 +558,32 @@ def suspend_managed_task(
         "disabled": disabled,
         "preserved": str(timer_path),
     }
+
+
+def remove_managed_units(
+    task_id: str, agent_uuid: str, bond: str
+) -> dict[str, str]:
+    """Remove APENAS as units gerenciadas desta tarefa/vínculo —
+    usado quando o rollback de uma primeira aplicação não tem estado
+    anterior funcional a restaurar."""
+    install_root = _installation_root(_installed_launcher())
+    _assert_managed_units(task_id, agent_uuid, bond, install_root)
+    unit_dir = unit_directory()
+    removed = []
+    for suffix in ("service", "timer"):
+        path = unit_dir / f"{_MANAGED_PREFIX}{task_id}.{suffix}"
+        if path.exists():
+            path.unlink()
+            removed.append(str(path))
+    return {"task_id": task_id, "removed": removed}
+
+
+def suspend_managed_task(
+    task_id: str, agent_uuid: str, bond: str
+) -> dict[str, str]:
+    """Suspensão: DESABILITA o timer da tarefa gerenciada — e nada
+    mais. Configuração, unit e backups em execução seguem intocados."""
+    return disable_managed_timer(task_id, agent_uuid, bond, now=True)
 
 
 def _pull_identity(store_path: Path, central_path: Path) -> str:

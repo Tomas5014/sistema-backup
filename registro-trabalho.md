@@ -1962,3 +1962,49 @@ visita/mutação; viewer lê sem escrever.
 real + units em HOME descartável + systemd --user real (enable/
 disable) — fluxo cadastro→publish→pull→units→backup→resultado→
 aplicada→update→suspend.
+
+## Consolidação pós-revisão — correções do commit f2074ef
+
+Revisão independente do `f2074ef` apontou falhas corrigidas em
+commit(s) novo(s) (sem reescrever o anterior):
+
+1. **Ordem de aplicação** — `install_managed_task` habilitava o timer
+   antes de `current.json`. Novo protocolo em journal:
+   received→validated→config-`N`.json→timer_off→units→published→
+   enabled→applied. `current.json` só é publicado depois das units e
+   o enable é o último passo; falha nos efeitos faz rollback para a
+   última geração aplicada (units + configuração + estado do timer) ou
+   remove o resíduo da primeira tentativa.
+2. **Janela journal→fila** — aplicação concluída sem enfileiramento
+   ficava sem confirmação definitiva. `_reconstruct_confirmations`
+   recria a fila a partir do journal a cada rodada (evento com
+   identidade e conteúdo estáveis — `agent_time` do journal).
+3. **Evolução por tentativa** — identidade dos relatos passou a ser
+   `(task_id, generation, apply_attempt)`: PostgreSQL migração 6
+   (`attempt` + nova UNIQUE + `confirmed_attempt` + `last_applied_*`),
+   SQLite v7 (rebuild preservando linhas). Falha→sucesso na mesma
+   geração é relatável; histórico preservado; resposta atrasada nunca
+   regride; `last_applied` mostra o último sucesso.
+4. **Transitório nunca bloqueia** — rede/timeout/5xx/429 seguem em
+   retry com backoff capado em 1h; só rejeições definitivas
+   (401/403/404/409/422) marcam `blocked`, com recuperação documentada
+   e `pull-unblock` para rearmar depois da correção.
+5. **`--no-activate` = preparação** — grava envelope + configuração
+   candidata + units; não ativa, não marca `applied`, não confirma.
+   Execução normal posterior retoma a mesma tentativa e conclui.
+6. **Validações** — `task.id`/`device_id` do documento conferidos
+   contra envelope/vínculo; `TaskSpec.validate_for_execution` +
+   destinos (origens existentes, repo-fora-da-origem, arquivos SFTP,
+   montagem SMB) antes de qualquer efeito — sem init de repositório.
+7. **Vínculo completo** — `managed/` agora chaveia por bond
+   (endpoint+UUID+banco): `active.json` + `managed/<bond>/tasks.d`;
+   marcador `managed-bond` nas units; `--rebind` desativa os timers do
+   vínculo anterior e aponta o ativo; lock `manage.lock` global
+   serializa adoções/aplicações; confirmações do vínculo antigo nunca
+   migram.
+8. **Prova integrada real** — `test_timer_real_dispara_backup`: API
+   real + PG real + `pull-tasks` com ativação real + timer systemd
+   DISPARANDO o backup Restic (agenda do minuto seguinte) + resultado
+   na central + confirmação `applied`/`last_applied` + suspensão
+   verificada no gerenciador real; limpeza garantida das units
+   criadas.

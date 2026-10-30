@@ -214,6 +214,33 @@ MIGRATIONS: list[tuple[int, str, str]] = [
             ON task_confirmations(task_id);
         """,
     ),
+    (
+        6,
+        "tentativas de aplicação e último sucesso na distribuição",
+        # `attempt` distingue tentativas da MESMA geração (falha ->
+        # sucesso) mantendo deduplicação por conteúdo; last_applied_*
+        # registra o último sucesso mesmo quando o estado vigente é
+        # falha de tentativa posterior.
+        """
+        ALTER TABLE task_confirmations
+            ADD COLUMN IF NOT EXISTS attempt integer NOT NULL DEFAULT 1;
+        ALTER TABLE task_confirmations
+            DROP CONSTRAINT IF EXISTS uq_task_confirmation;
+        ALTER TABLE task_confirmations
+            ADD CONSTRAINT uq_task_confirmation
+            UNIQUE (task_id, generation, attempt);
+        ALTER TABLE task_distributions
+            ADD COLUMN IF NOT EXISTS confirmed_attempt integer;
+        ALTER TABLE task_distributions
+            ADD COLUMN IF NOT EXISTS last_applied_generation integer;
+        ALTER TABLE task_distributions
+            ADD COLUMN IF NOT EXISTS last_applied_revision integer;
+        ALTER TABLE task_distributions
+            ADD COLUMN IF NOT EXISTS last_applied_attempt integer;
+        ALTER TABLE task_distributions
+            ADD COLUMN IF NOT EXISTS last_applied_at timestamptz;
+        """,
+    ),
 ]
 
 _ADVISORY_KEY = 727_203_001

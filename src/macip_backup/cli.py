@@ -178,8 +178,9 @@ def main() -> int:
     pull_tasks.add_argument("--rebind", action="store_true")
     pull_tasks.add_argument(
         "--no-activate", action="store_true",
-        help="escreve e valida as units sem daemon-reload/enable "
-             "(prova sem sessão systemd de usuário)",
+        help="modo PREPARAÇÃO: grava envelopes, configuração candidata e "
+             "units, sem daemon-reload/enable — NÃO marca aplicado e "
+             "NÃO confirma; a próxima execução normal conclui a aplicação",
     )
     pull_status = subcommands.add_parser(
         "pull-status",
@@ -203,6 +204,13 @@ def main() -> int:
         "unschedule-pull",
         help="remove somente o timer de consulta do vínculo informado",
     )
+    pull_unblock = subcommands.add_parser(
+        "pull-unblock",
+        help="devolve confirmações 'blocked' para a fila — depois de "
+             "corrigir a causa (ex.: credencial reemitida)",
+    )
+    pull_unblock.add_argument("--store", type=Path, required=True)
+    pull_unblock.add_argument("--central", type=Path, required=True)
     pull_unschedule.add_argument("--store", type=Path, required=True)
     pull_unschedule.add_argument("--central", type=Path, required=True)
     arguments = parser.parse_args()
@@ -250,6 +258,21 @@ def main() -> int:
             print(schedule_json(schedule_pull(
                 arguments.store, arguments.central, arguments.calendar,
                 enable=arguments.enable)))
+            return 0
+        if arguments.command == "pull-unblock":
+            from .central import load_central
+            from .distribution import _bond_key
+            from .store import ExecutionStore
+
+            spec = load_central(arguments.central)
+            store = ExecutionStore(arguments.store)
+            try:
+                freed = store.unblock_confirmations(
+                    _bond_key(spec, arguments.store)
+                )
+            finally:
+                store.close()
+            print(json.dumps({"unblocked": freed}))
             return 0
         if arguments.command == "unschedule-pull":
             from .distribution import unschedule_pull

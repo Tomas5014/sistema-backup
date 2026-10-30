@@ -284,6 +284,21 @@ class TaskDistribution(Base):
         String(100), nullable=True
     )
     confirmed_at = mapped_column(DateTime(timezone=True), nullable=True)
+    confirmed_attempt: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+    # último SUCESSO relatado — separado do status vigente (que pode
+    # ser falha de uma tentativa nova sobre uma aplicação boa)
+    last_applied_generation: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+    last_applied_revision: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+    last_applied_attempt: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+    last_applied_at = mapped_column(DateTime(timezone=True), nullable=True)
 
     task: Mapped[Task] = relationship()
 
@@ -294,7 +309,9 @@ class TaskConfirmation(Base):
 
     __tablename__ = "task_confirmations"
     __table_args__ = (
-        UniqueConstraint("task_id", "generation", name="uq_task_confirmation"),
+        UniqueConstraint(
+            "task_id", "generation", "attempt", name="uq_task_confirmation"
+        ),
     )
 
     id = mapped_column(BigInteger, primary_key=True, autoincrement=True)
@@ -302,6 +319,8 @@ class TaskConfirmation(Base):
         UUID(as_uuid=True), ForeignKey("tasks.id"), nullable=False, index=True
     )
     generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    # tentativa de aplicação — permite falha -> sucesso na mesma geração
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     status: Mapped[str] = mapped_column(String(20), nullable=False)
     applied_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
     detail: Mapped[str | None] = mapped_column(String(1000), nullable=True)

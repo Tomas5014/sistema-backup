@@ -345,11 +345,20 @@ export interface TaskDistribution {
   updated_at?: string;
   confirmed: {
     generation: number;
+    attempt: number | null;
     status: "applied" | "failed";
     applied_revision: number | null;
     detail: string | null;
     agent_time: string | null;
     received_at: string | null;
+  } | null;
+  /** último SUCESSO relatado — separado do estado vigente, que pode
+   * ser a falha de uma tentativa posterior (mesma geração). */
+  last_applied: {
+    generation: number;
+    revision: number | null;
+    attempt: number | null;
+    at: string | null;
   } | null;
 }
 

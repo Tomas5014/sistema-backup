@@ -761,7 +761,6 @@ describe("distribuição gerenciada", () => {
     });
     portal("/tasks/task-1");
     await screen.findByText("Distribuição gerenciada");
-    const cells = screen.getAllByRole("definition");
     // "Revisão aplicada pelo agente" = 1 — informada pelo agente, não
     // pelo POST administrativo
     expect(document.body.textContent ?? "").toContain(

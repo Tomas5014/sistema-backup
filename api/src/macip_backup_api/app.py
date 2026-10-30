@@ -239,12 +239,14 @@ class TaskSuspendIn(BaseModel):
 
 
 class TaskConfirmationIn(BaseModel):
-    """Relato do agente para UMA geração — idempotente por
-    (task_id, generation) com deduplicação por conteúdo."""
+    """Relato do agente para UMA tentativa de UMA geração — idempotente
+    por (task_id, generation, attempt) com deduplicação por conteúdo.
+    `attempt` permite a evolução falha -> sucesso dentro da geração."""
 
     model_config = ConfigDict(extra="forbid")
 
     generation: StrictInt = Field(ge=1)
+    attempt: StrictInt = Field(default=1, ge=1)
     status: Literal["applied", "failed"]
     applied_revision: StrictInt | None = Field(default=None, ge=1)
     detail: str | None = Field(default=None, max_length=1000)
@@ -808,6 +810,7 @@ def create_app() -> FastAPI:
             "confirmed": (
                 {
                     "generation": dist.confirmed_generation,
+                    "attempt": dist.confirmed_attempt,
                     "status": dist.confirmed_status,
                     "applied_revision": dist.confirmed_revision,
                     "detail": dist.confirmed_detail,
@@ -818,6 +821,19 @@ def create_app() -> FastAPI:
                     ),
                 }
                 if dist.confirmed_generation is not None
+                else None
+            ),
+            "last_applied": (
+                {
+                    "generation": dist.last_applied_generation,
+                    "revision": dist.last_applied_revision,
+                    "attempt": dist.last_applied_attempt,
+                    "at": (
+                        dist.last_applied_at.isoformat()
+                        if dist.last_applied_at else None
+                    ),
+                }
+                if dist.last_applied_generation is not None
                 else None
             ),
         }
@@ -1004,6 +1020,7 @@ def create_app() -> FastAPI:
             .values(
                 task_id=task_id,
                 generation=payload.generation,
+                attempt=payload.attempt,
                 status=payload.status,
                 applied_revision=payload.applied_revision,
                 detail=payload.detail,
@@ -1018,6 +1035,7 @@ def create_app() -> FastAPI:
                 select(TaskConfirmation).where(
                     TaskConfirmation.task_id == task_id,
                     TaskConfirmation.generation == payload.generation,
+                    TaskConfirmation.attempt == payload.attempt,
                 )
             ).scalar_one()
             if existing.payload_hash != digest:
@@ -1028,19 +1046,38 @@ def create_app() -> FastAPI:
             outcome = "duplicate"
         else:
             outcome = "recorded"
-        # só a geração VIGENTE pode promover o estado confirmado —
-        # uma confirmação atrasada fica no log, nunca rebaixa o mostrado
-        promoted = payload.generation == dist.generation
+        # promoção ordenada: só a geração VIGENTE atualiza confirmed_*,
+        # e só tentativas mais novas sobrescrevem — uma resposta antiga
+        # fica no log sem regredir o estado. Sucessos alimentam
+        # last_applied_* por (generation, attempt) — nunca regride.
+        promoted = (
+            payload.generation == dist.generation
+            and (
+                dist.confirmed_generation != payload.generation
+                or payload.attempt > (dist.confirmed_attempt or 0)
+            )
+        )
         if promoted:
             dist.confirmed_generation = payload.generation
+            dist.confirmed_attempt = payload.attempt
             dist.confirmed_status = payload.status
             dist.confirmed_revision = payload.applied_revision
             dist.confirmed_detail = payload.detail
             dist.confirmed_agent_time = payload.agent_time
             dist.confirmed_at = datetime.now(UTC)
-            db.commit()
-        else:
-            db.commit()  # só o log
+        if payload.status == "applied" and (
+            dist.last_applied_generation is None
+            or payload.generation > dist.last_applied_generation
+            or (
+                payload.generation == dist.last_applied_generation
+                and payload.attempt > (dist.last_applied_attempt or 0)
+            )
+        ):
+            dist.last_applied_generation = payload.generation
+            dist.last_applied_attempt = payload.attempt
+            dist.last_applied_revision = payload.applied_revision
+            dist.last_applied_at = datetime.now(UTC)
+        db.commit()
         return {
             "status": outcome,
             "promoted": promoted,
