@@ -321,13 +321,26 @@ def _journal_entries(directory: Path) -> list[dict]:
 
 
 def _journal_state(directory: Path) -> dict | None:
-    """Último passo por geração + tentativas + gerações aplicadas."""
+    """Último passo por geração + tentativas + gerações aplicadas.
+
+    Distingue:
+    - ``applied_generations`` — todas as gerações com passo 'applied'
+      (apply OU suspend);
+    - ``last_config_applied`` — última geração com 'applied' e
+      ``action="apply"`` (configuração efetivamente instalada);
+    - ``last_operational_action`` — ação ('apply'/'suspend') da
+      última geração aplicada — define o estado operacional a
+      restaurar no rollback (suspend = timer desabilitado).
+    """
     entries = _journal_entries(directory)
     if not entries:
         return None
     steps: dict[int, dict] = {}
     attempts: dict[int, int] = {}
     applied: list[int] = []
+    config_applied: list[int] = []
+    last_applied_action: str | None = None
+    last_applied_gen: int | None = None
     for entry in entries:
         generation = entry.get("generation")
         if generation is None:
@@ -338,12 +351,22 @@ def _journal_state(directory: Path) -> dict | None:
         )
         if entry.get("step") == "applied":
             applied.append(generation)
+            action = entry.get("action", "apply")
+            if last_applied_gen is None or generation >= last_applied_gen:
+                last_applied_gen = generation
+                last_applied_action = action
+            if action == "apply":
+                config_applied.append(generation)
     newest = max(steps)
     state = dict(steps[newest])
     state["steps"] = {g: e["step"] for g, e in steps.items()}
     state["attempts"] = attempts
     state["applied_generations"] = applied
     state["latest_applied"] = max(applied) if applied else None
+    state["last_config_applied"] = (
+        max(config_applied) if config_applied else None
+    )
+    state["last_operational_action"] = last_applied_action
     return state
 
 
@@ -537,18 +560,29 @@ def _flush_confirmations(
             f"/api/v1/agent/tasks/{item['task_id']}/confirmations",
             token, json.loads(item["payload"]),
         )
-        if (
+        acknowledged = (
             status == 200
             and isinstance(body, dict)
             and body.get("status") in ("recorded", "duplicate")
-        ):
+        )
+        if acknowledged:
             store.confirmation_sent(item["id"])
             summary["confirmations_sent"].append(item["task_id"])
-        elif status == 0 or status in _TRANSIENT_HTTP:
+        elif (
+            status == 0
+            or status in _TRANSIENT_HTTP
+            # 200 com corpo ilegível ou inesperado NÃO comprova
+            # registro — a central pode ter aceitado antes de a
+            # resposta ser perdida/corrompida. Preserva o evento
+            # para reenvio idempotente com backoff.
+            or status == 200
+        ):
             attempts = item["attempts"] + 1
+            detail = f"HTTP {status or 'rede/timeout'}"
+            if status == 200:
+                detail = "HTTP 200 resposta não reconhecida"
             store.confirmation_retry(
-                item["id"], f"HTTP {status or 'rede/timeout'}",
-                _backoff(attempts),
+                item["id"], detail, _backoff(attempts),
             )
             summary["confirmations_retry"].append(item["task_id"])
         else:
@@ -558,19 +592,6 @@ def _flush_confirmations(
 
 
 # ---- aplicação de uma geração ---------------------------------------------------
-
-
-def _last_functional_generation(
-    state: dict | None, exclude_generation: int
-) -> int | None:
-    """Última geração cujo journal declara 'applied' — estado funcional
-    a restaurar quando uma nova tentativa falha nos efeitos."""
-    if not state:
-        return None
-    candidates = [
-        g for g in state["applied_generations"] if g != exclude_generation
-    ]
-    return max(candidates) if candidates else None
 
 
 def _effects_for_generation(
@@ -636,34 +657,71 @@ def _restore_functional_state(
     bond: str,
     allow_bond_replacement: bool,
 ) -> str:
-    """Rollback: reinstala a ÚLTIMA geração aplicada (envelope gen-N
-    imutável → config/units/timer exatamente como estavam). Sem
-    anterior funcional → remove o que a primeira tentativa criou."""
+    """Rollback: restaura DOIS aspectos do estado anterior:
+
+    1. a ultima CONFIGURACAO instalada com sucesso (action='apply') -
+       config/units/current.json voltam a geracao que instalou a
+       ultima configuracao boa;
+    2. o estado OPERACIONAL anterior (apply = timer habilitado,
+       suspend = timer desabilitado) - NAO reativa uma tarefa que
+       estava suspensa.
+
+    Uma suspensao nao e uma nova configuracao de backup e nao pode ser
+    reconstruida como um envelope apply (sem 'schedule')."""
     generation = envelope["generation"]
-    previous = _last_functional_generation(state, generation)
-    if previous is None:
-        disable_managed_timer(task_id=envelope["task_id"],
+    task_id = envelope["task_id"]
+
+    # rele o journal para encontrar a ultima config aplicada (apply) e
+    # a ultima acao operacional (apply/suspend), excluindo a gen falha
+    entries = _journal_entries(task_dir)
+    last_config_gen: int | None = None
+    last_applied_gen: int | None = None
+    last_operational_action = "apply"
+    for entry in entries:
+        if entry.get("step") != "applied":
+            continue
+        gen = entry.get("generation")
+        if gen is None or gen == generation:
+            continue
+        action = entry.get("action", "apply")
+        if action == "apply" and (
+            last_config_gen is None or gen > last_config_gen
+        ):
+            last_config_gen = gen
+        if last_applied_gen is None or gen > last_applied_gen:
+            last_applied_gen = gen
+            last_operational_action = action
+
+    if last_config_gen is None:
+        # sem configuracao anterior - remove o residuo da tentativa
+        disable_managed_timer(task_id=task_id,
                               agent_uuid=spec.agent_id, bond=bond, now=True)
-        remove_managed_units(envelope["task_id"], spec.agent_id, bond)
+        remove_managed_units(task_id, spec.agent_id, bond)
         for name in ("current.json",):
             (task_dir / name).unlink(missing_ok=True)
         _journal_append(task_dir, "rolled_back", generation,
                         restored="none")
         return "removed"
-    previous_env = _read_envelope(task_dir, previous)
+
+    previous_env = _read_envelope(task_dir, last_config_gen)
     if previous_env is None:
         raise ConfigurationError(
-            "rollback impossível: envelope da geração anterior ausente"
+            "rollback impossivel: envelope da geracao anterior ausente"
         )
-    attempt = state["attempts"].get(previous, 1)
+    attempt = state["attempts"].get(last_config_gen, 1) if state else 1
+    # restaura a configuracao e as units da ultima aplicacao boa
     _effects_for_generation(
         previous_env, spec, central_path, store_path, task_dir, attempt,
         bond=bond, allow_bond_replacement=allow_bond_replacement,
     )
+    # restaura o estado OPERACIONAL: se a ultima acao foi suspend,
+    # desabilita o timer - NAO reativa uma tarefa suspensa
+    if last_operational_action == "suspend":
+        disable_managed_timer(task_id, spec.agent_id, bond, now=True)
     _journal_append(task_dir, "rolled_back", generation,
-                    apply_attempt=attempt, restored=previous)
-    return f"restored gen {previous}"
-
+                    apply_attempt=attempt, restored=last_config_gen,
+                    operational=last_operational_action)
+    return f"restored gen {last_config_gen} ({last_operational_action})"
 
 def _apply_one(
     spec: CentralSpec,
@@ -752,8 +810,11 @@ def _apply_one(
         step = "config"
 
     if not activate:
-        # preparação: units escritas, NADA ativado, NADA confirmado —
-        # a próxima execução com ativação retoma daqui
+        # PREPARAÇÃO: artefatos em staging SEPARADO — NÃO toca nas
+        # units operacionais, NÃO remove timer existente, NÃO altera
+        # estado habilitado/ativo. A ativação posterior promove os
+        # artefatos pelo protocolo seguro.
+        staging = task_dir / "staged"
         write_managed_task_units(
             task_id,
             task_dir / "current.json",
@@ -763,6 +824,7 @@ def _apply_one(
             bond,
             envelope["schedule"],
             allow_bond_replacement=allow_bond_replacement,
+            target_dir=staging,
         )
         _journal_append(task_dir, "prepared", generation,
                         apply_attempt=attempt)
@@ -799,6 +861,87 @@ def _apply_one(
 # ---- transição de vínculo --------------------------------------------------------
 
 
+def _transition_file() -> Path:
+    return managed_directory() / "transition.json"
+
+
+def _read_transition() -> dict | None:
+    path = _transition_file()
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+
+
+def _write_transition(from_bond: str, to_bond: str, phase: str) -> None:
+    _atomic_write(
+        _transition_file(),
+        json.dumps(
+            {"from_bond": from_bond, "to_bond": to_bond,
+             "phase": phase, "at": _now()},
+            ensure_ascii=False,
+        ),
+    )
+
+
+def _clear_transition() -> None:
+    _transition_file().unlink(missing_ok=True)
+
+
+def _resume_transition(spec: CentralSpec, bond: str) -> bool:
+    """Retoma uma transição de vínculo interrompida.
+
+    Retorna True se a transição foi concluída (ou já estava concluída)
+    e o chamador deve usar ``allow_bond_replacement=True``.
+
+    - phase <= 'timers_disabled': a transição não avançou o vínculo
+      ativo — restaura o vínculo anterior (re-grava active.json) e
+      descarta a transição;
+    - phase == 'active_switched': active.json já aponta o novo vínculo
+      — a transição precisa continuar com allow_bond_replacement=True;
+    - phase == 'units_replaced': transição essencialmente concluída —
+      só limpa o arquivo.
+    """
+    trans = _read_transition()
+    if trans is None:
+        return False
+    if trans.get("to_bond") != bond:
+        # transição para OUTRO vínculo — não é nossa; deixa intocada
+        return False
+    phase = trans.get("phase", "started")
+    if phase in ("started", "timers_disabled"):
+        # a transição não avançou o suficiente — restaura o vínculo
+        # anterior para estado consistente
+        old_bond = trans.get("from_bond")
+        if old_bond:
+            old_spec_data = _read_active()
+            if old_spec_data is None or old_spec_data.get("bond") != old_bond:
+                # active.json já foi trocado ou perdido — re-grava
+                # o vínculo anterior para garantir consistência
+                _atomic_write(
+                    _active_file(),
+                    json.dumps(
+                        {"bond": old_bond, "endpoint": spec.url,
+                         "agent_id": spec.agent_id,
+                         "bonded_at": _now()},
+                        ensure_ascii=False,
+                    ),
+                )
+        _clear_transition()
+        return False
+    if phase == "active_switched":
+        # active.json já aponta o novo vínculo — precisa continuar
+        # substituindo as units; allow_bond_replacement é autorizado
+        # pela transição persistente
+        return True
+    if phase == "units_replaced":
+        _clear_transition()
+        return True
+    return False
+
+
 def _transition_bond(
     spec: CentralSpec,
     bond: str,
@@ -807,15 +950,22 @@ def _transition_bond(
 ) -> None:
     """Troca explícita de vínculo (depois de `--rebind`):
 
-    1. desativa os timers das tarefas do vínculo ANTERIOR — seus
-       arquivos/journals são preservados mas nada continua disparando
-       sob a identidade antiga;
-    2. grava `active.json` apontando o novo vínculo;
-    3. confirmações pendentes do vínculo anterior NÃO migram —
-       pertencem ao bond que as gerou.
+    Fases PERSISTIDAS em ``transition.json`` — a transição é retomável
+    após interrupção:
 
-    Qualquer falha → recusa com diagnóstico, sem anunciar adoção."""
+    1. ``started`` — grava a intenção (from_bond, to_bond);
+    2. ``timers_disabled`` — desativa os timers do vínculo ANTERIOR;
+    3. ``active_switched`` — grava ``active.json`` apontando o novo
+       vínculo. A partir daqui, ``allow_bond_replacement=True`` é
+       derivado da transição persistente (não de variável de execução);
+    4. as tasks do novo vínculo são aplicadas pelo loop de
+       reconciliação (com allow_bond_replacement=True);
+    5. ``units_replaced`` + limpeza da transição.
+
+    Confirmações pendentes do vínculo anterior NÃO migram — pertencem
+    ao bond que as gerou."""
     old_bond = old["bond"]
+    _write_transition(old_bond, bond, "started")
     old_root = managed_directory() / old_bond[:16] / "tasks.d"
     if old_root.exists():
         for task_dir in sorted(old_root.iterdir()):
@@ -826,7 +976,9 @@ def _transition_bond(
             disable_managed_timer(
                 task_dir.name, spec.agent_id, old_bond, now=True
             )
+    _write_transition(old_bond, bond, "timers_disabled")
     _bind(bond, spec)
+    _write_transition(old_bond, bond, "active_switched")
 
 
 # ---- reconciliação --------------------------------------------------------------
@@ -940,10 +1092,16 @@ def reconcile(
                 return summary
 
             # vínculo: adoção automática na PRIMEIRA consulta ok;
-            # troca de vínculo SÓ com --rebind e transição completa
+            # troca de vínculo SÓ com --rebind e transição persistente
             active = _read_active()
             allow_bond_replacement = False
-            if active is None:
+            trans = _read_transition()
+            if trans is not None and trans.get("to_bond") == bond:
+                # transição interrompida para ESTE vínculo — retoma
+                allow_bond_replacement = _resume_transition(spec, bond)
+                if allow_bond_replacement:
+                    summary["bond_transitioned"] = True
+            elif active is None:
                 _bind(bond, spec)
             elif active["bond"] != bond:
                 if not rebind:
@@ -1007,6 +1165,14 @@ def reconcile(
                         outcome["apply_attempt"], outcome,
                     )
             _flush_confirmations(spec, store, token, summary)
+            # se uma transição de vínculo estava em andamento e as
+            # tasks foram processadas, conclui a transição
+            if allow_bond_replacement:
+                _write_transition(
+                    _read_transition().get("from_bond", "") if _read_transition() else "",
+                    bond, "units_replaced",
+                )
+                _clear_transition()
         finally:
             store.close()
     finally:

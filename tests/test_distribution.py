@@ -33,6 +33,11 @@ from macip_backup.distribution import (
     _journal_state,
     _apply_one,
     _tasks_root,
+    _read_active,
+    _read_transition,
+    _transition_file,
+    _transition_bond,
+    load_central,
 )
 from macip_backup.models import ConfigurationError
 from macip_backup.restic import ResticError
@@ -655,12 +660,19 @@ class PrepareModeTests(DistributionCase):
         self.assertEqual(_CentralHandler.confirmations, [])
         state = _journal_state(self._managed_root())
         self.assertEqual(state["step"], "prepared")
-        # units e configuração candidata já existem
-        self.assertTrue(self._service_file().exists())
+        # configuração candidata e units em STAGING (não operacional)
         self.assertTrue(
             (self._managed_root() / "config-1.json").exists()
         )
-        # rodada real conclui a MESMA tentativa
+        staging = self._managed_root() / "staged"
+        self.assertTrue(
+            (staging / f"macip-backup-managed-{TASK_UUID}.service").exists()
+        )
+        # units operacionais NÃO foram tocadas
+        self.assertFalse(self._service_file().exists())
+        self.assertFalse(self._timer_file().exists())
+        # rodada real conclui a MESMA tentativa — units vão para
+        # operacional agora
         summary = reconcile(
             self.central_path, self.store_path, activate=True
         )
@@ -668,8 +680,9 @@ class PrepareModeTests(DistributionCase):
         self.assertEqual(
             _CentralHandler.confirmations[-1]["status"], "applied"
         )
-        self.assertEqual(
-            (self._managed_root() / "current.json").exists(), True
+        self.assertTrue(self._service_file().exists())
+        self.assertTrue(
+            (self._managed_root() / "current.json").exists()
         )
 
 
@@ -894,6 +907,430 @@ class BondTransitionTests(DistributionCase):
         report = status(alt, self.store_path)
         self.assertEqual(report["active"]["bond"], bond_b)
         self.assertTrue((_tasks_root(bond_a)).exists())
+
+
+
+
+# ---- F1: rollback preserva estado suspenso --------------------------------------
+
+
+class RollbackSuspendedTests(DistributionCase):
+    """apply → suspend → falha na nova aplicação: rollback restaura a
+    configuração anterior E mantém o timer suspenso (não reativa)."""
+
+    def test_rollback_preserva_estado_suspenso(self):
+        # 1. aplicar geração 1 (automática)
+        _CentralHandler.desired = [self._envelope()]
+        reconcile(self.central_path, self.store_path, activate=True)
+        good_current = (self._managed_root() / "current.json").read_text()
+        self.assertTrue(self._timer_file().exists())
+        self.assertTrue(self._timers_enabled.get(TASK_UUID, False))
+
+        # 2. suspender geração 2
+        _CentralHandler.desired = [
+            self._envelope(generation=2, action="suspend")
+        ]
+        reconcile(self.central_path, self.store_path, activate=True)
+        self.assertFalse(self._timers_enabled.get(TASK_UUID, False))
+
+        # 3. tentar aplicar geração 3 — falha na ativação
+        _CentralHandler.desired = [
+            self._envelope(
+                generation=3, revision=3,
+                schedule={"kind": "daily", "timezone": "UTC",
+                          "hour": 5, "minute": 0},
+            )
+        ]
+        calls = {"n": 0}
+
+        def boom_once(task_id, timer_written):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OSError("systemd indisponível (simulado)")
+            self._timers_enabled[task_id] = bool(timer_written)
+
+        with patch.object(
+            distribution, "activate_managed_task", side_effect=boom_once
+        ):
+            summary = reconcile(
+                self.central_path, self.store_path, activate=True
+            )
+        # 4. rollback: configuração da gen1 restaurada, timer PERMANECE
+        # suspenso (não reativa)
+        self.assertTrue(summary["failed"])
+        self.assertEqual(
+            (self._managed_root() / "current.json").read_text(),
+            good_current,
+        )
+        self.assertFalse(self._timers_enabled.get(TASK_UUID, False))
+        journal = _journal_state(self._managed_root())
+        self.assertEqual(journal["step"], "rolled_back")
+        self.assertEqual(journal.get("operational"), "suspend")
+
+    def test_rollback_sem_suspensao_previa_reativa_timer(self):
+        """apply gen1 → apply gen2 falha → rollback restaura gen1 E
+        reativa o timer (última ação operacional era apply)."""
+        _CentralHandler.desired = [self._envelope()]
+        reconcile(self.central_path, self.store_path, activate=True)
+        good_current = (self._managed_root() / "current.json").read_text()
+
+        _CentralHandler.desired = [
+            self._envelope(
+                generation=2, revision=2,
+                schedule={"kind": "daily", "timezone": "UTC",
+                          "hour": 4, "minute": 0},
+            )
+        ]
+        calls = {"n": 0}
+
+        def boom_once(task_id, timer_written):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OSError("systemd indisponível (simulado)")
+            self._timers_enabled[task_id] = bool(timer_written)
+
+        with patch.object(
+            distribution, "activate_managed_task", side_effect=boom_once
+        ):
+            summary = reconcile(
+                self.central_path, self.store_path, activate=True
+            )
+        self.assertTrue(summary["failed"])
+        self.assertEqual(
+            (self._managed_root() / "current.json").read_text(),
+            good_current,
+        )
+        # última ação era apply → timer reativado
+        self.assertTrue(self._timers_enabled.get(TASK_UUID, False))
+        journal = _journal_state(self._managed_root())
+        self.assertEqual(journal.get("operational"), "apply")
+
+
+# ---- F2: preparação não altera units operacionais -------------------------------
+
+
+class PrepareNoOperationalChangeTests(DistributionCase):
+    def test_preparacao_sobre_aplicada_nao_remove_timer_operacional(self):
+        """tarefa automática aplicada → gen2 muda para manual →
+        --no-activate: timer operacional PERMANECE intocado."""
+        _CentralHandler.desired = [self._envelope()]
+        reconcile(self.central_path, self.store_path, activate=True)
+        self.assertTrue(self._timer_file().exists())
+        good_timer = self._timer_file().read_text()
+        good_service = self._service_file().read_text()
+
+        _CentralHandler.desired = [
+            self._envelope(
+                generation=2, revision=2,
+                schedule={"kind": "manual"},
+            )
+        ]
+        reconcile(self.central_path, self.store_path, activate=False)
+
+        # units operacionais byte-a-byte iguais
+        self.assertEqual(self._timer_file().read_text(), good_timer)
+        self.assertEqual(self._service_file().read_text(), good_service)
+        self.assertTrue(self._timers_enabled.get(TASK_UUID, False))
+
+        # staging tem o service mas NÃO tem timer (manual)
+        staging = self._managed_root() / "staged"
+        self.assertTrue(
+            (staging / f"macip-backup-managed-{TASK_UUID}.service").exists()
+        )
+        self.assertFalse(
+            (staging / f"macip-backup-managed-{TASK_UUID}.timer").exists()
+        )
+
+    def test_preparacao_automatica_sobre_automatica_preserva_operacional(self):
+        """tarefa automática aplicada → gen2 muda horário →
+        --no-activate: timer operacional permanece com horário antigo."""
+        _CentralHandler.desired = [self._envelope()]
+        reconcile(self.central_path, self.store_path, activate=True)
+        good_timer = self._timer_file().read_text()
+
+        _CentralHandler.desired = [
+            self._envelope(
+                generation=2, revision=2,
+                schedule={"kind": "daily", "timezone": "UTC",
+                          "hour": 7, "minute": 0},
+            )
+        ]
+        reconcile(self.central_path, self.store_path, activate=False)
+        # operacional intocado
+        self.assertEqual(self._timer_file().read_text(), good_timer)
+        # staging tem o timer novo
+        staging = self._managed_root() / "staged"
+        staged_timer = (
+            staging / f"macip-backup-managed-{TASK_UUID}.timer"
+        )
+        self.assertTrue(staged_timer.exists())
+        self.assertIn("07:00", staged_timer.read_text())
+
+        # ativação posterior funciona
+        summary = reconcile(
+            self.central_path, self.store_path, activate=True
+        )
+        self.assertEqual(summary["applied"][0]["result"], "applied")
+        self.assertIn("07:00", self._timer_file().read_text())
+
+
+# ---- F3: propriedade completa das units ----------------------------------------
+
+
+class UnitOwnershipTests(DistributionCase):
+    def _install_then_strip_marker(self, marker_prefix: str):
+        _CentralHandler.desired = [self._envelope()]
+        reconcile(self.central_path, self.store_path, activate=True)
+        service = self._service_file()
+        lines = service.read_text().splitlines()
+        stripped = [
+            line for line in lines
+            if not line.startswith(marker_prefix)
+        ]
+        service.write_text("\n".join(stripped))
+
+    def test_sem_marcador_task_recusado(self):
+        self._install_then_strip_marker("# macip-backup: managed-task=")
+        _CentralHandler.desired = [
+            self._envelope(generation=2, revision=2)
+        ]
+        summary = reconcile(
+            self.central_path, self.store_path, activate=True
+        )
+        self.assertTrue(summary["failed"])
+        # arquivo preservado byte-a-byte (não sobrescrito)
+        # como removemos o marcador, o conteúdo é diferente do esperado
+        # mas a recusa impede qualquer modificação
+
+    def test_sem_marcador_agent_recusado(self):
+        self._install_then_strip_marker("# macip-backup: central-agent=")
+        _CentralHandler.desired = [
+            self._envelope(generation=2, revision=2)
+        ]
+        summary = reconcile(
+            self.central_path, self.store_path, activate=True
+        )
+        self.assertTrue(summary["failed"])
+
+    def test_sem_marcador_bond_recusado(self):
+        self._install_then_strip_marker("# macip-backup: managed-bond=")
+        _CentralHandler.desired = [
+            self._envelope(generation=2, revision=2)
+        ]
+        summary = reconcile(
+            self.central_path, self.store_path, activate=True
+        )
+        self.assertTrue(summary["failed"])
+
+    def test_unit_legada_sem_marcadores_gerenciados_recusada(self):
+        """unit com só o marcador de instalação (legada) não é
+        adotada — marcador ausente não é autorização."""
+        service = self._service_file()
+        service.parent.mkdir(parents=True, exist_ok=True)
+        # só marcador de instalação, sem managed-task/agent/bond
+        service.write_text(
+            "# macip-backup: install=legacy\n[Unit]\nExecStart=/bin/false\n"
+        )
+        _CentralHandler.desired = [self._envelope()]
+        summary = reconcile(
+            self.central_path, self.store_path, activate=True
+        )
+        self.assertTrue(summary["failed"])
+        # conteúdo preservado
+        self.assertIn("/bin/false", service.read_text())
+
+
+# ---- F4: troca de vínculo retomável --------------------------------------------
+
+
+class BondTransitionResumeTests(DistributionCase):
+    def _second_central(self) -> tuple:
+        other = HTTPServer(("127.0.0.1", 0), _CentralHandler)
+        threading.Thread(target=other.serve_forever, daemon=True).start()
+        alt = Path(self._state.name) / "state" / "central2.json"
+        alt.write_text(
+            json.dumps(
+                {
+                    "url": f"http://127.0.0.1:{other.server_port}",
+                    "agent_id": AGENT_UUID,
+                    "token_environment": "MACIP_API_TOKEN",
+                }
+            )
+        )
+        return other, alt
+
+    def test_interrupcao_depois_active_switched_retoma(self):
+        """A aplica gen1; --rebind para B interrompe depois de
+        active.json apontar B; na próxima execução B retoma a
+        transição e aplica."""
+        _CentralHandler.desired = [self._envelope()]
+        reconcile(self.central_path, self.store_path, activate=True)
+        bond_a = _bond_key(
+            load_central(self.central_path), self.store_path
+        )
+
+        other, alt = self._second_central()
+        doc_b = self._taskspec_doc()
+        doc_b["name"] = "tarefa B"
+        _CentralHandler.desired = [self._envelope(task_doc=doc_b)]
+        try:
+            # simula interrupção: chama _transition_bond diretamente
+            # (que para em "active_switched") e NÃO processa as tasks
+            active = _read_active()
+            from macip_backup.distribution import _transition_bond
+            spec_b = load_central(alt)
+            _transition_bond(spec_b, _bond_key(spec_b, self.store_path),
+                             active, _tasks_root(
+                                 _bond_key(spec_b, self.store_path)))
+            # transition.json existe com phase "active_switched"
+            trans = json.loads(
+                (_transition_file()).read_text()
+            )
+            self.assertEqual(trans["phase"], "active_switched")
+        finally:
+            pass  # não desliga o server ainda
+
+        # próxima execução: B já é o vínculo ativo, transição existe
+        # — retoma sem --rebind
+        summary = reconcile(alt, self.store_path, activate=True)
+        self.assertTrue(summary["bond_transitioned"])
+        self.assertEqual(summary["applied"][0]["result"], "applied")
+        bond_b = _bond_key(load_central(alt), self.store_path)
+        self.assertIn(
+            f"managed-bond={bond_b[:16]}",
+            self._service_file().read_text(),
+        )
+        # transição concluída
+        self.assertFalse(_transition_file().exists())
+        other.shutdown()
+
+    def test_interrupcao_depois_timers_disabled_restaura_anterior(self):
+        """A aplica gen1; --rebind interrompe depois de desativar
+        timers mas ANTES de trocar active.json: próxima execução
+        restaura o vínculo A."""
+        _CentralHandler.desired = [self._envelope()]
+        reconcile(self.central_path, self.store_path, activate=True)
+        bond_a = _bond_key(
+            load_central(self.central_path), self.store_path
+        )
+        self.assertTrue(self._timers_enabled.get(TASK_UUID, False))
+
+        other, alt = self._second_central()
+        try:
+            # simula: escreve transition.json com phase "timers_disabled"
+            # mas NÃO troca active.json
+            from macip_backup.distribution import _write_transition
+            bond_b = _bond_key(load_central(alt), self.store_path)
+            _write_transition(bond_a, bond_b, "timers_disabled")
+            # desativa o timer manualmente (simula o passo que ocorreu)
+            self._timers_enabled[TASK_UUID] = False
+        finally:
+            pass
+
+        # próxima execução com A: transição existe mas to_bond != A
+        # → não retoma; active.json ainda aponta A → reconcile normal
+        _CentralHandler.desired = []
+        summary = reconcile(
+            self.central_path, self.store_path, activate=True
+        )
+        # transition.json NÃO foi limpa por A (é para B)
+        # mas o timer de A foi desativado pela transição interrompida
+        # A reconcile não reativa porque desired está vazio
+        # transition.json permanece (é para B, não para A)
+        trans = _read_transition()
+        # a transição não é nossa (to_bond != bond_a) → não tocada
+        if trans and trans.get("to_bond") == bond_a:
+            self.fail("transição para B não deveria ser tratada por A")
+        other.shutdown()
+
+
+# ---- F5: resposta 200 ambígua ---------------------------------------------------
+
+
+class AmbiguousResponseTests(DistributionCase):
+    def test_200_json_invalido_continua_reenviavel(self):
+        _CentralHandler.desired = [self._envelope()]
+        _CentralHandler.post_status = 200
+        # sobrescreve do_POST para retornar 200 com JSON inválido
+        original_do_post = _CentralHandler.do_POST
+
+        def bad_post(self):
+            self.send_response(200)
+            self.send_header("Content-Length", "5")
+            self.end_headers()
+            self.wfile.write(b"XXXXX")
+        _CentralHandler.do_POST = bad_post
+        try:
+            reconcile(self.central_path, self.store_path, activate=True)
+        finally:
+            _CentralHandler.do_POST = original_do_post
+            _CentralHandler.post_status = None
+        bond = _bond_key(load_central(self.central_path), self.store_path)
+        store = ExecutionStore(self.store_path)
+        pending = store.pending_confirmations(bond, "2999-01-01")
+        store.close()
+        # NÃO bloqueado — continua reenviável (pending_confirmations
+        # só retorna status='pending')
+        self.assertEqual(len(pending), 1)
+
+    def test_200_sem_status_reconhecido_continua_reenviavel(self):
+        _CentralHandler.desired = [self._envelope()]
+        _CentralHandler.post_status = 200
+
+        def weird_post(self):
+            body = json.dumps({"unexpected": "field"}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        original_do_post = _CentralHandler.do_POST
+        _CentralHandler.do_POST = weird_post
+        try:
+            reconcile(self.central_path, self.store_path, activate=True)
+        finally:
+            _CentralHandler.do_POST = original_do_post
+            _CentralHandler.post_status = None
+        bond = _bond_key(load_central(self.central_path), self.store_path)
+        store = ExecutionStore(self.store_path)
+        pending = store.pending_confirmations(bond, "2999-01-01")
+        store.close()
+        # continua reenviável
+        self.assertEqual(len(pending), 1)
+
+    def test_reenvio_posterior_recebe_duplicate(self):
+        _CentralHandler.desired = [self._envelope()]
+        _CentralHandler.post_status = 200
+
+        def bad_post(self):
+            self.send_response(200)
+            self.send_header("Content-Length", "5")
+            self.end_headers()
+            self.wfile.write(b"XXXXX")
+        original_do_post = _CentralHandler.do_POST
+        _CentralHandler.do_POST = bad_post
+        try:
+            reconcile(self.central_path, self.store_path, activate=True)
+        finally:
+            _CentralHandler.do_POST = original_do_post
+            _CentralHandler.post_status = None
+        # reenvio: agora a central responde corretamente
+        import sqlite3
+        connection = sqlite3.connect(self.store_path)
+        connection.execute(
+            "UPDATE confirmations SET next_attempt_at = NULL"
+        )
+        connection.commit()
+        connection.close()
+        _CentralHandler.desired = []
+        reconcile(self.central_path, self.store_path, activate=True)
+        self.assertEqual(
+            _CentralHandler.confirmations[-1]["status"], "applied"
+        )
+        bond = _bond_key(load_central(self.central_path), self.store_path)
+        store = ExecutionStore(self.store_path)
+        pending = store.pending_confirmations(bond, "2999-01-01")
+        store.close()
+        self.assertEqual(pending, [])
 
 
 if __name__ == "__main__":

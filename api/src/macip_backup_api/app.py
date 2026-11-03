@@ -1065,12 +1065,21 @@ def create_app() -> FastAPI:
             dist.confirmed_detail = payload.detail
             dist.confirmed_agent_time = payload.agent_time
             dist.confirmed_at = datetime.now(UTC)
-        if payload.status == "applied" and (
-            dist.last_applied_generation is None
-            or payload.generation > dist.last_applied_generation
-            or (
-                payload.generation == dist.last_applied_generation
-                and payload.attempt > (dist.last_applied_attempt or 0)
+        # last_applied_* registra a última CONFIGURAÇÃO efetivamente
+        # instalada — só uma confirmação de apply com applied_revision
+        # preenchido a atualiza. Uma suspensão (applied_revision=None)
+        # confirma a ação mas NÃO é uma instalação de configuração:
+        # preserva a última revisão aplicada.
+        if (
+            payload.status == "applied"
+            and payload.applied_revision is not None
+            and (
+                dist.last_applied_generation is None
+                or payload.generation > dist.last_applied_generation
+                or (
+                    payload.generation == dist.last_applied_generation
+                    and payload.attempt > (dist.last_applied_attempt or 0)
+                )
             )
         ):
             dist.last_applied_generation = payload.generation

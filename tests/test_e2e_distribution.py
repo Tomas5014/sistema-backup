@@ -237,15 +237,24 @@ def test_fluxo_completo_distribuicao(api, tmp_path):
     # NÃO foi publicado e NADA foi confirmado
     assert (managed / "config-1.json").is_file()
     assert not (managed / "current.json").exists()
-    units = home / "config" and home  # units vão para HOME/.config
+    # F2: preparação escreve em STAGING — units operacionais NÃO
+    # foram tocadas
+    staging = managed / "staged"
+    staged_service = (
+        staging / f"macip-backup-managed-{task_id}.service"
+    )
+    staged_timer = staged_service.with_suffix(".timer")
+    assert staged_service.is_file() and staged_timer.is_file()
+    assert f"managed-task={task_id}" in staged_service.read_text()
+    assert "managed-bond=" in staged_service.read_text()
+    assert "OnCalendar=*-*-* 03:30:00 UTC" in staged_timer.read_text()
+    assert "Persistent=true" in staged_timer.read_text()
+    # units operacionais AUSENTES (preparação não as criou)
     service = (home / ".config" / "systemd" / "user"
                / f"macip-backup-managed-{task_id}.service")
     timer = service.with_suffix(".timer")
-    assert service.is_file() and timer.is_file()
-    assert f"managed-task={task_id}" in service.read_text()
-    assert "managed-bond=" in service.read_text()
-    assert "OnCalendar=*-*-* 03:30:00 UTC" in timer.read_text()
-    assert "Persistent=true" in timer.read_text()
+    assert not service.exists()
+    assert not timer.exists()
     # API: sem confirmação — preparação não anuncia aplicação
     detail = _admin(base_url, "GET", f"/api/v1/tasks/{task_id}")
     assert detail["distribution"]["confirmed"] is None
@@ -290,7 +299,12 @@ def test_fluxo_completo_distribuicao(api, tmp_path):
     doc2 = json.loads((managed / "config-2.json").read_text())
     assert doc2["name"] == "backup-descartavel-v2"
     assert (managed / "gen-1.json").is_file()  # anterior preservada
-    assert "04:00" in timer.read_text()
+    # F2: timer NOVO está em staging, não no operacional
+    staged_timer2 = (
+        managed / "staged"
+        / f"macip-backup-managed-{task_id}.timer"
+    )
+    assert "04:00" in staged_timer2.read_text()
     detail = _admin(base_url, "GET", f"/api/v1/tasks/{task_id}")
     assert detail["distribution"]["generation"] == 2
     assert detail["distribution"]["confirmed"] is None
@@ -450,13 +464,13 @@ def test_timer_real_dispara_backup(api, tmp_path):
             f"sync={sent_info} remotas={executions}"
         )
 
-        # confirmação: revisão aplicada + last_applied visíveis
+        # confirmação: revisão aplicada + last_applied ESTRITO
         detail = _admin(base_url, "GET", f"/api/v1/tasks/{task_id}")
         dist = detail["distribution"]
         assert dist["confirmed"]["status"] == "applied"
         assert dist["confirmed"]["applied_revision"] == 1
-        assert dist["last_applied"]["revision"] == 1 or \
-            dist["confirmed"]["applied_revision"] == 1
+        assert dist["last_applied"]["revision"] == 1
+        assert dist["last_applied"]["generation"] == 1
 
         # suspensão pelo gerenciador REAL
         _admin(base_url, "POST", f"/api/v1/tasks/{task_id}/suspend",
@@ -478,6 +492,13 @@ def test_timer_real_dispara_backup(api, tmp_path):
         bond = json.loads(pull2.stdout)["bond"]
         managed = state_dir / "managed" / bond / "tasks.d" / task_id
         assert (managed / "current.json").is_file()
+        # F6: suspensão NÃO apaga last_applied — rev 1 permanece
+        detail2 = _admin(base_url, "GET", f"/api/v1/tasks/{task_id}")
+        dist2 = detail2["distribution"]
+        assert dist2["confirmed"]["status"] == "applied"
+        assert dist2["confirmed"]["applied_revision"] is None
+        assert dist2["last_applied"]["revision"] == 1
+        assert dist2["last_applied"]["generation"] == 1
     finally:
         subprocess.run(
             ["systemctl", "--user", "disable", "--now",

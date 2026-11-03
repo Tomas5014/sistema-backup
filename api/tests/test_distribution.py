@@ -585,3 +585,101 @@ def test_corrida_publish_vs_suspend_decisao_deterministica(
     got = client.get(f"/api/v1/tasks/{task['id']}",
                      headers=admin_headers).json()
     assert got["distribution"]["generation"] == 2
+
+
+# ---- F6: suspensão preserva last_applied_revision --------------------------------
+
+
+def test_suspender_preserva_ultima_revisao_aplicada(client, admin_headers):
+    """Aplicar rev1 → suspender: last_applied_revision PERMANECE 1
+    (suspensão não é instalação de configuração)."""
+    _, agent_id = create_agent_env(client, admin_headers)
+    task = create_task(client, admin_headers, agent_id).json()
+    cred = _agent_token(client, admin_headers, agent_id)
+    headers = {"Authorization": f"Bearer {cred['token']}"}
+    client.post(f"/api/v1/tasks/{task['id']}/publish",
+                json={"revision": 1, "expected_generation": 0},
+                headers=admin_headers)
+    _confirm(client, headers, task["id"], generation=1, attempt=1,
+             status="applied", applied_revision=1)
+    detail = client.get(f"/api/v1/tasks/{task['id']}",
+                        headers=admin_headers).json()
+    assert detail["distribution"]["last_applied"]["revision"] == 1
+
+    client.post(f"/api/v1/tasks/{task['id']}/suspend",
+                json={"expected_generation": 1}, headers=admin_headers)
+    _confirm(client, headers, task["id"], generation=2, attempt=1,
+             status="applied", applied_revision=None)
+    detail = client.get(f"/api/v1/tasks/{task['id']}",
+                        headers=admin_headers).json()
+    dist = detail["distribution"]
+    # confirmed mostra a suspensão (gen 2, sem revisão)
+    assert dist["confirmed"]["generation"] == 2
+    assert dist["confirmed"]["applied_revision"] is None
+    # last_applied PRESERVA a rev 1 — suspensão não é instalação
+    assert dist["last_applied"]["revision"] == 1
+    assert dist["last_applied"]["generation"] == 1
+
+
+def test_suspender_sem_aplicar_nao_anuncia_revisao_publicada(
+        client, admin_headers):
+    """Publicar rev2 (sem agente aplicar) → suspender: last_applied
+    NÃO anuncia rev2 — o agente pode ter perdido a publicação
+    intermediária e recebido diretamente a suspensão."""
+    _, agent_id = create_agent_env(client, admin_headers)
+    task = create_task(client, admin_headers, agent_id).json()
+    cred = _agent_token(client, admin_headers, agent_id)
+    headers = {"Authorization": f"Bearer {cred['token']}"}
+    client.post(f"/api/v1/tasks/{task['id']}/publish",
+                json={"revision": 1, "expected_generation": 0},
+                headers=admin_headers)
+    _confirm(client, headers, task["id"], generation=1, attempt=1,
+             status="applied", applied_revision=1)
+
+    # criar e publicar rev2 — agente NÃO confirma aplicação
+    client.post(
+        f"/api/v1/tasks/{task['id']}/revisions",
+        json={"expected_revision": 1,
+              "config": task_payload(name="Rev 2")},
+        headers=admin_headers,
+    )
+    client.post(f"/api/v1/tasks/{task['id']}/publish",
+                json={"revision": 2, "expected_generation": 1},
+                headers=admin_headers)
+    # suspender sem aplicar rev2
+    client.post(f"/api/v1/tasks/{task['id']}/suspend",
+                json={"expected_generation": 2}, headers=admin_headers)
+    r = _confirm(client, headers, task["id"], generation=3, attempt=1,
+             status="applied", applied_revision=None)
+    assert r.status_code == 200, r.json()
+    detail = client.get(f"/api/v1/tasks/{task['id']}",
+                        headers=admin_headers).json()
+    dist = detail["distribution"]
+    assert dist["confirmed"]["generation"] == 3
+    # last_applied PERMANECE rev1 — rev2 nunca foi instalada
+    assert dist["last_applied"]["revision"] == 1
+    assert dist["last_applied"]["generation"] == 1
+
+
+def test_confirmacoes_repetidas_nao_regredem_last_applied(
+        client, admin_headers):
+    """Reenvios atrasados/repetidos não regredem last_applied nem
+    confirmed."""
+    _, agent_id = create_agent_env(client, admin_headers)
+    task = create_task(client, admin_headers, agent_id).json()
+    cred = _agent_token(client, admin_headers, agent_id)
+    headers = {"Authorization": f"Bearer {cred['token']}"}
+    client.post(f"/api/v1/tasks/{task['id']}/publish",
+                json={"revision": 1, "expected_generation": 0},
+                headers=admin_headers)
+    _confirm(client, headers, task["id"], generation=1, attempt=1,
+             status="applied", applied_revision=1)
+    # reenvio duplicado
+    r = _confirm(client, headers, task["id"], generation=1, attempt=1,
+                 status="applied", applied_revision=1)
+    assert r.json()["status"] == "duplicate"
+    detail = client.get(f"/api/v1/tasks/{task['id']}",
+                        headers=admin_headers).json()
+    dist = detail["distribution"]
+    assert dist["last_applied"]["revision"] == 1
+    assert dist["confirmed"]["attempt"] == 1

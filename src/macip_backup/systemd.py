@@ -378,12 +378,21 @@ def _assert_managed_units(
     """Unit gerenciada é propriedade VINCULADA: pertence a esta
     instalação, àquela tarefa, àquele agente e àquele vínculo.
 
+    Para modificar, suspender ou remover uma unit existente, exige
+    comprovação COMPLETA da propriedade: os três marcadores
+    (managed-task, central-agent, managed-bond) devem estar presentes.
+
     - unit sem marcador de instalação → recusa (conteúdo preservado);
-    - managed-task de OUTRA tarefa ou central-agent de OUTRO agente →
-      recusa;
+    - unit COM marcador de instalação mas SEM qualquer um dos
+      marcadores gerenciados → recusa: marcador ausente NÃO é
+      autorização (não adota units legadas);
+    - managed-task de OUTRA tarefa → recusa;
+    - central-agent de OUTRO agente → recusa;
     - managed-bond de vínculo anterior → recusa, a menos que o chamador
       tenha autorizado explicitamente a adoção (`allow_bond_replacement`
-      — só verdadeiro logo após `--rebind` consumido)."""
+      — só verdadeiro durante transição persistente). Mesmo com
+      autorização, os marcadores task e agent devem estar presentes e
+      corresponder; bond deve existir (pode ser diferente)."""
     unit_dir = unit_directory()
     task_marker = f"# macip-backup: managed-task={task_id}"
     agent_marker = f"# macip-backup: central-agent={agent_uuid}"
@@ -399,26 +408,37 @@ def _assert_managed_units(
                 "conteúdo preservado"
             )
         markers = set(path.read_text(encoding="utf-8").splitlines())
-        task_marked = any(
+        has_task = any(
             line.startswith("# macip-backup: managed-task=")
             for line in markers
         )
-        if task_marked and task_marker not in markers:
-            raise ConfigurationError(
-                f"{path} pertence a outra tarefa — conteúdo preservado"
-            )
-        agent_marked = any(
+        has_agent = any(
             line.startswith("# macip-backup: central-agent=")
             for line in markers
         )
-        if agent_marked and agent_marker not in markers:
+        has_bond = any(
+            line.startswith(bond_prefix)
+            for line in markers
+        )
+        # propriedade COMPLETA exigida — marcador ausente = recusa
+        if not (has_task and has_agent and has_bond):
+            raise ConfigurationError(
+                f"{path} não possui marcadores completos de propriedade "
+                "(managed-task, central-agent, managed-bond) — "
+                "conteúdo preservado"
+            )
+        if task_marker not in markers:
+            raise ConfigurationError(
+                f"{path} pertence a outra tarefa — conteúdo preservado"
+            )
+        if agent_marker not in markers:
             raise ConfigurationError(
                 f"{path} pertence a outro agente — conteúdo preservado"
             )
         bond_markers = [
             line for line in markers if line.startswith(bond_prefix)
         ]
-        if bond_markers and expected_bond not in bond_markers                 and not allow_bond_replacement:
+        if expected_bond not in bond_markers                 and not allow_bond_replacement:
             raise ConfigurationError(
                 f"{path} pertence a um vínculo central anterior — "
                 "adição exige reconciliação com vínculo ativo"
@@ -435,10 +455,19 @@ def write_managed_task_units(
     schedule: dict,
     *,
     allow_bond_replacement: bool = False,
+    target_dir: Path | None = None,
 ) -> dict[str, str]:
-    """APENAS escreve service (+timer quando a agenda é automática) —
-    nenhuma chamada systemctl: o gerenciador continua com as units já
-    carregadas, mantendo coerência agenda↔configuração até a ativação.
+    """Escreve service (+timer quando a agenda é automática) — nenhuma
+    chamada systemctl.
+
+    ``target_dir=None`` (padrão) escreve no diretório operacional de
+    units (``unit_directory()``) e exige propriedade COMPLETA das
+    units existentes.
+
+    ``target_dir=<staging>`` escreve em um diretório de PREPARAÇÃO
+    separado — NÃO toca nas units operacionais, NÃO remove o timer
+    existente, NÃO verifica propriedade do operacional. A ativação
+    posterior promove os artefatos preparados pelo protocolo seguro.
 
     O ExecStart aponta para `current.json` — caminho estável cujo
     conteúdo só avança quando TODOS os efeitos estiverem no lugar."""
@@ -450,10 +479,11 @@ def write_managed_task_units(
         _validate_calendar(calendar)  # antes de tocar nas units
     launcher = _installed_launcher()
     install_root = _installation_root(launcher)
-    _assert_managed_units(
-        task_id, agent_uuid, bond, install_root,
-        allow_bond_replacement=allow_bond_replacement,
-    )
+    if target_dir is None:
+        _assert_managed_units(
+            task_id, agent_uuid, bond, install_root,
+            allow_bond_replacement=allow_bond_replacement,
+        )
     name = f"{_MANAGED_PREFIX}{task_id}"
     exec_line, pythonpath_line = _execution_lines(
         "agent",
@@ -461,7 +491,7 @@ def write_managed_task_units(
         f" --central {_unit_value(central_path)}",
         install_root,
     )
-    unit_dir = unit_directory()
+    unit_dir = target_dir if target_dir is not None else unit_directory()
     unit_dir.mkdir(parents=True, exist_ok=True)
     service_path = unit_dir / f"{name}.service"
     timer_path = unit_dir / f"{name}.timer"
@@ -501,10 +531,16 @@ WantedBy=timers.target
             encoding="utf-8",
         )
         timer_written = True
-    elif timer_path.exists():
+    elif target_dir is None and timer_path.exists():
         # agenda virou `manual`: o timer desta tarefa — e só ele —
-        # sai do caminho; o backup em execução não é tocado
+        # sai do caminho; o backup em execução não é tocado.
+        # SÓ no diretório operacional — staging nunca remove units
+        # operacionais.
         timer_path.unlink()
+    elif target_dir is not None:
+        # staging: se a agenda é manual, simplesmente não escreve
+        # o timer no staging — o timer operacional permanece intocado
+        timer_path.unlink(missing_ok=True)
     return {
         "task_id": task_id,
         "service": str(service_path),

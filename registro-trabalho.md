@@ -2008,3 +2008,40 @@ commit(s) novo(s) (sem reescrever o anterior):
    na central + confirmação `applied`/`last_applied` + suspensão
    verificada no gerenciador real; limpeza garantida das units
    criadas.
+
+## Correções da revisão do commit 92d4698
+
+Seis achados corrigidos em novo commit (92d4698 preservado):
+
+1. **Rollback preserva estado suspenso** — o rollback agora restaura
+   DOIS aspectos: a última configuração instalada (action='apply') e
+   o estado operacional anterior (apply=timer habilitado,
+   suspend=timer desabilitado). Uma suspensão não é reconstruída como
+   envelope apply (sem 'schedule'). Teste: apply→suspend→falha na
+   gen3 → config da gen1 restaurada, timer PERMANECE suspenso.
+2. **Preparação não altera units operacionais** — `--no-activate`
+   escreve artefatos em `<task_dir>/staged/`, NÃO no diretório
+   operacional. Timer existente não é removido, estado habilitado/ativo
+   não muda. Ativação posterior promove os artefatos pelo protocolo
+   seguro. Teste: automática aplicada → manual em staging → timer
+   operacional intocado.
+3. **Propriedade completa das units** — `_assert_managed_units` exige
+   os TRÊS marcadores (managed-task, central-agent, managed-bond).
+   Marcador ausente = recusa (não adota units legadas). Mesmo
+   `allow_bond_replacement` exige task e agent correspondentes.
+4. **Troca de vínculo retomável** — `transition.json` persiste a
+   intenção (from_bond, to_bond, phase). Após reinício: se
+   phase='active_switched', retoma com allow_bond_replacement=True;
+   se phase<='timers_disabled', restaura o vínculo anterior. Teste:
+   interrupção depois de active_switched → retoma sem --rebind.
+5. **Resposta 200 ambígua continua reenviável** — HTTP 200 com JSON
+   inválido ou sem status reconhecido NÃO bloqueia: preserva o evento
+   para reenvio idempotente com backoff. Só `recorded`/`duplicate`
+   marca como enviado. Teste: 200 com JSON inválido → pending; reenvio
+   → duplicate.
+6. **Suspensão não apaga last_applied_revision** — a API só atualiza
+   `last_applied_*` quando `applied_revision is not None` (apply
+   real). Suspensão (applied_revision=None) confirma a ação mas
+   preserva a última configuração instalada. Teste: apply rev1 →
+   suspend → last_applied PERMANECE rev1; publicar rev2 sem aplicar →
+   suspend → last_applied NÃO anuncia rev2.
