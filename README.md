@@ -3,6 +3,11 @@
 POC Linux para backups restic independentes em destinos `local` e `sftp`.
 Código legado foi preservado; esta POC não grava no formato legado.
 
+Candidata Linux para piloto controlado: **0.3.0rc1** (distribuição composta).
+Versões, alcance e artefato: [candidata](docs/candidata-linux.md).
+Operação: [instalação, atualização e retorno](docs/instalacao-atualizacao-retorno.md).
+Não representa MVP completo nem autorização de produção.
+
 ## Entrega atual
 
 - Validação JSON antes de criar ou gravar repositórios.

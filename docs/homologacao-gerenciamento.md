@@ -60,8 +60,8 @@ reexecutadas nesta revisão. O ambiente usou central e agente no commit
   CLI em ambiente simulado e isolado; não reexecuta o ciclo acima. O
   gate pertinente desta revisão aprovou 76 de 76 testes de CLI, geração
   de units e distribuição.
-- O operador recebeu orientação para parar os timers de consulta e
-  sincronização. A confirmação dessa limpeza ainda está pendente.
+- O operador confirmou posteriormente a parada dos timers de consulta e
+  sincronização; detalhes no encerramento abaixo.
 - A prova usou somente destino local em laboratório. Ela não homologa
   produção, SMB, S3 ou Windows.
 
@@ -138,9 +138,27 @@ Não houve comunicação com central. O trap executou remoção idempotente;
 as units, os dois worktrees e os diretórios temporários foram removidos.
 
 Esta prova aprova os comandos públicos corrigidos no Linux testado. Não
-aprova produção, Windows, SMB ou S3. A limpeza dos timers antigos de
-consulta e sincronização do laboratório continua pendente de confirmação
-do operador.
+aprova produção, Windows, SMB ou S3.
+
+Limitação da revisão independente: o sandbox apresentava PIDs diferentes
+entre Python e `/proc`. As falhas originais não foram reproduzidas no
+ambiente da validação complementar. A prontidão e identidade fortalecem a
+prova, mas não garantem compatibilidade com qualquer combinação de
+namespaces. O adaptador não foi alterado para acomodar esse sandbox.
+
+## Encerramento dos timers do laboratório — confirmação do operador
+
+O operador confirmou ambos os timers com `ActiveState=inactive` e
+`UnitFileState=disabled`:
+
+- `macip-backup-pull-a985252fb52df2de.timer`;
+- `macip-backup-sync-67ee9fbc7ff2b5da.timer`.
+
+Essa pendência específica está encerrada por evidência fornecida, sem nova
+consulta ao laboratório nesta consolidação. O backup gerenciado já estava
+suspenso pela geração 3. Snapshot e recuperação após suspensão permanecem
+confirmados. Isso não significa remoção do laboratório, SQLite, repositório
+ou arquivos recuperados.
 
 ## Pré-requisitos
 

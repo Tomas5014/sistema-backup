@@ -3,6 +3,11 @@
 Guia executável para instalar o agente numa máquina Linux dedicada —
 sem checkout de desenvolvimento e sem terminal aberto.
 
+Para a distribuição candidata 0.3.0rc1, prevalece o runbook de
+[instalação, atualização e retorno](instalacao-atualizacao-retorno.md),
+inclusive a preservação de escritas posteriores no retorno. Gere artefatos
+de commit exato conforme [candidata Linux](candidata-linux.md).
+
 > **Status**: instalação/atualização/desinstalação homologadas em
 > laboratório (`tests/test_install.py`). O piloto de 7 dias e a
 > validação em segunda máquina real estão **pendentes** — esta entrega
@@ -95,9 +100,10 @@ bash install.sh macip_backup_poc-<nova-versão>.whl --commit <sha>
 - Recusa com execução ativa (lock ocupado) — tente depois.
 - Copia `agent.db` para `db-backups/` antes de tocar o banco.
 - Nova release ativada só no final — falha mantém a anterior utilizável.
-- **Reversão**: se o esquema SQLite migrou, voltar só o código não basta —
-  restaure também `db-backups/agent.db-<stamp>` para `agent.db`, depois
-  rode `install.sh` com o wheel anterior.
+- **Reversão**: confira compatibilidade de esquema e journals antes de voltar
+  o código. Preserve o estado novo e reconcilie eventos posteriores; nunca
+  substitua SQLite por cópia antiga descartando histórico/outbox silenciosamente.
+  Siga o runbook da candidata para lock, custódia e retomada.
 
 ## 6. Desinstalação
 
@@ -137,5 +143,5 @@ Não declarar o piloto concluído antes dos 7 dias reais.
 
 - `EnvironmentFile` lê `KEY=value` simples — segredos com `\n` exigem
   escape manual ou keyring de sessão.
-- Sem portal/API: o histórico fica local no SQLite da máquina.
+- Sem vínculo central configurado, o histórico fica somente no SQLite local.
 - Linger exige configuração administrativa — fora do instalador.
