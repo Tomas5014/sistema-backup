@@ -65,6 +65,83 @@ reexecutadas nesta revisão. O ambiente usou central e agente no commit
 - A prova usou somente destino local em laboratório. Ela não homologa
   produção, SMB, S3 ou Windows.
 
+## Validação complementar do CLI — 03/11/2026
+
+Esta validação avaliou o commit `ef3ff75` em Linux descartável. Ela não
+reexecutou a homologação histórica do commit `469b356` nem acessou a VM
+`srvdev1`.
+
+### Investigação do cancelamento
+
+O código `src/macip_backup/restic.py` da base `469b356` e do candidato
+`ef3ff75` apresentou o mesmo SHA-256:
+`7aa54545f5ec60f765d4434efe08517a2af38a878a6e4844036585193a9cc224`.
+Dois worktrees isolados em `/tmp` confirmaram a comparação e foram
+removidos ao final.
+
+- Execução inicial de `AdapterCancellationTests`: 3/3 aprovados em
+  5,477 s. O encerramento limpo medido separadamente levou 0,076 s; o
+  caso que ignora SIGTERM levou 5,451 s e escalou para SIGKILL.
+- Base e candidato: três rodadas completas em cada checkout, 18/18
+  aprovadas. Cada rodada levou entre 5,424 s e 5,530 s dentro do runner.
+- Prova fortalecida: 100 repetições do encerramento limpo e 10 do
+  descendente resistente, 110/110 aprovadas em 64,340 s.
+- Regressões próximas do adaptador Restic: 9/9 aprovadas em 5,149 s.
+- Gate final de CLI, units simuladas, cancelamento e distribuição:
+  79/79 aprovados em 39,226 s.
+
+As duas falhas relatadas não foram reproduzidas como defeito funcional.
+A prova antiga iniciava a medição assim que o objeto `Popen` era
+publicado, sem confirmar que o binário falso já havia iniciado. Também
+usava `pgrep -f`, que não preserva a identidade do processo diante de
+reuso de PID e diferenças de namespace, nem expressa a regra adotada
+para estados zumbi. O teste passou a:
+
+- aguardar um arquivo de prontidão antes do cancelamento;
+- registrar `PID:starttime` do descendente em `/proc`;
+- considerar `Z`/`X` encerrado e detectar reuso de PID pelo `starttime`;
+- limpar processos registrados no `tearDown`, inclusive após falha.
+
+Nenhuma linha do adaptador Restic foi alterada. A asserção de duração
+`< 10 s` e a exigência de encerramento do descendente foram preservadas.
+
+### Prova com systemd --user real
+
+O `systemctl --user` estava disponível, em estado `degraded`, mas apto a
+carregar e operar o timer descartável. A entrada pública foi usada em
+todos os passos:
+
+```bash
+python3 -m macip_backup.cli schedule-pull --store STORE \
+  --central CENTRAL --calendar '2099-12-31 23:59:59'
+python3 -m macip_backup.cli schedule-pull --store STORE \
+  --central CENTRAL --calendar '2099-12-31 23:59:59' --enable
+python3 -m macip_backup.cli unschedule-pull --store STORE --central CENTRAL
+```
+
+Resultado:
+
+- identidade exclusiva `macip-backup-pull-79b2a94fe0cb4308`;
+- antes da prova, service e timer não existiam;
+- sem `--enable`: JSON válido, dois arquivos criados,
+  `is-enabled=disabled` e `is-active=inactive`;
+- com `--enable`: JSON válido, `enabled` e `active`; próximo disparo em
+  `Thu 2099-12-31 23:59:59 -03`, sem consulta executada;
+- primeira remoção: somente os dois caminhos dessa identidade em
+  `removed`; segunda remoção: `removed: []`;
+- ao final, nenhuma unit carregada, arquivo ou processo dessa identidade.
+
+Configuração, estado, cache, locks e binários ficaram sob
+`/tmp/macip-pull-systemd-Gp6AJ6`. `central.json` era sintético, apontava
+para `127.0.0.1:65534` e continha somente o nome de uma variável de token.
+Não houve comunicação com central. O trap executou remoção idempotente;
+as units, os dois worktrees e os diretórios temporários foram removidos.
+
+Esta prova aprova os comandos públicos corrigidos no Linux testado. Não
+aprova produção, Windows, SMB ou S3. A limpeza dos timers antigos de
+consulta e sincronização do laboratório continua pendente de confirmação
+do operador.
+
 ## Pré-requisitos
 
 - Central saudável com migrações 5 e 6 aplicadas (`task_distributions`

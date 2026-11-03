@@ -2165,3 +2165,68 @@ descartável; nenhum serviço externo ou laboratório real foi acessado.
   operador ainda não confirmou a limpeza.
 - `srvdev1`, laboratório congelado, piloto 0.2.1, instalações globais,
   backups e credenciais reais não foram acessados nem alterados.
+
+---
+
+## 2026-11-03 — Validação real do CLI de consulta e cancelamento
+
+### Cancelamento: diagnóstico
+
+`restic.py` tem SHA-256
+`7aa54545f5ec60f765d4434efe08517a2af38a878a6e4844036585193a9cc224`
+tanto em `469b356` quanto em `ef3ff75`. Worktrees isolados em `/tmp`
+compararam base e candidato; ambos passaram três rodadas completas de
+`AdapterCancellationTests` (18/18 no total).
+
+No candidato, a primeira rodada passou 3/3 em 5,477 s. Medições
+individuais: 0,076 s no SIGTERM limpo e 5,451 s no descendente que exige
+SIGKILL. Não foi reproduzido defeito funcional no adaptador.
+
+A prova tinha duas fragilidades:
+
+- `_spawn` observava somente a publicação de `Popen`, não o início
+  confirmado do binário falso;
+- `pgrep -f` não preservava identidade contra reuso de PID ou diferenças
+  de namespace e não distinguia a regra para estado zumbi.
+
+O teste passou a aguardar prontidão, registrar `PID:starttime`, consultar
+o mesmo `/proc`, tratar `Z`/`X` como encerrado e limpar identidades
+registradas no `tearDown`. A asserção `< 10 s` e a prova do descendente
+encerrado foram mantidas. Nenhum código de produção mudou.
+
+Verificações após o ajuste:
+
+- stress: 110/110 em 64,340 s (100 SIGTERM limpos, 10 descendentes);
+- `tests.test_restic_unit`: 9/9 em 5,149 s;
+- gate CLI + units simuladas + cancelamento + distribuição: 79/79 em
+  39,226 s.
+
+### CLI público com systemd real
+
+`systemctl --user` respondeu `degraded`, mas operou a identidade
+descartável `macip-backup-pull-79b2a94fe0cb4308`. Os comandos foram
+executados por `python3 -m macip_backup.cli`, usando o código do checkout,
+sem helpers diretos e sem agente global.
+
+- sem `--enable`: JSON válido, service+timer próprios criados, timer
+  `disabled`/`inactive`;
+- com `--enable`: JSON válido, timer `enabled`/`active`, próximo disparo
+  `2099-12-31 23:59:59 -03`;
+- primeira remoção: dois arquivos exatos removidos e timer parado;
+- segunda remoção: sucesso com `removed: []`.
+
+Recursos ficaram em `/tmp/macip-pull-systemd-Gp6AJ6`, com configuração
+central sintética em `127.0.0.1:65534`, estado, cache, locks e binários
+separados. O calendário distante impediu execução. Nenhuma comunicação
+com central ocorreu. Trap e verificação final confirmaram ausência das
+units, arquivos e processos; worktrees e diretórios temporários também
+foram removidos.
+
+### Alcance e pendências
+
+- A prova aprova somente `schedule-pull`/`unschedule-pull` no Linux
+  testado; não amplia aprovação para produção, Windows, SMB ou S3.
+- A homologação do operador no commit `469b356` permanece histórica e
+  não foi reexecutada.
+- A parada dos timers antigos de consulta e sincronização do laboratório
+  ainda depende de confirmação do operador.
