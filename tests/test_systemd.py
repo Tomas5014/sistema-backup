@@ -1296,6 +1296,8 @@ class AdapterCancellationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory(prefix=".test-cancel-", dir=Path.cwd())
         self.root = Path(self.temp_dir.name)
+        self._running: list[tuple[ResticAdapter, threading.Thread]] = []
+        self._child_identities: list[tuple[int, str]] = []
         self.destination = Destination(
             id="local",
             name="Local",
@@ -1305,6 +1307,15 @@ class AdapterCancellationTests(unittest.TestCase):
         )
 
     def tearDown(self) -> None:
+        for adapter, thread in self._running:
+            adapter.cancel("limpeza do teste")
+            thread.join(timeout=12)
+        for pid, starttime in self._child_identities:
+            if self._process_identity_is_running(pid, starttime):
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
         self.temp_dir.cleanup()
 
     def _fake_restic(self, body: str) -> Path:
@@ -1313,7 +1324,9 @@ class AdapterCancellationTests(unittest.TestCase):
         script.chmod(0o755)
         return script
 
-    def _spawn(self, script: Path) -> tuple["ResticAdapter", threading.Thread, list[BaseException]]:
+    def _spawn(
+        self, script: Path, ready_file: Path
+    ) -> tuple["ResticAdapter", threading.Thread, list[BaseException]]:
         from macip_backup.restic import ResticAdapter
 
         adapter = ResticAdapter(binary=str(script))
@@ -1325,9 +1338,15 @@ class AdapterCancellationTests(unittest.TestCase):
             daemon=True,
         )
         thread.start()
+        self._running.append((adapter, thread))
         deadline = time.monotonic() + 10
-        while adapter._current_process is None and time.monotonic() < deadline:
+        while (
+            (adapter._current_process is None or not ready_file.is_file())
+            and time.monotonic() < deadline
+        ):
             time.sleep(0.01)
+        self.assertIsNotNone(adapter._current_process)
+        self.assertTrue(ready_file.is_file(), "processo de teste não confirmou início")
         return adapter, thread, errors
 
     @staticmethod
@@ -1338,10 +1357,14 @@ class AdapterCancellationTests(unittest.TestCase):
             errors.append(error)
 
     def test_clean_sigterm_exit_no_cleanup_error_no_full_wait(self) -> None:
+        ready_file = self.root / "clean-ready"
         script = self._fake_restic(
-            "import time\ntime.sleep(60)\n"
+            "import os, time\n"
+            "open(os.environ['MACIP_CANCEL_READY'], 'w').write('ready')\n"
+            "time.sleep(60)\n"
         )
-        adapter, thread, errors = self._spawn(script)
+        with patch.dict(os.environ, {"MACIP_CANCEL_READY": str(ready_file)}):
+            adapter, thread, errors = self._spawn(script, ready_file)
         start = time.monotonic()
         adapter.cancel("teste-sigterm")
         thread.join(timeout=30)
@@ -1353,25 +1376,31 @@ class AdapterCancellationTests(unittest.TestCase):
         self.assertIsInstance(errors[0], ResticError)
 
     def test_descendant_ignoring_sigterm_escalates_to_sigkill(self) -> None:
-        marker = f"cx-{secrets.token_hex(4)}"
+        child_pid_file = self.root / "child.pid"
         script = self._fake_restic(
-            "import signal, subprocess, sys, time\n"
+            "import os, signal, subprocess, sys, time\n"
             "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
-            f"subprocess.Popen([sys.executable, '-c', '#{marker}\\n"
+            "child = subprocess.Popen([sys.executable, '-c', '"
             "import signal,time\\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\\n"
             "time.sleep(60)'])\n"
+            "starttime = open(f'/proc/{child.pid}/stat').read().rsplit(')', 1)[1].split()[19]\n"
+            "open(os.environ['MACIP_CANCEL_CHILD_PID'], 'w').write(f'{child.pid}:{starttime}')\n"
             "time.sleep(60)\n"
         )
-        adapter, thread, errors = self._spawn(script)
-        time.sleep(0.3)  # descendente iniciado
+        with patch.dict(
+            os.environ, {"MACIP_CANCEL_CHILD_PID": str(child_pid_file)}
+        ):
+            adapter, thread, errors = self._spawn(script, child_pid_file)
+        child_pid, child_starttime = self._read_process_identity(child_pid_file)
+        self._child_identities.append((child_pid, child_starttime))
         adapter.cancel("teste-sigkill")
         thread.join(timeout=60)
 
         self.assertIsNone(adapter.cancel_cleanup_error)
-        leftovers = subprocess.run(
-            ["pgrep", "-f", marker], capture_output=True, text=True
-        ).stdout.strip()
-        self.assertEqual(leftovers, "", "descendente que ignora SIGTERM sobreviveu")
+        self.assertFalse(
+            self._process_identity_is_running(child_pid, child_starttime),
+            "descendente original que ignora SIGTERM sobreviveu",
+        )
         self.assertTrue(errors)
 
     def test_cancel_without_process_is_noop(self) -> None:
@@ -1382,3 +1411,16 @@ class AdapterCancellationTests(unittest.TestCase):
         self.assertTrue(adapter.cancelled)
         self.assertEqual(adapter.cancel_reason, "motivo")
         self.assertIsNone(adapter.cancel_cleanup_error)
+
+    @staticmethod
+    def _read_process_identity(path: Path) -> tuple[int, str]:
+        pid, starttime = path.read_text(encoding="utf-8").split(":", 1)
+        return int(pid), starttime
+
+    @staticmethod
+    def _process_identity_is_running(pid: int, starttime: str) -> bool:
+        try:
+            fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        except (FileNotFoundError, IndexError):
+            return False
+        return fields[0] not in {"Z", "X"} and fields[19] == starttime
