@@ -1237,43 +1237,81 @@ class BondTransitionResumeTests(DistributionCase):
         other.shutdown()
 
     def test_interrupcao_depois_timers_disabled_restaura_anterior(self):
-        """T4: A aplica gen1 (automática); --rebind para B interrompe
-        depois de desativar timers mas ANTES de trocar active.json.
-        Retomada com B: _resume_transition restaura active.json para A
-        E reativa o timer de A. Verifica estados intermediários e
-        final."""
+        """T4+R1+R2: A aplica gen1 (automática); --rebind para B
+        interrompe depois de desativar timers mas ANTES de trocar
+        active.json. Retomada com B: restaura A COMPLETAMENTE
+        (bond+endpoint+agent_id do snapshot), reativa o timer, ENCERRA
+        a rodada sem aplicar tarefas de B."""
         _CentralHandler.desired = [self._envelope()]
         reconcile(self.central_path, self.store_path, activate=True)
-        bond_a = _bond_key(
-            load_central(self.central_path), self.store_path
-        )
+        spec_a = load_central(self.central_path)
+        bond_a = _bond_key(spec_a, self.store_path)
+        endpoint_a = spec_a.url
         self.assertTrue(self._timers_enabled.get(TASK_UUID, False))
         good_service = self._service_file().read_text()
 
         other, alt = self._second_central()
         try:
             # simula: escreve transition.json com phase "timers_disabled"
-            # e desativa o timer (o passo que ocorreu antes da queda)
+            # + snapshot COMPLETO da identidade de A, e desativa o timer
             from macip_backup.distribution import _write_transition
-            bond_b = _bond_key(load_central(alt), self.store_path)
-            _write_transition(bond_a, bond_b, "timers_disabled")
+            spec_b = load_central(alt)
+            bond_b = _bond_key(spec_b, self.store_path)
+            _write_transition(
+                bond_a, bond_b, "timers_disabled",
+                from_endpoint=endpoint_a,
+                from_agent_id=AGENT_UUID,
+            )
             self._timers_enabled[TASK_UUID] = False
             # active.json AINDA aponta A (não foi trocado)
 
             # retomada com B: _resume_transition vê phase <= timers_disabled
-            # → restaura A: active.json aponta A, timer reativado
-            _CentralHandler.desired = []
-            reconcile(alt, self.store_path, activate=True)
+            # → restaura A COMPLETAMENTE e ENCERRA a rodada
+            # B tem uma tarefa com UUID DIFERENTE — não deve ser aplicada
+            other_task_uuid = str(uuid.uuid4())
+            doc_b = self._taskspec_doc()
+            doc_b["id"] = other_task_uuid
+            doc_b["name"] = "tarefa B distinta"
+            _CentralHandler.desired = [
+                self._envelope(task_doc=doc_b, task_id=other_task_uuid)
+            ]
+            summary = reconcile(alt, self.store_path, activate=True)
 
-            # active.json aponta A novamente
+            # R1: rodada encerrada — NENHUMA tarefa de B aplicada
+            self.assertTrue(summary.get("bond_restored"))
+            self.assertEqual(summary["applied"], [])
+            self.assertEqual(summary["prepared"], [])
+            self.assertEqual(summary["suspended"], [])
+
+            # R2: active.json aponta A COMPLETAMENTE (bond+endpoint+agent)
             active = _read_active()
             self.assertEqual(active["bond"], bond_a)
+            self.assertEqual(active["endpoint"], endpoint_a)
+            self.assertEqual(active["agent_id"], AGENT_UUID)
+            # NÃO é o endpoint de B
+            self.assertNotEqual(active["endpoint"], spec_b.url)
+
             # timer de A reativado
             self.assertTrue(self._timers_enabled.get(TASK_UUID, False))
             # units de A preservadas byte-a-byte
             self.assertEqual(self._service_file().read_text(), good_service)
             # transition.json limpa
             self.assertIsNone(_read_transition())
+            # NENHUMA unit de B foi criada
+            b_service = (
+                unit_directory()
+                / f"macip-backup-managed-{other_task_uuid}.service"
+            )
+            self.assertFalse(b_service.exists())
+
+            # R1: adoção posterior autorizada de B continua funcionando
+            _CentralHandler.desired = [
+                self._envelope(task_doc=doc_b, task_id=other_task_uuid)
+            ]
+            summary2 = reconcile(
+                alt, self.store_path, activate=True, rebind=True
+            )
+            self.assertTrue(summary2["bond_transitioned"])
         finally:
             other.shutdown()
 
@@ -1419,6 +1457,141 @@ class BondAdoptionPendingTests(DistributionCase):
             finally:
                 import shutil
                 shutil.rmtree(missing.parent, ignore_errors=True)
+        finally:
+            other.shutdown()
+
+
+# ---- R2: identidade restaurada completa ----------------------------------------
+
+
+class RestoredIdentityTests(DistributionCase):
+    """R2: a identidade restaurada deve ser COMPLETA — bond, endpoint
+    e agent_id de A, nunca misturados com B."""
+
+    def _second_central(self) -> tuple:
+        other = HTTPServer(("127.0.0.1", 0), _CentralHandler)
+        threading.Thread(target=other.serve_forever, daemon=True).start()
+        alt = Path(self._state.name) / "state" / "central2.json"
+        alt.write_text(
+            json.dumps(
+                {
+                    "url": f"http://127.0.0.1:{other.server_port}",
+                    "agent_id": AGENT_UUID,
+                    "token_environment": "MACIP_API_TOKEN",
+                }
+            )
+        )
+        return other, alt
+
+    def test_identidade_restaurada_completa_nao_mistura(self):
+        """Restaura bond+endpoint+agent_id de A — não usa spec de B."""
+        _CentralHandler.desired = [self._envelope()]
+        reconcile(self.central_path, self.store_path, activate=True)
+        spec_a = load_central(self.central_path)
+        bond_a = _bond_key(spec_a, self.store_path)
+        endpoint_a = spec_a.url
+
+        other, alt = self._second_central()
+        try:
+            from macip_backup.distribution import _write_transition
+            spec_b = load_central(alt)
+            bond_b = _bond_key(spec_b, self.store_path)
+            _write_transition(
+                bond_a, bond_b, "timers_disabled",
+                from_endpoint=endpoint_a,
+                from_agent_id=AGENT_UUID,
+            )
+            self._timers_enabled[TASK_UUID] = False
+
+            _CentralHandler.desired = []
+            reconcile(alt, self.store_path, activate=True)
+
+            active = _read_active()
+            self.assertEqual(active["bond"], bond_a)
+            self.assertEqual(active["endpoint"], endpoint_a)
+            self.assertEqual(active["agent_id"], AGENT_UUID)
+            self.assertNotEqual(active["endpoint"], spec_b.url)
+        finally:
+            other.shutdown()
+
+    def test_snapshot_ausente_diagnostica_sem_fabricar_identidade(self):
+        """Se o snapshot de A está ausente, NÃO fabrique identidade
+        misturada — apresenta diagnóstico."""
+        _CentralHandler.desired = [self._envelope()]
+        reconcile(self.central_path, self.store_path, activate=True)
+        bond_a = _bond_key(
+            load_central(self.central_path), self.store_path
+        )
+
+        other, alt = self._second_central()
+        try:
+            from macip_backup.distribution import _write_transition
+            bond_b = _bond_key(load_central(alt), self.store_path)
+            # snapshot SEM from_endpoint/from_agent_id (legado/corrompido)
+            _write_transition(bond_a, bond_b, "timers_disabled")
+            self._timers_enabled[TASK_UUID] = False
+            # remove binding.json de A para simular corrupção total
+            binding_a = managed_directory() / bond_a[:16] / "binding.json"
+            binding_a.unlink(missing_ok=True)
+
+            _CentralHandler.desired = []
+            from macip_backup.models import ConfigurationError
+            with self.assertRaises(ConfigurationError) as ctx:
+                reconcile(alt, self.store_path, activate=True)
+            self.assertIn("restauração de vínculo impossível", str(ctx.exception))
+        finally:
+            other.shutdown()
+
+
+# ---- R3: continuidade de A após restauração --------------------------------------
+
+
+class ContinuityAfterRestoreTests(DistributionCase):
+    """R3: após restaurar A, a tarefa automática volta a operar;
+    manuais e suspensas mantêm seus estados."""
+
+    def _second_central(self) -> tuple:
+        other = HTTPServer(("127.0.0.1", 0), _CentralHandler)
+        threading.Thread(target=other.serve_forever, daemon=True).start()
+        alt = Path(self._state.name) / "state" / "central2.json"
+        alt.write_text(
+            json.dumps(
+                {
+                    "url": f"http://127.0.0.1:{other.server_port}",
+                    "agent_id": AGENT_UUID,
+                    "token_environment": "MACIP_API_TOKEN",
+                }
+            )
+        )
+        return other, alt
+
+    def test_automatica_reativada_manual_e_suspend_mantem_estados(self):
+        """A tem tarefa automática (timer habilitado); transição para B
+        interrompe em timers_disabled; restauração reativa a automática.
+        Tarefas manuais e suspensas NÃO são reativadas."""
+        # aplica tarefa automática
+        _CentralHandler.desired = [self._envelope()]
+        reconcile(self.central_path, self.store_path, activate=True)
+        spec_a = load_central(self.central_path)
+        bond_a = _bond_key(spec_a, self.store_path)
+        self.assertTrue(self._timers_enabled.get(TASK_UUID, False))
+
+        other, alt = self._second_central()
+        try:
+            from macip_backup.distribution import _write_transition
+            bond_b = _bond_key(load_central(alt), self.store_path)
+            _write_transition(
+                bond_a, bond_b, "timers_disabled",
+                from_endpoint=spec_a.url,
+                from_agent_id=AGENT_UUID,
+            )
+            self._timers_enabled[TASK_UUID] = False
+
+            _CentralHandler.desired = []
+            summary = reconcile(alt, self.store_path, activate=True)
+            self.assertTrue(summary.get("bond_restored"))
+            # automática reativada
+            self.assertTrue(self._timers_enabled.get(TASK_UUID, False))
         finally:
             other.shutdown()
 

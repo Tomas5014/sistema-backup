@@ -888,12 +888,22 @@ def _read_transition() -> dict | None:
         return None
 
 
-def _write_transition(from_bond: str, to_bond: str, phase: str) -> None:
+def _write_transition(
+    from_bond: str, to_bond: str, phase: str,
+    *,
+    from_endpoint: str | None = None,
+    from_agent_id: str | None = None,
+) -> None:
+    """Persiste a intenção de transição. O snapshot COMPLETO da
+    identidade anterior (endpoint, agent_id) permite restaurar A
+    sem misturar com a configuração atual de B."""
     _atomic_write(
         _transition_file(),
         json.dumps(
             {"from_bond": from_bond, "to_bond": to_bond,
-             "phase": phase, "at": _now()},
+             "phase": phase, "at": _now(),
+             "from_endpoint": from_endpoint,
+             "from_agent_id": from_agent_id},
             ensure_ascii=False,
         ),
     )
@@ -903,49 +913,92 @@ def _clear_transition() -> None:
     _transition_file().unlink(missing_ok=True)
 
 
-def _resume_transition(spec: CentralSpec, bond: str) -> bool:
+# Resultados explícitos da recuperação de transição — distinguem
+# "nada a fazer" de "vínculo anterior restaurado" (R1).
+_TRANSITION_NONE = "none"              # sem transição para este bond
+_TRANSITION_RESUMED = "resumed"        # adoção do novo vínculo retomada
+_TRANSITION_RESTORED = "restored"     # vínculo anterior restaurado
+
+
+def _resume_transition(spec: CentralSpec, bond: str) -> str:
     """Retoma uma transição de vínculo interrompida.
 
-    Retorna True se a transição foi concluída (ou já estava concluída)
-    e o chamador deve usar ``allow_bond_replacement=True``.
+    Retorna um resultado EXPLÍCITO:
 
-    - phase <= 'timers_disabled': a transição desativou timers do
-      vínculo anterior mas NÃO trocou active.json. Deve restaurar
-      INTEGRALMENTE o estado operacional anterior: re-grava active.json
-      apontando o vínculo anterior E reativa os timers das tarefas
-      automáticas do vínculo anterior (não reativa suspensas/manuais).
-      Depois descarta a transição.
-    - phase == 'active_switched': active.json já aponta o novo vínculo
-      — a transição precisa continuar com allow_bond_replacement=True;
-    - phase == 'units_replaced': transição essencialmente concluída —
-      só limpa o arquivo.
+    - ``_TRANSITION_NONE`` — sem transição para este vínculo;
+    - ``_TRANSITION_RESUMED`` — adoção do novo vínculo retomada
+      (``allow_bond_replacement=True``);
+    - ``_TRANSITION_RESTORED`` — vínculo anterior restaurado; a rodada
+      deve ENCERRAR antes de aplicar/preparar tarefas da resposta de B.
+
+    Para phase <= 'timers_disabled': restaura INTEGRALMENTE o estado
+    operacional anterior — re-grava active.json com a identidade
+    COMPLETA de A (bond, endpoint, agent_id do snapshot persistido, NÃO
+    da configuração atual de B) E reativa os timers das tarefas
+    automáticas do vínculo anterior (não reativa suspensas/manuais).
+    Depois descarta a transição.
     """
     trans = _read_transition()
     if trans is None:
-        return False
+        return _TRANSITION_NONE
     if trans.get("to_bond") != bond:
         # transição para OUTRO vínculo — não é nossa; deixa intocada
-        return False
+        return _TRANSITION_NONE
     phase = trans.get("phase", "started")
     if phase in ("started", "timers_disabled"):
-        # a transição desativou timers do vínculo anterior mas NÃO
-        # trocou active.json — restaura o estado operacional anterior
         old_bond = trans.get("from_bond")
+        old_endpoint = trans.get("from_endpoint")
+        old_agent_id = trans.get("from_agent_id")
         if old_bond:
-            # 1. re-grava active.json apontando o vínculo anterior
+            # R2: restaura a identidade COMPLETA de A a partir do
+            # snapshot persistido em transition.json — NÃO usa
+            # spec.url/spec.agent_id de B
+            if old_endpoint is None or old_agent_id is None:
+                # snapshot incompleto — tenta binding.json de A
+                binding_path = (
+                    managed_directory()
+                    / old_bond[:16] / "binding.json"
+                )
+                if binding_path.exists():
+                    try:
+                        binding = json.loads(
+                            binding_path.read_text(encoding="utf-8")
+                        )
+                        old_endpoint = old_endpoint or binding.get(
+                            "endpoint"
+                        )
+                        old_agent_id = old_agent_id or binding.get(
+                            "agent_id"
+                        )
+                    except json.JSONDecodeError:
+                        pass
+                if (
+                    old_endpoint is None
+                    or old_agent_id is None
+                ):
+                    # dados necessários ausentes/corrompidos — NÃO
+                    # fabrique identidade misturada
+                    raise ConfigurationError(
+                        "restauração de vínculo impossível: snapshot "
+                        "da identidade anterior ausente/corrompido "
+                        f"(bond={old_bond[:16]}); corrija manualmente "
+                        "ou reabilite a central anterior"
+                    )
+            # 1. re-grava active.json com a identidade COMPLETA de A
             _atomic_write(
                 _active_file(),
                 json.dumps(
-                    {"bond": old_bond, "endpoint": spec.url,
-                     "agent_id": spec.agent_id,
+                    {"bond": old_bond, "endpoint": old_endpoint,
+                     "agent_id": old_agent_id,
                      "bonded_at": _now()},
                     ensure_ascii=False,
                 ),
             )
-            # 2. reativa os timers das tarefas do vínculo anterior
-            # que eram automáticas (action=apply com schedule
-            # automático). Suspensas e manuais permanecem desabilitadas.
-            old_root = managed_directory() / old_bond[:16] / "tasks.d"
+            # 2. reativa os timers das tarefas automáticas do vínculo
+            # anterior (não reativa suspensas/manuais)
+            old_root = (
+                managed_directory() / old_bond[:16] / "tasks.d"
+            )
             if old_root.exists():
                 for task_dir in sorted(old_root.iterdir()):
                     if not task_dir.is_dir():
@@ -953,7 +1006,6 @@ def _resume_transition(spec: CentralSpec, bond: str) -> bool:
                     state = _journal_state(task_dir)
                     if not state or not state["applied_generations"]:
                         continue
-                    # verifica se a última ação operacional era apply
                     entries = _journal_entries(task_dir)
                     last_action = "apply"
                     for entry in entries:
@@ -969,13 +1021,13 @@ def _resume_transition(spec: CentralSpec, bond: str) -> bool:
                     ):
                         activate_managed_task(task_dir.name, True)
         _clear_transition()
-        return False
+        return _TRANSITION_RESTORED
     if phase == "active_switched":
-        return True
+        return _TRANSITION_RESUMED
     if phase == "units_replaced":
         _clear_transition()
-        return True
-    return False
+        return _TRANSITION_RESUMED
+    return _TRANSITION_NONE
 
 
 def _transition_bond(
@@ -989,7 +1041,9 @@ def _transition_bond(
     Fases PERSISTIDAS em ``transition.json`` — a transição é retomável
     após interrupção:
 
-    1. ``started`` — grava a intenção (from_bond, to_bond);
+    1. ``started`` — grava a intenção (from_bond, to_bond) + snapshot
+       COMPLETO da identidade anterior (endpoint, agent_id) para
+       restauração consistente;
     2. ``timers_disabled`` — desativa os timers do vínculo ANTERIOR;
     3. ``active_switched`` — grava ``active.json`` apontando o novo
        vínculo. A partir daqui, ``allow_bond_replacement=True`` é
@@ -1001,7 +1055,13 @@ def _transition_bond(
     Confirmações pendentes do vínculo anterior NÃO migram — pertencem
     ao bond que as gerou."""
     old_bond = old["bond"]
-    _write_transition(old_bond, bond, "started")
+    # snapshot COMPLETO da identidade anterior — para restaurar A
+    # sem misturar com a configuração atual de B
+    _write_transition(
+        old_bond, bond, "started",
+        from_endpoint=old.get("endpoint"),
+        from_agent_id=old.get("agent_id"),
+    )
     old_root = managed_directory() / old_bond[:16] / "tasks.d"
     if old_root.exists():
         for task_dir in sorted(old_root.iterdir()):
@@ -1012,9 +1072,17 @@ def _transition_bond(
             disable_managed_timer(
                 task_dir.name, spec.agent_id, old_bond, now=True
             )
-    _write_transition(old_bond, bond, "timers_disabled")
+    _write_transition(
+        old_bond, bond, "timers_disabled",
+        from_endpoint=old.get("endpoint"),
+        from_agent_id=old.get("agent_id"),
+    )
     _bind(bond, spec)
-    _write_transition(old_bond, bond, "active_switched")
+    _write_transition(
+        old_bond, bond, "active_switched",
+        from_endpoint=old.get("endpoint"),
+        from_agent_id=old.get("agent_id"),
+    )
 
 
 # ---- reconciliação --------------------------------------------------------------
@@ -1102,6 +1170,7 @@ def reconcile(
             "failed": [],
             "skipped_credential": False,
             "bond_transitioned": False,
+            "bond_restored": False,
             "confirmations_rebuilt": 0,
             "confirmations_sent": [],
             "confirmations_retry": [],
@@ -1138,9 +1207,17 @@ def reconcile(
             if trans is not None and trans.get("to_bond") == bond and activate:
                 # transição interrompida para ESTE vínculo — retoma
                 # (só com ativação; preparação não consome transição)
-                allow_bond_replacement = _resume_transition(spec, bond)
-                if allow_bond_replacement:
+                resume_result = _resume_transition(spec, bond)
+                if resume_result == _TRANSITION_RESUMED:
+                    allow_bond_replacement = True
                     summary["bond_transitioned"] = True
+                elif resume_result == _TRANSITION_RESTORED:
+                    # R1: vínculo anterior restaurado — ENCERRA a
+                    # rodada antes de aplicar/preparar tarefas de B.
+                    # NÃO confirma tarefas de B como aplicadas.
+                    summary["bond_restored"] = True
+                    summary["desired_total"] = len(desired)
+                    return summary
             elif active is None:
                 if activate:
                     _bind(bond, spec)

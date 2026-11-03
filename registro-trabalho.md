@@ -2072,3 +2072,31 @@ preservado):
    vínculo anterior (não reativa suspensas/manuais). O teste
    verificado executa a recuperação e confere vínculo ativo,
    propriedade das units, configuração e estado operacional final.
+
+## Correção da revisão do commit 060db0c
+
+Duas inconsistências de recuperação da troca de central corrigidas em
+novo commit (060db0c preservado):
+
+1. **Rodada encerra quando A é restaurada** — `_resume_transition`
+   agora retorna resultados EXPLÍCITOS (`_TRANSITION_NONE`,
+   `_TRANSITION_RESUMED`, `_TRANSITION_RESTORED`) em vez de booleano.
+   Quando restaura A, `reconcile` define `bond_restored=True` e
+   ENCERRA a rodada antes de aplicar/preparar/confirmar tarefas da
+   resposta de B. Adoção posterior de B exige `--rebind` novamente.
+   Antes: rodada continuava e aplicava tarefas de B com active.json
+   apontando A.
+2. **Identidade restaurada completa** — `transition.json` agora
+   persiste snapshot COMPLETO da identidade anterior
+   (`from_endpoint`, `from_agent_id`) em todas as fases. A
+   restauração re-grava active.json com bond+endpoint+agent_id de A
+   (do snapshot ou do `binding.json` de A como fallback), NUNCA com
+   `spec.url` de B. Snapshot e binding ausentes/corrompidos →
+   `ConfigurationError` com diagnóstico (não fabrica identidade
+   misturada).
+
+Regressões: tarefa de B com UUID distinto não é aplicada nem
+confirmada na rodada de restauração; identidade restaurada comparada
+campo a campo; snapshot ausente diagnostica sem fabricar; tarefa
+automática reativada mantendo suspensas/manuais; adoção posterior
+autorizada de B funciona.
