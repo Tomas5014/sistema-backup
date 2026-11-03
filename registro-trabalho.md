@@ -2349,3 +2349,15 @@ Inspeção de sync/distribuição confirmou uso de task_lock_directory também
 nos locks SH de manutenção. Gate adicional: `tests.test_outbox.OutboxTestCase.
 test_sync_respeita_lock_de_manutencao` e `tests.test_outbox.RearmLockTestCase`:
 7/7 aprovados, 33,125 s, com API local sintética e recursos descartáveis.
+
+Smoke de extração do artefato corrigido: controles corrigidos em todas as
+fontes, manifesto/hashes, 24 shells, instalação com espaços/custom locks,
+identidade instalada, importação/versão/ajuda passaram. Com arquivo de
+credenciais como única fonte de senha, backup/check/restore local real e
+comparação passaram fora do sandbox. A primeira tentativa extra de restore
+no sandbox falhou em lchown (invalid argument), ligada a identidade/permissões;
+a repetição fora dele passou sem mudança no adaptador. As duas extrações e
+instalações foram limpas automaticamente, inclusive credenciais e repositório.
+Comando de prova: `python3 /tmp/macip-review1-verify.py` (helper descartável).
+O registro dessa prova é incorporado antes de regenerar o artefato definitivo
+em dist/linux-0.3.0rc1-review1-final, sem autorreferência ao SHA final.

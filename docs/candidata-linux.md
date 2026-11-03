@@ -153,3 +153,13 @@ Sync/rearme: mais 7/7 testes de exclusão mútua aprovados, em 33,125 s.
 Layout customizado legado sem identidade permanece bloqueado para manutenção
 automática; isso exige procedimento offline específico. Nenhum skip foi usado
 para encobrir esse limite.
+
+Smoke do pacote revisado: hash/manifestos internos e externos, aplicação do
+filtro corrigido a todas as fontes, 24 scripts shell, instalação com espaços
+e locks customizados, identidade instalada e importação/versão/ajuda passaram.
+Com credencial somente no arquivo privado, backup/check/restore Restic local
+e comparação passaram fora do sandbox. A primeira tentativa de restore no
+sandbox falhou em lchown (identidade/permissões); não foi ocultada nem motivou
+mudança no adaptador. Extração, instalação, credenciais e repositório de teste
+foram limpos. O pacote definitivo é regenerado do commit documental final,
+em diretório novo `dist/linux-0.3.0rc1-review1-final`.
