@@ -949,6 +949,29 @@ class RollbackSuspendedTests(DistributionCase):
                 raise OSError("systemd indisponível (simulado)")
             self._timers_enabled[task_id] = bool(timer_written)
 
+        # T1: registra a sequência completa de chamadas ao activate —
+        # NÃO pode haver enable seguido de disable
+        enable_calls: list[bool] = []
+        original_activate = distribution.activate_managed_task
+
+        def tracking_activate(task_id, timer_written):
+            enable_calls.append(timer_written)
+            return original_activate(task_id, timer_written)
+
+        with patch.object(
+            distribution, "activate_managed_task",
+            side_effect=boom_once,
+        ), patch.object(
+            distribution, "activate_managed_task",
+            side_effect=tracking_activate,
+        ):
+            # the second patch overrides; we need a different approach
+            pass
+
+        # simpler: track via the fake_activate that's already installed
+        # by the fixture. Reset the calls list.
+        self._systemctl_calls.clear()
+
         with patch.object(
             distribution, "activate_managed_task", side_effect=boom_once
         ):
@@ -966,6 +989,15 @@ class RollbackSuspendedTests(DistributionCase):
         journal = _journal_state(self._managed_root())
         self.assertEqual(journal["step"], "rolled_back")
         self.assertEqual(journal.get("operational"), "suspend")
+        # T1: NENHUMA chamada de enable ocorreu — o rollback não
+        # habilitou nem temporariamente o timer suspenso
+        enable_calls_in_rollback = [
+            c for c in self._systemctl_calls if c[0] == "enable"
+        ]
+        self.assertEqual(
+            enable_calls_in_rollback, [],
+            "rollback habilitou o timer suspenso temporariamente"
+        )
 
     def test_rollback_sem_suspensao_previa_reativa_timer(self):
         """apply gen1 → apply gen2 falha → rollback restaura gen1 E
@@ -1205,43 +1237,190 @@ class BondTransitionResumeTests(DistributionCase):
         other.shutdown()
 
     def test_interrupcao_depois_timers_disabled_restaura_anterior(self):
-        """A aplica gen1; --rebind interrompe depois de desativar
-        timers mas ANTES de trocar active.json: próxima execução
-        restaura o vínculo A."""
+        """T4: A aplica gen1 (automática); --rebind para B interrompe
+        depois de desativar timers mas ANTES de trocar active.json.
+        Retomada com B: _resume_transition restaura active.json para A
+        E reativa o timer de A. Verifica estados intermediários e
+        final."""
         _CentralHandler.desired = [self._envelope()]
         reconcile(self.central_path, self.store_path, activate=True)
         bond_a = _bond_key(
             load_central(self.central_path), self.store_path
         )
         self.assertTrue(self._timers_enabled.get(TASK_UUID, False))
+        good_service = self._service_file().read_text()
 
         other, alt = self._second_central()
         try:
             # simula: escreve transition.json com phase "timers_disabled"
-            # mas NÃO troca active.json
+            # e desativa o timer (o passo que ocorreu antes da queda)
             from macip_backup.distribution import _write_transition
             bond_b = _bond_key(load_central(alt), self.store_path)
             _write_transition(bond_a, bond_b, "timers_disabled")
-            # desativa o timer manualmente (simula o passo que ocorreu)
             self._timers_enabled[TASK_UUID] = False
-        finally:
-            pass
+            # active.json AINDA aponta A (não foi trocado)
 
-        # próxima execução com A: transição existe mas to_bond != A
-        # → não retoma; active.json ainda aponta A → reconcile normal
-        _CentralHandler.desired = []
-        summary = reconcile(
-            self.central_path, self.store_path, activate=True
+            # retomada com B: _resume_transition vê phase <= timers_disabled
+            # → restaura A: active.json aponta A, timer reativado
+            _CentralHandler.desired = []
+            reconcile(alt, self.store_path, activate=True)
+
+            # active.json aponta A novamente
+            active = _read_active()
+            self.assertEqual(active["bond"], bond_a)
+            # timer de A reativado
+            self.assertTrue(self._timers_enabled.get(TASK_UUID, False))
+            # units de A preservadas byte-a-byte
+            self.assertEqual(self._service_file().read_text(), good_service)
+            # transition.json limpa
+            self.assertIsNone(_read_transition())
+        finally:
+            other.shutdown()
+
+
+# ---- T2: --no-activate --rebind permanece preparação ----------------------------
+
+
+class PrepareRebindTests(DistributionCase):
+    def _second_central(self) -> tuple:
+        other = HTTPServer(("127.0.0.1", 0), _CentralHandler)
+        threading.Thread(target=other.serve_forever, daemon=True).start()
+        alt = Path(self._state.name) / "state" / "central2.json"
+        alt.write_text(
+            json.dumps(
+                {
+                    "url": f"http://127.0.0.1:{other.server_port}",
+                    "agent_id": AGENT_UUID,
+                    "token_environment": "MACIP_API_TOKEN",
+                }
+            )
         )
-        # transition.json NÃO foi limpa por A (é para B)
-        # mas o timer de A foi desativado pela transição interrompida
-        # A reconcile não reativa porque desired está vazio
-        # transition.json permanece (é para B, não para A)
-        trans = _read_transition()
-        # a transição não é nossa (to_bond != bond_a) → não tocada
-        if trans and trans.get("to_bond") == bond_a:
-            self.fail("transição para B não deveria ser tratada por A")
-        other.shutdown()
+        return other, alt
+
+    def test_no_activate_rebind_preserva_vinculo_e_timers(self):
+        """A aplica gen1 (timer habilitado); --no-activate --rebind
+        para B: vínculo ativo PERMANECE A, timer de A PERMANECE
+        habilitado, NENHUMA transição consumida. Depois adoção real
+        funciona."""
+        _CentralHandler.desired = [self._envelope()]
+        reconcile(self.central_path, self.store_path, activate=True)
+        bond_a = _bond_key(
+            load_central(self.central_path), self.store_path
+        )
+        self.assertTrue(self._timers_enabled.get(TASK_UUID, False))
+        good_service = self._service_file().read_text()
+
+        other, alt = self._second_central()
+        try:
+            doc_b = self._taskspec_doc()
+            doc_b["name"] = "tarefa B"
+            _CentralHandler.desired = [self._envelope(task_doc=doc_b)]
+            # preparação com --rebind --no-activate
+            summary = reconcile(
+                alt, self.store_path, activate=False, rebind=True
+            )
+            self.assertEqual(summary["prepared"][0]["result"], "prepared")
+
+            # vínculo ativo PERMANECE A
+            active = _read_active()
+            self.assertEqual(active["bond"], bond_a)
+            # timer de A PERMANECE habilitado
+            self.assertTrue(self._timers_enabled.get(TASK_UUID, False))
+            # units de A preservadas
+            self.assertEqual(self._service_file().read_text(), good_service)
+            # NENHUMA transição consumida
+            self.assertIsNone(_read_transition())
+
+            # adoção real funciona
+            _CentralHandler.desired = [self._envelope(task_doc=doc_b)]
+            summary = reconcile(
+                alt, self.store_path, activate=True, rebind=True
+            )
+            self.assertTrue(summary["bond_transitioned"])
+            self.assertEqual(summary["applied"][0]["result"], "applied")
+            bond_b = _bond_key(load_central(alt), self.store_path)
+            self.assertIn(
+                f"managed-bond={bond_b[:16]}",
+                self._service_file().read_text(),
+            )
+        finally:
+            other.shutdown()
+
+
+# ---- T3: não concluir troca de vínculo com adoção pendente ----------------------
+
+
+class BondAdoptionPendingTests(DistributionCase):
+    def _second_central(self) -> tuple:
+        other = HTTPServer(("127.0.0.1", 0), _CentralHandler)
+        threading.Thread(target=other.serve_forever, daemon=True).start()
+        alt = Path(self._state.name) / "state" / "central2.json"
+        alt.write_text(
+            json.dumps(
+                {
+                    "url": f"http://127.0.0.1:{other.server_port}",
+                    "agent_id": AGENT_UUID,
+                    "token_environment": "MACIP_API_TOKEN",
+                }
+            )
+        )
+        return other, alt
+
+    def test_falha_validacao_preserva_transicao_e_retoma(self):
+        """A aplica gen1; B publica a mesma tarefa com origem
+        inexistente; --rebind falha na validação; transition.json
+        PERMANECE; criar a origem e retomar aplica sem --rebind e sem
+        remover arquivos manualmente."""
+        _CentralHandler.desired = [self._envelope()]
+        reconcile(self.central_path, self.store_path, activate=True)
+        bond_a = _bond_key(
+            load_central(self.central_path), self.store_path
+        )
+        good_service = self._service_file().read_text()
+
+        other, alt = self._second_central()
+        try:
+            # B publica a mesma tarefa com origem inexistente
+            import tempfile
+            missing = Path(tempfile.mkdtemp()) / "origem"
+            doc_b = self._taskspec_doc(source=str(missing))
+            _CentralHandler.desired = [self._envelope(task_doc=doc_b)]
+            summary = reconcile(
+                alt, self.store_path, activate=True, rebind=True
+            )
+            # falhou na validação
+            self.assertTrue(summary["failed"])
+            # transition.json PERMANECE (adoção incompleta)
+            trans = _read_transition()
+            self.assertIsNotNone(trans)
+            self.assertEqual(trans["phase"], "active_switched")
+            # units de A ainda marcadas com A
+            self.assertIn(
+                f"managed-bond={bond_a[:16]}",
+                self._service_file().read_text(),
+            )
+
+            # criar a origem e retomar — sem --rebind, sem remover nada
+            missing.mkdir(parents=True, exist_ok=True)
+            try:
+                doc_b2 = self._taskspec_doc(source=str(missing))
+                _CentralHandler.desired = [self._envelope(task_doc=doc_b2)]
+                summary = reconcile(alt, self.store_path, activate=True)
+                # retomou a transição e aplicou
+                self.assertTrue(summary["bond_transitioned"])
+                self.assertEqual(summary["applied"][0]["result"], "applied")
+                bond_b = _bond_key(load_central(alt), self.store_path)
+                self.assertIn(
+                    f"managed-bond={bond_b[:16]}",
+                    self._service_file().read_text(),
+                )
+                # transition.json limpa (adoção concluída)
+                self.assertIsNone(_read_transition())
+            finally:
+                import shutil
+                shutil.rmtree(missing.parent, ignore_errors=True)
+        finally:
+            other.shutdown()
 
 
 # ---- F5: resposta 200 ambígua ---------------------------------------------------

@@ -58,6 +58,7 @@ from .models import ConfigurationError, TaskSpec
 from .restic import ResticError
 from .store import ExecutionStore
 from .systemd import (
+    _MANAGED_PREFIX,
     activate_managed_task,
     disable_managed_timer,
     install_pull_schedule,
@@ -66,6 +67,7 @@ from .systemd import (
     schedule_to_calendar,
     suspend_managed_task,
     uninstall_pull_schedule,
+    unit_directory,
     write_managed_task_units,
 )
 
@@ -604,6 +606,7 @@ def _effects_for_generation(
     *,
     bond: str,
     allow_bond_replacement: bool,
+    target_operational: str = "apply",
 ) -> None:
     """Sequência de efeitos ORDENADA — cada disparo encontra
     configuração completa e coerente com a unit carregada:
@@ -613,7 +616,10 @@ def _effects_for_generation(
     2. reescreve as units (sem systemctl — o gerenciador segue com as
        carregadas);
     3. publica `current.json` atomicamente;
-    4. daemon-reload + enable --now — ÚLTIMO passo.
+    4. daemon-reload + enable --now — ÚLTIMO passo, SÓ quando o
+       estado operacional alvo é 'apply'. Se target_operational='suspend',
+       o timer permanece desabilitado (rollback de tarefa suspensa não
+       reativa nem temporariamente).
 
     Qualquer exceção → o chamador faz rollback para a última geração
     funcional."""
@@ -642,8 +648,15 @@ def _effects_for_generation(
         (task_dir / f"config-{generation}.json").read_text(encoding="utf-8"),
     )
     _journal_append(task_dir, "published", generation, apply_attempt=attempt)
-    activate_managed_task(task_id, units["timer_name"] is not None)
-    _journal_append(task_dir, "enabled", generation, apply_attempt=attempt)
+    if target_operational == "apply":
+        activate_managed_task(task_id, units["timer_name"] is not None)
+        _journal_append(task_dir, "enabled", generation,
+                        apply_attempt=attempt)
+    else:
+        # rollback para estado suspenso: timer PERMANECE desabilitado
+        # — nenhuma janela de ativação indevida
+        _journal_append(task_dir, "kept_suspended", generation,
+                        apply_attempt=attempt)
 
 
 def _restore_functional_state(
@@ -709,15 +722,15 @@ def _restore_functional_state(
             "rollback impossivel: envelope da geracao anterior ausente"
         )
     attempt = state["attempts"].get(last_config_gen, 1) if state else 1
-    # restaura a configuracao e as units da ultima aplicacao boa
+    # restaura a configuracao e as units da ultima aplicacao boa,
+    # passando o estado operacional alvo: se a ultima acao foi
+    # suspend, o timer PERMANECE desabilitado durante todo o rollback
+    # — nenhuma janela de ativação indevida (enable seguido de disable)
     _effects_for_generation(
         previous_env, spec, central_path, store_path, task_dir, attempt,
         bond=bond, allow_bond_replacement=allow_bond_replacement,
+        target_operational=last_operational_action,
     )
-    # restaura o estado OPERACIONAL: se a ultima acao foi suspend,
-    # desabilita o timer - NAO reativa uma tarefa suspensa
-    if last_operational_action == "suspend":
-        disable_managed_timer(task_id, spec.agent_id, bond, now=True)
     _journal_append(task_dir, "rolled_back", generation,
                     apply_attempt=attempt, restored=last_config_gen,
                     operational=last_operational_action)
@@ -896,9 +909,12 @@ def _resume_transition(spec: CentralSpec, bond: str) -> bool:
     Retorna True se a transição foi concluída (ou já estava concluída)
     e o chamador deve usar ``allow_bond_replacement=True``.
 
-    - phase <= 'timers_disabled': a transição não avançou o vínculo
-      ativo — restaura o vínculo anterior (re-grava active.json) e
-      descarta a transição;
+    - phase <= 'timers_disabled': a transição desativou timers do
+      vínculo anterior mas NÃO trocou active.json. Deve restaurar
+      INTEGRALMENTE o estado operacional anterior: re-grava active.json
+      apontando o vínculo anterior E reativa os timers das tarefas
+      automáticas do vínculo anterior (não reativa suspensas/manuais).
+      Depois descarta a transição.
     - phase == 'active_switched': active.json já aponta o novo vínculo
       — a transição precisa continuar com allow_bond_replacement=True;
     - phase == 'units_replaced': transição essencialmente concluída —
@@ -912,29 +928,49 @@ def _resume_transition(spec: CentralSpec, bond: str) -> bool:
         return False
     phase = trans.get("phase", "started")
     if phase in ("started", "timers_disabled"):
-        # a transição não avançou o suficiente — restaura o vínculo
-        # anterior para estado consistente
+        # a transição desativou timers do vínculo anterior mas NÃO
+        # trocou active.json — restaura o estado operacional anterior
         old_bond = trans.get("from_bond")
         if old_bond:
-            old_spec_data = _read_active()
-            if old_spec_data is None or old_spec_data.get("bond") != old_bond:
-                # active.json já foi trocado ou perdido — re-grava
-                # o vínculo anterior para garantir consistência
-                _atomic_write(
-                    _active_file(),
-                    json.dumps(
-                        {"bond": old_bond, "endpoint": spec.url,
-                         "agent_id": spec.agent_id,
-                         "bonded_at": _now()},
-                        ensure_ascii=False,
-                    ),
-                )
+            # 1. re-grava active.json apontando o vínculo anterior
+            _atomic_write(
+                _active_file(),
+                json.dumps(
+                    {"bond": old_bond, "endpoint": spec.url,
+                     "agent_id": spec.agent_id,
+                     "bonded_at": _now()},
+                    ensure_ascii=False,
+                ),
+            )
+            # 2. reativa os timers das tarefas do vínculo anterior
+            # que eram automáticas (action=apply com schedule
+            # automático). Suspensas e manuais permanecem desabilitadas.
+            old_root = managed_directory() / old_bond[:16] / "tasks.d"
+            if old_root.exists():
+                for task_dir in sorted(old_root.iterdir()):
+                    if not task_dir.is_dir():
+                        continue
+                    state = _journal_state(task_dir)
+                    if not state or not state["applied_generations"]:
+                        continue
+                    # verifica se a última ação operacional era apply
+                    entries = _journal_entries(task_dir)
+                    last_action = "apply"
+                    for entry in entries:
+                        if entry.get("step") == "applied":
+                            last_action = entry.get("action", "apply")
+                    timer_path = (
+                        unit_directory()
+                        / f"{_MANAGED_PREFIX}{task_dir.name}.timer"
+                    )
+                    if (
+                        last_action == "apply"
+                        and timer_path.exists()
+                    ):
+                        activate_managed_task(task_dir.name, True)
         _clear_transition()
         return False
     if phase == "active_switched":
-        # active.json já aponta o novo vínculo — precisa continuar
-        # substituindo as units; allow_bond_replacement é autorizado
-        # pela transição persistente
         return True
     if phase == "units_replaced":
         _clear_transition()
@@ -1092,17 +1128,23 @@ def reconcile(
                 return summary
 
             # vínculo: adoção automática na PRIMEIRA consulta ok;
-            # troca de vínculo SÓ com --rebind e transição persistente
+            # troca de vínculo SÓ com --rebind e transição persistente.
+            # PREPARAÇÃO (activate=False) NUNCA transita vínculo —
+            # consulta e produz artefatos separados, mas preserva o
+            # vínculo ativo, os timers e o estado operacional.
             active = _read_active()
             allow_bond_replacement = False
             trans = _read_transition()
-            if trans is not None and trans.get("to_bond") == bond:
+            if trans is not None and trans.get("to_bond") == bond and activate:
                 # transição interrompida para ESTE vínculo — retoma
+                # (só com ativação; preparação não consome transição)
                 allow_bond_replacement = _resume_transition(spec, bond)
                 if allow_bond_replacement:
                     summary["bond_transitioned"] = True
             elif active is None:
-                _bind(bond, spec)
+                if activate:
+                    _bind(bond, spec)
+                # preparação sem vínculo ativo: apenas consulta
             elif active["bond"] != bond:
                 if not rebind:
                     raise ConfigurationError(
@@ -1111,9 +1153,14 @@ def reconcile(
                         "anterior. Para adoção explícita, repita com "
                         "--rebind"
                     )
-                _transition_bond(spec, bond, active, tasks_root)
-                summary["bond_transitioned"] = True
-                allow_bond_replacement = True
+                if not activate:
+                    # preparação com --rebind: NÃO transita — preserva
+                    # vínculo ativo, timers e estado operacional
+                    pass
+                else:
+                    _transition_bond(spec, bond, active, tasks_root)
+                    summary["bond_transitioned"] = True
+                    allow_bond_replacement = True
 
             # journal → fila: reconstrói confirmações de aplicações/
             # falhas que sofreram corte antes do enfileiramento
@@ -1165,14 +1212,19 @@ def reconcile(
                         outcome["apply_attempt"], outcome,
                     )
             _flush_confirmations(spec, store, token, summary)
-            # se uma transição de vínculo estava em andamento e as
-            # tasks foram processadas, conclui a transição
-            if allow_bond_replacement:
-                _write_transition(
-                    _read_transition().get("from_bond", "") if _read_transition() else "",
-                    bond, "units_replaced",
-                )
-                _clear_transition()
+            # T3: só conclui a transição se TODAS as tasks do novo
+            # vínculo foram aplicadas com sucesso. Falha de validação
+            # ou transitório deixa a transição PENDENTE — a
+            # autorização persistente sobrevive para retomada após
+            # correção dos pré-requisitos.
+            if allow_bond_replacement and not summary["failed"]:
+                trans = _read_transition()
+                if trans is not None and trans.get("to_bond") == bond:
+                    _write_transition(
+                        trans.get("from_bond", ""),
+                        bond, "units_replaced",
+                    )
+                    _clear_transition()
         finally:
             store.close()
     finally:

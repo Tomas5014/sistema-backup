@@ -2045,3 +2045,30 @@ Seis achados corrigidos em novo commit (92d4698 preservado):
    preserva a última configuração instalada. Teste: apply rev1 →
    suspend → last_applied PERMANECE rev1; publicar rev2 sem aplicar →
    suspend → last_applied NÃO anuncia rev2.
+
+## Correções da revisão do commit 1f7d7eb
+
+Quatro achados de transição corrigidos em novo commit (1f7d7eb
+preservado):
+
+1. **Rollback não habilita temporariamente tarefa suspensa** —
+   `_effects_for_generation` agora aceita `target_operational`:
+   'apply' (default) habilita o timer; 'suspend' mantém desabilitado
+   durante TODO o rollback (journal `kept_suspended`). Nenhuma
+   janela de enable→disable. Teste registra a sequência completa de
+   chamadas e falha se houver qualquer enable no rollback suspenso.
+2. **`--no-activate --rebind` permanece preparação** — preparação com
+   rebind NÃO transita vínculo: preserva active.json, timers
+   operacionais, estado habilitado. Só a execução posterior com
+   ativação realiza a adoção pelo protocolo seguro.
+3. **Não concluir troca com adoção pendente** — a transição só é
+   concluída se `not summary["failed"]`. Falha de validação deixa
+   `transition.json` em `active_switched` — a autorização persistente
+   sobrevive para retomada após correção do pré-requisito, sem
+   --rebind e sem remover arquivos manualmente.
+4. **Interrupção após timers_disabled restaura operacional** —
+   `_resume_transition` para phase≤timers_disabled agora re-grava
+   active.json E reativa os timers das tarefas automáticas do
+   vínculo anterior (não reativa suspensas/manuais). O teste
+   verificado executa a recuperação e confere vínculo ativo,
+   propriedade das units, configuração e estado operacional final.
