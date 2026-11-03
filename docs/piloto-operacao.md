@@ -51,14 +51,21 @@ Reexecutar o instalador preserva tudo que é do operador.
 
 ## 3. Credenciais que sobrevivem a reboot
 
+Na candidata revisada, preencha agent.env por editor/cofre. A CLI manual
+precisa da função `manual()` e do formato literal limitado do
+[runbook](instalacao-atualizacao-retorno.md). Exemplos:
+`manual agent tarefa.json --store "$MACIP_STATE/agent.db"` e
+`manual check tarefa.json DESTINO --read-data`. O systemd continua usando
+EnvironmentFile no serviço. Não use Bash `source` como parser equivalente.
+
 O service carrega `EnvironmentFile=-%h/.config/macip-backup/agent.env`
 — segredos em arquivo 0600 sobrevivem a reboot (o keyring `%user` é
 temporário; `@s` depende de sessão). **Sem sobrescrever um agent.env
 existente** — acrescente linhas:
 
 ```bash
-printf 'MACIP_RESTIC_PASSWORD_LOCAL=<segredo>\n' >> ~/.config/macip-backup/agent.env
 chmod 600 ~/.config/macip-backup/agent.env
+"${EDITOR:-nano}" ~/.config/macip-backup/agent.env
 ```
 
 Sem imprimir o segredo — por stdin, nunca por argumento:
@@ -120,7 +127,7 @@ item removido e cada item preservado.
 Pré-requisito: agente instalado + `agent.env` preenchido + tarefa com
 origem pequena e sintética + destino local (repo exclusivo do piloto).
 
-- [ ] **Dia 0** — `macip-backup agent tarefa.json --store
+- [ ] **Dia 0** — `manual agent tarefa.json --store
       ~/.local/state/macip-backup/agent.db` manual (`run` não grava
       histórico); `history` mostra execução; `schedule ... --enable`;
       timer listado em `systemctl --user list-timers`.

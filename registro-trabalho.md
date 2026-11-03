@@ -2284,3 +2284,68 @@ usa processos reais; instalação testa Restic local. Warnings de sockets em
 fixtures de distribuição foram observados. Recursos .test-inst/.test-dist
 foram removidos pelo teardown. Nenhum teste systemd real foi acrescentado
 nesta consolidação; a prova real anterior permanece identificada separadamente.
+
+## 2026-11-03 — Correção dos três achados da candidata 0.3.0rc1
+
+Base `23642fa`, branch própria `fix/linux-candidate-review`, sem reescrever
+histórico. O pacote anterior permanece em dist/linux-0.3.0rc1. Nenhum segredo
+foi constatado nesse pacote; a revisão demonstrou lacunas sintéticas.
+
+1. Empacotamento: filtro cobre variantes de ambiente, modelos explicitamente
+   permitidos, SQLite/WAL/SHM/journal e conteúdo reconhecível de chave sem
+   extensão. Fontes/docs que citam cabeçalhos continuam aceitas. Staging
+   completo é publicado por rename; falha não anuncia checksums parciais.
+   Git temporário prova commit selecionado e exclusão de working tree sujo.
+2. CLI manual: `macip_backup.manual` lê arquivo privado de formato literal
+   restrito. Credenciais e SSL_CERT_FILE chegam à CLI e filhos sem depender
+   de exports prévios. Testes com ambiente limpo comprovam espaços internos,
+   caracteres especiais, ausência de vazamento e recusa segura de formatos
+   incompatíveis. Keyring continua disponível para bytes fora do subconjunto;
+   não há substituição de comando que apare quebras de linha.
+3. Locks: executor, install, uninstall e backup-agent-db.sh usam a mesma
+   precedência. Launcher fixa MACIP_LOCK_DIR e install.json registra caminho.
+   Layout divergente, relativo ou customizado legado sem identidade gravada
+   é recusado antes da manutenção. Testes com executor subprocesso SH e EX
+   verificam recusa, preservação de código/banco/config e retomada. O padrão
+   continua coberto. Backup SQLite usa lock EX e destino novo 0600.
+
+Prova vermelha com código da base em fixtures isolados: sete inclusões
+indevidas e publicação parcial produziram oito falhas esperadas nas duas
+regressões de pacote. A regressão de locks falhou porque o instalador antigo
+aceitou executar sob lock SH customizado. A prova de credencial somente em
+arquivo confirma ausência antes da leitura explícita. Somente dados sintéticos.
+
+Os documentos de instalação/atualização/retorno e piloto usam o fluxo manual
+novo e o helper de backup. Não houve mudança no adaptador Restic, API/portal
+ou esquema. As provas histórica local, posterior de systemd real e a
+limitação de PIDs/namespaces permanecem separadas. Os timers antigos do
+laboratório continuam registrados como inactive/disabled por confirmação
+do operador, sem nova consulta ao laboratório.
+
+Limites: filtro não é detector universal de segredos; parser manual não é
+Bash/dotenv nem aceita todo EnvironmentFile. Layout customizado legado sem
+identidade exige procedimento offline específico antes de manutenção.
+Docker/SFTP, migração PostgreSQL e atualização real da central não foram
+reexecutados. Sem aprovação de produção, Windows, SMB ou S3; sem push/tag/deploy.
+
+Gate novo: `PYTHONPATH=src python3 -m unittest tests.test_cli
+tests.test_systemd.UnitGenerationTests tests.test_systemd.AdapterCancellationTests
+tests.test_distribution tests.test_install tests.test_credentials tests.test_manual
+tests.test_packaging tests.test_maintenance -q`: **116 aprovados, 0 falhos,
+0 ignorados**, 419,935 s. Último gate focado de pacote/manual/backup: 9/9 em
+31,895 s; pacote+lock focado: 5/5 em 62,254 s. Asserts novos para layouts
+customizado, divergente e legado sem identidade passaram. Shells modificados
+validados por bash -n; git diff --check limpo. Warnings de sockets nos fixtures
+antigos de distribuição continuam observados.
+
+Natureza: Git/empacotador e instalação são reais e descartáveis; prova de
+credencial/TLS em filho usa Restic falso e ambiente limpo. A suíte de instalação
+usa também Restic local real. HTTP de distribuição/systemd são simulados.
+Não se confunde esse gate com homologação histórica ou systemd real anterior.
+Artefato definitivo será gerado do commit documental final exato, em diretório
+novo dist/linux-0.3.0rc1-review1, preservando o pacote anterior.
+
+Inspeção de sync/distribuição confirmou uso de task_lock_directory também
+nos locks SH de manutenção. Gate adicional: `tests.test_outbox.OutboxTestCase.
+test_sync_respeita_lock_de_manutencao` e `tests.test_outbox.RearmLockTestCase`:
+7/7 aprovados, 33,125 s, com API local sintética e recursos descartáveis.

@@ -61,19 +61,50 @@ variável do token. Provisione token e senha Restic pelo editor em agent.env
 0600 ou keyring, sem valores em comandos. Keyring pode não sobreviver reboot.
 Para layout customizado, confirme `EnvironmentFile` das units geradas.
 
+### Credenciais na CLI manual
+
+O launcher não lê agent.env. Depois de exportar os diretórios acima, defina:
+
+```bash
+manual() {
+  "$MACIP_HOME/current/bin/python" -m macip_backup.manual \
+    --env-file "$MACIP_CONFIG/agent.env" -- "$@"
+}
+manual --version
+```
+
+A função carrega credenciais e `SSL_CERT_FILE` no processo CLI e seus filhos,
+sem depender de segredos exportados. Arquivo: dono atual, modo 0600 ou 0400.
+Edite por editor/cofre; não use valores em argv, histórico, substituição de
+comando ou `source`.
+
+Formato é um subconjunto literal de EnvironmentFile, não Bash/dotenv: UTF-8,
+LF, `NOME=valor` em uma linha; nome ASCII, sem `export` ou espaços em torno
+de `=`. Comentários começam com `#` na coluna 1; linhas vazias são aceitas.
+Valores não vazios preservam espaços internos, `$`, `#`, `;`, crases e `=`
+literalmente. Inclua `SSL_CERT_FILE=/caminho/CA com espaços.pem` se necessário.
+
+Aspas, barras invertidas, CR/NUL, espaços nas pontas, múltiplas linhas,
+continuações e nomes duplicados são recusados com número de linha, sem valor.
+Diretórios MACIP_HOME/BIN/CONFIG/STATE/CACHE/LOCK_DIR são configurados fora do
+arquivo. Para segredos fora desse subconjunto, use keyring por stdin e o
+launcher direto, com TLS no ambiente explícito. Não apare quebras de linha.
+O parser não aceita toda a sintaxe do systemd; compartilhe somente o
+subconjunto acima entre CLI manual e serviços.
+
 Cadastre tarefa local sintética e agenda futura. Publicar é ação explícita
 na central; baixar não equivale a aplicar:
 
 ```bash
-"$MACIP_BIN/macip-backup" pull-check --central "$MACIP_CONFIG/central.json" --store "$MACIP_STATE/agent.db"
-"$MACIP_BIN/macip-backup" pull-tasks --central "$MACIP_CONFIG/central.json" --store "$MACIP_STATE/agent.db" --no-activate
+manual pull-check --central "$MACIP_CONFIG/central.json" --store "$MACIP_STATE/agent.db"
+manual pull-tasks --central "$MACIP_CONFIG/central.json" --store "$MACIP_STATE/agent.db" --no-activate
 # Inspecione staging e confirme ausência de efeitos operacionais.
 # Após aprovação explícita:
-"$MACIP_BIN/macip-backup" pull-tasks --central "$MACIP_CONFIG/central.json" --store "$MACIP_STATE/agent.db"
-"$MACIP_BIN/macip-backup" schedule-pull --central "$MACIP_CONFIG/central.json" --store "$MACIP_STATE/agent.db" --calendar '*-*-* *:10:00' --enable
-"$MACIP_BIN/macip-backup" schedule-sync --central "$MACIP_CONFIG/central.json" --store "$MACIP_STATE/agent.db" --calendar '*-*-* *:15:00' --enable
-"$MACIP_BIN/macip-backup" pull-status --central "$MACIP_CONFIG/central.json" --store "$MACIP_STATE/agent.db"
-"$MACIP_BIN/macip-backup" history --store "$MACIP_STATE/agent.db" --outbox
+manual pull-tasks --central "$MACIP_CONFIG/central.json" --store "$MACIP_STATE/agent.db"
+manual schedule-pull --central "$MACIP_CONFIG/central.json" --store "$MACIP_STATE/agent.db" --calendar '*-*-* *:10:00' --enable
+manual schedule-sync --central "$MACIP_CONFIG/central.json" --store "$MACIP_STATE/agent.db" --calendar '*-*-* *:15:00' --enable
+manual pull-status --central "$MACIP_CONFIG/central.json" --store "$MACIP_STATE/agent.db"
+manual history --store "$MACIP_STATE/agent.db" --outbox
 ```
 
 Registre os nomes exatos retornados; consulte só essas units com systemctl.
@@ -149,25 +180,28 @@ stack isolada compatível, evitando reabrir API candidata sobre esquema antigo.
 3. Sob lock exclusivo de manutenção, crie snapshot consistente do estado.
    O instalador faz backup SQLite online antes da troca, mas isso não inclui
    config, journals, credenciais ou units. Faça custódia privada conjunta
-   desses arquivos e do wheel/launcher anterior. Exemplo de backup SQLite:
+   desses arquivos e do wheel/launcher anterior. Regra única: MACIP_LOCK_DIR
+   absoluto, senão MACIP_STATE/locks, senão default por usuário. Exporte o
+   mesmo layout em backup, instalação e desinstalação. Instalador fixa a
+   escolha no launcher e install.json; divergência posterior é recusada.
+   Não exclua/substitua maintenance.lock, pois isso mudaria sua identidade.
+   Em instalações antigas sem lock_directory no manifesto, layout customizado
+   é recusado pelo backup/instalador/desinstalador. Não tente contornar removendo
+   o manifesto ou alterando overrides. Esse caso exige procedimento offline
+   específico após inventário e parada dos executores, ainda fora deste runbook.
+   O layout padrão legado continua suportado. Backup:
 
 ```bash
-flock -n "$MACIP_STATE/locks/maintenance.lock" python3 - \
-  "$MACIP_STATE/agent.db" '/cofre/agent antes.db' <<'PY'
-import sqlite3, sys
-from pathlib import Path
-assert not Path(sys.argv[2]).exists(), 'backup já existe'
-with sqlite3.connect(sys.argv[1]) as src, sqlite3.connect(sys.argv[2]) as dst:
-    src.backup(dst)
-    assert dst.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
-    print('SQLite esquema:', dst.execute('PRAGMA user_version').fetchone()[0])
-PY
+# Se houver override, exporte MACIP_LOCK_DIR absoluto antes da manutenção.
+bash "$PACKAGE/source/deploy/backup-agent-db.sh" '/cofre/agent antes.db'
 ```
 
 4. Instale wheel com deploy/install.sh e --commit como acima. Migração
    SQLite ocorre ao abrir ExecutionStore; candidata suporta até v7 e migra
    anteriores transacionalmente. Esquema futuro é recusado. Confira versão,
-   install.json, `history`, outbox e `pull-status` com credenciais corretas.
+   install.json, `manual history`, outbox e `manual pull-status`. Redefina a
+   função manual acima em uma nova sessão; ela usa current após a troca e
+   carrega também SSL_CERT_FILE.
 5. Retome somente timers antes ativos, respeitando suspensão central. Confirme
    comunicação e ausência de duplicação; mantenha tarefas locais e vínculo.
 

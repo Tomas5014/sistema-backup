@@ -89,7 +89,7 @@ install.sh em caminho com espaços, permissões 0700/0600, install.json e
 hash do wheel. Extração e instalação temporárias foram removidas sem criar
 units. Hashes e manifesto interno/externo foram comparados; caminhos
 operacionais, bancos, caches e cabeçalhos de chave privada foram recusados.
-Os 23 scripts shell do deploy passaram `bash -n` a partir da extração.
+Os 23 scripts shell originais passaram `bash -n` nessa extração histórica.
 
 Gate de regressão da consolidação (units e HTTP de distribuição simulados;
 cancelamento usa processos reais; instalação usa Restic local real):
@@ -109,3 +109,47 @@ Docker/SFTP, build de API/portal, migração PG17 e ensaio de atualização da
 central não foram executados nesta consolidação. Permanecem gates antes de
 qualquer atualização real. A versão disponível das ferramentas não comprova
 esses gates. O piloto representativo de vários dias também permanece aberto.
+
+## Revisão dos três achados
+
+O pacote de `23642fa` permanece preservado. A revisão não constatou segredos
+nele; demonstrou lacunas com dados sintéticos. O filtro revisado recusa
+.env.production e variantes, SQLite com WAL/SHM/journal, nomes de chaves e
+conteúdo reconhecível de chave sem extensão. Apenas quatro modelos de
+ambiente explicitamente listados são permitidos. Citações em fontes/docs
+continuam válidas. Não é detecção universal de segredos.
+
+A publicação usa rename de staging completo. Falhas não publicam tar,
+manifesto ou checksums parciais. Regressões usam Git temporário e comprovam
+recusas, exclusão do working tree, modelos e instalação normal.
+
+O fluxo manual usa `python -m macip_backup.manual --env-file ... -- COMANDO`,
+com formato literal limitado definido no runbook. Launcher não passa a ler
+segredos implicitamente. Credenciais e TLS chegam ao processo e aos filhos.
+
+Instalação, desinstalação, backup SQLite e executor usam MACIP_LOCK_DIR
+absoluto ou MACIP_STATE/locks. Launcher e install.json preservam a escolha;
+divergências são recusadas. Testes usam espaços nos caminhos, executor com
+SH, manutenção EX, preservação dos dados em recusa e retomada sem concorrência.
+O adaptador Restic permanece inalterado.
+
+Gate desta revisão: **116 aprovados, 0 falhos, 0 ignorados**, 419,935 s:
+
+```bash
+PYTHONPATH=src python3 -m unittest tests.test_cli \
+  tests.test_systemd.UnitGenerationTests tests.test_systemd.AdapterCancellationTests \
+  tests.test_distribution tests.test_install tests.test_credentials \
+  tests.test_manual tests.test_packaging tests.test_maintenance -q
+```
+
+Regressões finais de pacote/manual/backup: 9/9; prova customizada de lock
+com variantes legadas: aprovada em gate focado. Testes de pacote usam Git e
+instalação reais, somente conteúdo sintético. Testes manuais incluem CLI em
+subprocesso e Restic falso para conferir ambiente/TLS; não são nova prova TLS
+com servidor. Instalação existente inclui Restic local real; systemd e API de
+distribuição continuam simulados. Nenhum teste Docker/SFTP foi feito nesta revisão.
+
+Sync/rearme: mais 7/7 testes de exclusão mútua aprovados, em 33,125 s.
+Layout customizado legado sem identidade permanece bloqueado para manutenção
+automática; isso exige procedimento offline específico. Nenhum skip foi usado
+para encobrir esse limite.
