@@ -20,6 +20,7 @@ import time
 import unittest
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).parents[1]
 INSTALL_SH = ROOT / "deploy" / "install.sh"
@@ -115,6 +116,73 @@ def _task_config(source: Path, repository: Path, task_id: str) -> dict:
     "flock ausente",
 )
 class InstallFlowTests(unittest.TestCase):
+    def test_custom_lock_directory_shared_by_executor_install_backup_and_uninstall(self):
+        custom = self.root / 'custom locks with spaces'
+        self.env['MACIP_LOCK_DIR'] = str(custom)
+        self.assertEqual(self._install('--commit', 'lock-proof').returncode, 0)
+        _, config = self._write_task()
+        # Banco e configuração sintéticos existentes antes da recusa.
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(self.state_dir / 'agent.db') as db:
+            db.execute('CREATE TABLE proof (value TEXT)')
+            db.execute("INSERT INTO proof VALUES ('preserve')")
+        database = (self.state_dir / 'agent.db').read_bytes()
+        launcher = self.bin.read_bytes()
+        configuration = config.read_bytes()
+        env = dict(self.env, PYTHONPATH=str(ROOT / 'src'))
+        holder = subprocess.Popen([
+            sys.executable, '-u', '-c',
+            'from macip_backup.agent import acquire_task_lock; import time; '
+            'locks=acquire_task_lock("proof"); print("ready", flush=True); time.sleep(60)',
+        ], env=env, stdout=subprocess.PIPE, text=True)
+        backup_script = ROOT / 'deploy/backup-agent-db.sh'
+        backup = self.root / 'backup with spaces.db'
+        try:
+            self.assertEqual(holder.stdout.readline().strip(), 'ready')
+            self.assertNotEqual(self._install('--commit', 'must-not-install').returncode, 0)
+            self.assertNotEqual(self._uninstall().returncode, 0)
+            result = subprocess.run(['bash', str(backup_script), str(backup)], env=self.env,
+                                    capture_output=True, text=True, timeout=10)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse(backup.exists())
+            self.assertEqual(self.bin.read_bytes(), launcher)
+            self.assertEqual((self.state_dir / 'agent.db').read_bytes(), database)
+            self.assertEqual(config.read_bytes(), configuration)
+        finally:
+            holder.terminate()
+            holder.wait(timeout=5)
+            holder.stdout.close()
+        with (custom / 'maintenance.lock').open('a') as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            refused = self._run_cli('run', str(config))
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertIn('manutenção', refused.stderr)
+        result = subprocess.run(['bash', str(backup_script), str(backup)], env=self.env,
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with sqlite3.connect(backup) as db:
+            self.assertEqual(db.execute('SELECT value FROM proof').fetchone()[0], 'preserve')
+        self.assertEqual(self._install('--commit', 'resumed').returncode, 0)
+        manifest_file = self.macip_home / 'install.json'
+        manifest_text = manifest_file.read_text()
+        legacy = json.loads(manifest_text)
+        del legacy['lock_directory']
+        manifest_file.write_text(json.dumps(legacy))
+        try:
+            self.assertNotEqual(self._install().returncode, 0)
+            self.assertNotEqual(self._uninstall().returncode, 0)
+            refused = subprocess.run(['bash', str(backup_script), str(self.root / 'legacy.db')],
+                                     env=self.env, capture_output=True, text=True, timeout=10)
+            self.assertNotEqual(refused.returncode, 0)
+        finally:
+            manifest_file.write_text(manifest_text)
+        with patch.dict(self.env, {'MACIP_LOCK_DIR': str(self.root / 'different locks')}):
+            self.assertNotEqual(self._install().returncode, 0)
+            self.assertNotEqual(self._uninstall().returncode, 0)
+            drift = subprocess.run(['bash', str(backup_script), str(self.root / 'drift.db')],
+                                   env=self.env, capture_output=True, text=True, timeout=10)
+            self.assertNotEqual(drift.returncode, 0)
+
     @classmethod
     def setUpClass(cls) -> None:
         cls.dist_dir = Path(

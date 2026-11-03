@@ -20,7 +20,8 @@ MACIP_CONFIG="${MACIP_CONFIG:-$HOME/.config/macip-backup}"
 MACIP_STATE="${MACIP_STATE:-$HOME/.local/state/macip-backup}"
 MACIP_BIN="${MACIP_BIN:-$HOME/.local/bin}"
 MACIP_CACHE="${MACIP_CACHE:-$HOME/.cache/macip-backup}"
-LOCKS="$MACIP_STATE/locks"
+LOCKS="${MACIP_LOCK_DIR:-$MACIP_STATE/locks}"
+[[ "$LOCKS" = /* ]] || die "diretório de locks deve ser absoluto"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 SYSTEMCTL="${MACIP_SYSTEMCTL:-systemctl}"
 
@@ -28,6 +29,17 @@ REMOVED=()
 PRESERVED=()
 
 # ---- lock de manutenção: nada executa enquanto removemos -------------
+python3 - "$MACIP_HOME/install.json" "$LOCKS" "$MACIP_STATE" <<'PY'
+import json, sys
+from pathlib import Path
+manifest = Path(sys.argv[1])
+if manifest.is_file():
+    previous = json.loads(manifest.read_text()).get('lock_directory')
+    if not previous and Path(sys.argv[2]).resolve() != (Path(sys.argv[3]) / 'locks').resolve():
+        sys.exit('erro: instalação legada sem identidade de lock customizado; manutenção recusada')
+    if previous and Path(previous).resolve() != Path(sys.argv[2]).resolve():
+        sys.exit('erro: diretório de locks diverge da instalação existente')
+PY
 mkdir -p "$LOCKS"
 exec 9>"$LOCKS/maintenance.lock"
 flock -n 9 || die "execução ou manutenção em andamento — tente mais tarde"

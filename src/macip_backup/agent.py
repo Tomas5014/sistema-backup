@@ -58,14 +58,19 @@ def _now() -> str:
 
 
 def task_lock_directory() -> Path:
-    """Locks por tarefa — mesma regra do instalador: MACIP_STATE/locks
-    (propagado pelo launcher) ou o default do usuário."""
+    """MACIP_LOCK_DIR absoluto, senão MACIP_STATE/locks ou default."""
     override = os.environ.get("MACIP_LOCK_DIR")
     if override:
-        return Path(override)
+        directory = Path(override)
+        if not directory.is_absolute():
+            raise ResticError("diretório de locks deve ser absoluto")
+        return directory
     state = os.environ.get("MACIP_STATE")
     if state:
-        return Path(state) / "locks"
+        directory = Path(state) / "locks"
+        if not directory.is_absolute():
+            raise ResticError("diretório de locks deve ser absoluto")
+        return directory
     return Path.home() / ".local" / "state" / "macip-backup" / "locks"
 
 

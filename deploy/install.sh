@@ -38,7 +38,8 @@ MACIP_CONFIG="${MACIP_CONFIG:-$HOME/.config/macip-backup}"
 MACIP_STATE="${MACIP_STATE:-$HOME/.local/state/macip-backup}"
 MACIP_BIN="${MACIP_BIN:-$HOME/.local/bin}"
 MACIP_CACHE="${MACIP_CACHE:-$HOME/.cache/macip-backup}"
-LOCKS="$MACIP_STATE/locks"
+LOCKS="${MACIP_LOCK_DIR:-$MACIP_STATE/locks}"
+[[ "$LOCKS" = /* ]] || die "diretório de locks deve ser absoluto"
 LOGS="$MACIP_STATE/logs"
 BACKUPS="$MACIP_STATE/db-backups"
 DB="$MACIP_STATE/agent.db"
@@ -60,6 +61,17 @@ systemctl --user status >/dev/null 2>&1 || warn "systemd --user inativo — agen
 command -v mount.cifs >/dev/null || warn "mount.cifs ausente — necessário apenas para destino SMB"
 
 # ---- lock de manutenção: exclusividade de ponta a ponta --------------
+python3 - "$MACIP_HOME/install.json" "$LOCKS" "$MACIP_STATE" <<'PY'
+import json, sys
+from pathlib import Path
+manifest = Path(sys.argv[1])
+if manifest.is_file():
+    previous = json.loads(manifest.read_text()).get('lock_directory')
+    if not previous and Path(sys.argv[2]).resolve() != (Path(sys.argv[3]) / 'locks').resolve():
+        sys.exit('erro: instalação legada sem identidade de lock customizado; manutenção recusada')
+    if previous and Path(previous).resolve() != Path(sys.argv[2]).resolve():
+        sys.exit('erro: diretório de locks diverge da instalação existente')
+PY
 mkdir -p "$LOCKS"
 exec 9>"$LOCKS/maintenance.lock"
 flock -n 9 || die "execução ou outra manutenção em andamento — tente mais tarde"
@@ -153,17 +165,18 @@ MACIP_CONFIG="$MACIP_CONFIG"; export MACIP_CONFIG
 MACIP_STATE="$MACIP_STATE"; export MACIP_STATE
 MACIP_CACHE="$MACIP_CACHE"; export MACIP_CACHE
 MACIP_BIN="$MACIP_BIN"; export MACIP_BIN
+MACIP_LOCK_DIR="$LOCKS"; export MACIP_LOCK_DIR
 exec "$CURRENT/bin/python" -m macip_backup.cli "\$@"
 EOF
 chmod 755 "$BIN_FILE"
 
 # ---- manifesto com identidade completa do artefato -------------------
-"$RELEASE/bin/python" - "$WHEEL" "$VERSION" "$SHA256" "$COMMIT" "$MACIP_HOME/install.json" <<'PY'
+"$RELEASE/bin/python" - "$WHEEL" "$VERSION" "$SHA256" "$COMMIT" "$MACIP_HOME/install.json" "$LOCKS" <<'PY'
 import json, sys
 from datetime import UTC, datetime
 from pathlib import Path
 
-wheel, version, sha256, commit, manifest_path = sys.argv[1:6]
+wheel, version, sha256, commit, manifest_path, locks = sys.argv[1:7]
 Path(manifest_path).write_text(
     json.dumps(
         {
@@ -171,6 +184,7 @@ Path(manifest_path).write_text(
             "wheel": Path(wheel).name,
             "sha256": sha256,
             "commit": commit,
+            "lock_directory": str(Path(locks).resolve()),
             "installed_at_utc": datetime.now(UTC).isoformat(),
         },
         indent=2,
