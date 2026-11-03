@@ -9,6 +9,62 @@ configuração+agenda e confirmação. Windows, execução sob demanda,
 restauração pelo portal, distribuição de segredos e autoatualização do
 binário ficam de fora.
 
+## Evidência de laboratório — 03/11/2026
+
+Esta seção registra evidências fornecidas pelo operador. Elas não foram
+reexecutadas nesta revisão. O ambiente usou central e agente no commit
+`469b356`, com componentes isolados do piloto 0.2.1:
+
+- central na VM `srvdev1`, HTTPS em `127.0.0.1:8444`, acessada pelo PC
+  pelo túnel `https://localhost:18444`;
+- agente Linux no PC de desenvolvimento, com configuração, estado,
+  cache, locks e repositório próprios;
+- agente `381143c2-d36e-4933-82cb-edafe49a0070`, tarefa
+  `d96b57f2-740a-46ec-83e5-fb47b3fb3097` e destino local
+  `local-homologacao`.
+
+### Ciclo observado pelo operador
+
+1. `pull-tasks --no-activate` preparou a geração 1. Configuração e
+   units ficaram em staging. Nenhuma unit operacional, repositório ou
+   confirmação de aplicação foi criada nessa preparação.
+2. A revisão 1 foi aplicada e confirmada. O timer disparou o backup às
+   `15:04:01 BRT`. A execução do agente foi
+   `e2bfa774-0f65-4a33-a7a1-1d85afd6c2a9`; o registro central exibido
+   no portal foi `f8fbddab-5e63-4dd8-9d73-3eb4f0eb9479`. Resultado:
+   sucesso, 2 arquivos, outbox `sent`, sem erro. O portal recebeu o
+   resultado às `15:06:31 BRT`.
+3. O snapshot criado foi
+   `955c28da45e3ebbb8ec575133958db300f9ba3289ba277d84b31d03866c60686`.
+   `check --read-data` passou. A restauração para diretório novo e a
+   comparação por `diff` passaram; `ignorar.tmp` permaneceu excluído.
+4. A revisão 2 foi publicada como geração 2. O timer de consulta aplicou
+   a revisão às `15:19:15 BRT`, sem execução manual de `pull-tasks`.
+   A confirmação ficou `sent`; após recarregar, o portal mostrou revisão
+   cadastrada, publicada e aplicada 2, com geração 2.
+5. A suspensão foi publicada como geração 3. A confirmação foi enviada
+   às `15:23:12 BRT`. O timer de backup ficou
+   `UnitFileState=disabled` e `ActiveState=inactive`; o snapshot foi
+   preservado. Nova restauração após a suspensão passou, com conteúdo
+   igual e exclusão preservada. O timer permaneceu desabilitado e
+   inativo após a recuperação.
+
+### Ressalvas e alcance
+
+- No ciclo original, o agendamento da consulta foi cadastrado pela
+  função interna `schedule_pull()`. O comando público `schedule-pull`
+  falhava com `UnboundLocalError`; portanto, ele não foi aprovado por
+  essa prova original.
+- A revisão posterior corrigiu `schedule-pull` e `unschedule-pull` e
+  adicionou regressões da entrada pública. Isso comprova o despacho do
+  CLI em ambiente simulado e isolado; não reexecuta o ciclo acima. O
+  gate pertinente desta revisão aprovou 76 de 76 testes de CLI, geração
+  de units e distribuição.
+- O operador recebeu orientação para parar os timers de consulta e
+  sincronização. A confirmação dessa limpeza ainda está pendente.
+- A prova usou somente destino local em laboratório. Ela não homologa
+  produção, SMB, S3 ou Windows.
+
 ## Pré-requisitos
 
 - Central saudável com migrações 5 e 6 aplicadas (`task_distributions`

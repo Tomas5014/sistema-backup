@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -40,6 +41,160 @@ class RecoveryAdapter:
 
 
 class IntegrationValidationCommandTests(unittest.TestCase):
+    def test_schedule_pull_public_entrypoint_forwards_enable_and_serializes_json(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = root / "agent.db"
+            central = root / "central.json"
+            for enable in (False, True):
+                output = io.StringIO()
+                arguments = [
+                    "macip-backup-poc", "schedule-pull", "--store", str(store),
+                    "--central", str(central), "--calendar", "*-*-* *:*:10",
+                ]
+                if enable:
+                    arguments.append("--enable")
+                installation = {
+                    "timer_name": "macip-backup-pull-test.timer",
+                    "enabled": enable,
+                }
+                with self.subTest(enable=enable), patch.object(
+                    sys, "argv", arguments
+                ), patch(
+                    "macip_backup.distribution.schedule_pull",
+                    return_value=installation,
+                ) as schedule, patch("sys.stdout", output):
+                    self.assertEqual(main(), 0)
+
+                schedule.assert_called_once_with(
+                    store, central, "*-*-* *:*:10", enable=enable
+                )
+                self.assertEqual(json.loads(output.getvalue()), installation)
+
+    def test_unschedule_pull_public_entrypoint_is_idempotent_and_serializes_json(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = root / "agent.db"
+            central = root / "central.json"
+            results = (
+                {
+                    "store": str(store),
+                    "central": str(central),
+                    "removed": ["pull.timer", "pull.service"],
+                },
+                {"store": str(store), "central": str(central), "removed": []},
+            )
+            arguments = [
+                "macip-backup-poc", "unschedule-pull", "--store", str(store),
+                "--central", str(central),
+            ]
+            with patch(
+                "macip_backup.distribution.unschedule_pull", side_effect=results
+            ) as unschedule:
+                for expected in results:
+                    output = io.StringIO()
+                    with patch.object(sys, "argv", arguments), patch("sys.stdout", output):
+                        self.assertEqual(main(), 0)
+                    self.assertEqual(json.loads(output.getvalue()), expected)
+
+        self.assertEqual(unschedule.call_count, 2)
+        unschedule.assert_called_with(store, central)
+
+    def test_schedule_pull_public_entrypoint_preserves_operational_error_exit(self) -> None:
+        error_output = io.StringIO()
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "macip-backup-poc", "schedule-pull", "--store", "/tmp/agent.db",
+                "--central", "/tmp/central.json", "--calendar", "daily",
+            ],
+        ), patch(
+            "macip_backup.distribution.schedule_pull",
+            side_effect=OSError("falha operacional simulada"),
+        ), patch("sys.stderr", error_output):
+            with self.assertRaises(SystemExit) as context:
+                main()
+
+        self.assertEqual(context.exception.code, 2)
+        self.assertIn("falha operacional simulada", error_output.getvalue())
+        self.assertNotIn("Traceback", error_output.getvalue())
+
+    def test_pull_schedule_subprocess_isolated_install_enable_and_removal(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / "home"
+            fake_bin = root / "bin"
+            home.mkdir()
+            fake_bin.mkdir()
+            systemctl_log = root / "systemctl.log"
+            self._write_executable(
+                fake_bin / "systemd-analyze",
+                "#!/bin/sh\nexit 0\n",
+            )
+            self._write_executable(
+                fake_bin / "systemctl",
+                '#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$MACIP_TEST_SYSTEMCTL_LOG"\n',
+            )
+            central_a = self._write_central(root / "central-a.json")
+            central_b = self._write_central(root / "central-b.json")
+            store_a = root / "agent-a.db"
+            store_b = root / "agent-b.db"
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "HOME": str(home),
+                    "PATH": f"{fake_bin}{os.pathsep}{environment.get('PATH', '')}",
+                    "PYTHONPATH": str(Path(__file__).parents[1] / "src"),
+                    "MACIP_TEST_SYSTEMCTL_LOG": str(systemctl_log),
+                }
+            )
+
+            installed_a = self._run_cli_subprocess(
+                environment,
+                "schedule-pull", "--store", str(store_a), "--central",
+                str(central_a), "--calendar", "*-*-* *:*:10",
+            )
+            self.assertFalse(installed_a["enabled"])
+            self.assertFalse(systemctl_log.exists())
+            for field in ("service", "timer"):
+                self.assertTrue(Path(installed_a[field]).is_file())
+
+            installed_b = self._run_cli_subprocess(
+                environment,
+                "schedule-pull", "--store", str(store_b), "--central",
+                str(central_b), "--calendar", "*-*-* *:*:20", "--enable",
+            )
+            self.assertTrue(installed_b["enabled"])
+            calls_after_enable = systemctl_log.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(calls_after_enable[0], "--user daemon-reload")
+            self.assertEqual(
+                calls_after_enable[1],
+                f"--user enable --now {installed_b['timer_name']}",
+            )
+
+            removed = self._run_cli_subprocess(
+                environment,
+                "unschedule-pull", "--store", str(store_a), "--central", str(central_a),
+            )
+            self.assertEqual(
+                set(removed["removed"]),
+                {installed_a["service"], installed_a["timer"]},
+            )
+            for field in ("service", "timer"):
+                self.assertFalse(Path(installed_a[field]).exists())
+                self.assertTrue(Path(installed_b[field]).exists())
+
+            calls_before_repeat = systemctl_log.read_text(encoding="utf-8")
+            repeated = self._run_cli_subprocess(
+                environment,
+                "unschedule-pull", "--store", str(store_a), "--central", str(central_a),
+            )
+            self.assertEqual(repeated["removed"], [])
+            self.assertEqual(
+                systemctl_log.read_text(encoding="utf-8"), calls_before_repeat
+            )
+
     def test_schedule_sync_forwards_store_central_calendar_and_limit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -294,6 +449,40 @@ class IntegrationValidationCommandTests(unittest.TestCase):
                 self.assertEqual(context.exception.code, 2)
                 self.assertNotIn("Traceback", error_output.getvalue())
                 adapter.assert_not_called()
+
+    @staticmethod
+    def _write_executable(path: Path, content: str) -> None:
+        path.write_text(content, encoding="utf-8")
+        path.chmod(0o755)
+
+    @staticmethod
+    def _write_central(path: Path) -> Path:
+        path.write_text(
+            json.dumps(
+                {
+                    "url": "http://127.0.0.1:8444",
+                    "agent_id": "381143c2-d36e-4933-82cb-edafe49a0070",
+                    "token_environment": "MACIP_TEST_API_TOKEN",
+                }
+            ),
+            encoding="utf-8",
+        )
+        return path
+
+    @staticmethod
+    def _run_cli_subprocess(environment: dict[str, str], *arguments: str) -> dict:
+        completed = subprocess.run(
+            ["python3", "-m", "macip_backup.cli", *arguments],
+            capture_output=True,
+            text=True,
+            env=environment,
+            timeout=10,
+        )
+        if completed.returncode != 0:
+            raise AssertionError(
+                f"CLI falhou ({completed.returncode}): {completed.stderr}"
+            )
+        return json.loads(completed.stdout)
 
     @staticmethod
     def _write_recovery_config(

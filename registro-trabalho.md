@@ -2100,3 +2100,68 @@ confirmada na rodada de restauração; identidade restaurada comparada
 campo a campo; snapshot ausente diagnostica sem fabricar; tarefa
 automática reativada mantendo suspensas/manuais; adoção posterior
 autorizada de B funciona.
+
+---
+
+## 2026-11-03 — Homologação de distribuição e correção do CLI de consulta
+
+### Evidências reais fornecidas pelo operador
+
+Estas evidências foram registradas, não reexecutadas nesta revisão.
+Central e agente de laboratório estavam no commit `469b356`; a central
+rodava na VM `srvdev1` em `127.0.0.1:8444`, acessada no PC por
+`https://localhost:18444`. O agente Linux usou configuração, estado,
+cache, locks e repositório isolados.
+
+- Agente `381143c2-d36e-4933-82cb-edafe49a0070`; tarefa
+  `d96b57f2-740a-46ec-83e5-fb47b3fb3097`; destino local
+  `local-homologacao`.
+- `pull-tasks --no-activate` preparou a geração 1 somente em staging:
+  sem unit operacional, repositório ou confirmação de aplicação.
+- Revisão 1 aplicada e confirmada. Timer disparou às `15:04:01 BRT`.
+  Execução do agente `e2bfa774-0f65-4a33-a7a1-1d85afd6c2a9` e registro
+  central `f8fbddab-5e63-4dd8-9d73-3eb4f0eb9479`: sucesso, 2 arquivos,
+  outbox `sent`, sem erro. Portal recebeu às `15:06:31 BRT`.
+- Snapshot
+  `955c28da45e3ebbb8ec575133958db300f9ba3289ba277d84b31d03866c60686`:
+  `check --read-data`, restauração em diretório novo e `diff` passaram;
+  `ignorar.tmp` permaneceu excluído.
+- Revisão 2 publicada como geração 2. Timer de consulta aplicou às
+  `15:19:15 BRT`, sem `pull-tasks` manual. Confirmação `sent`; portal
+  mostrou revisão cadastrada/publicada/aplicada 2 e geração 2.
+- Suspensão publicada como geração 3. Confirmação enviada às
+  `15:23:12 BRT`. Timer de backup ficou desabilitado e inativo. Snapshot
+  persistiu; nova restauração e comparação passaram; exclusão persistiu;
+  timer continuou desabilitado e inativo.
+
+### Defeito confirmado e correção desta revisão
+
+`main()` tinha imports locais de `schedule_json` em outros ramos. Isso
+tornava o nome local à função inteira, mas `schedule-pull` e
+`unschedule-pull` o consultavam antes de qualquer atribuição. As novas
+regressões da entrada pública reproduziram `UnboundLocalError` nos dois
+comandos. A correção mínima importa `schedule_json` dentro de cada ramo
+afetado, preservando parser, JSON, códigos de saída, propriedade e
+semântica das units.
+
+Testes desta revisão são simulados e isolados: chamadas diretas a
+`main()` controlam helpers; um subprocesso real
+`python3 -m macip_backup.cli` usa HOME temporário e executáveis falsos
+de `systemd-analyze`/`systemctl`. Nenhuma unit real do desenvolvedor foi
+alterada. O teste cobre instalação sem ativação, `--enable`, remoção do
+vínculo correto, repetição idempotente e erro operacional com código 2.
+O gate pertinente aprovou 76/76 testes de CLI, geração simulada de units
+e distribuição. Os testes de distribuição usaram servidor HTTP local
+descartável; nenhum serviço externo ou laboratório real foi acessado.
+
+### Limites e pendências
+
+- O ciclo real usou somente destino local. Não é homologação geral de
+  produção, SMB, S3 ou Windows.
+- O agendamento original chamou `schedule_pull()` internamente porque o
+  CLI público falhava. A correção do CLI foi comprovada depois, em teste
+  isolado; o ciclo real não foi reexecutado nesta revisão.
+- A parada dos timers de consulta e sincronização foi orientada, mas o
+  operador ainda não confirmou a limpeza.
+- `srvdev1`, laboratório congelado, piloto 0.2.1, instalações globais,
+  backups e credenciais reais não foram acessados nem alterados.

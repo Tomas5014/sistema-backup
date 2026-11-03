@@ -254,6 +254,7 @@ def main() -> int:
             return 0
         if arguments.command == "schedule-pull":
             from .distribution import schedule_pull
+            from .systemd import schedule_json
 
             print(schedule_json(schedule_pull(
                 arguments.store, arguments.central, arguments.calendar,
@@ -276,6 +277,7 @@ def main() -> int:
             return 0
         if arguments.command == "unschedule-pull":
             from .distribution import unschedule_pull
+            from .systemd import schedule_json
 
             print(schedule_json(unschedule_pull(
                 arguments.store, arguments.central)))
