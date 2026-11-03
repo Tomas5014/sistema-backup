@@ -78,3 +78,34 @@ Pacote contém fontes da central/portal, wheel do agente e runbooks; imagens
 da central precisam de build, acesso às dependências e registro de digests.
 
 Siga [instalação, atualização e retorno](instalacao-atualizacao-retorno.md).
+
+## Validação desta consolidação
+
+Fontes e wheel de validação foram gerados do primeiro commit de preparação;
+o pacote definitivo é regenerado do commit final documental, cujo SHA fica
+no manifesto externo. Nenhum arquivo de produto foi alterado entre eles.
+Foram conferidos importação, versão e ajuda na extração, instalação pelo
+install.sh em caminho com espaços, permissões 0700/0600, install.json e
+hash do wheel. Extração e instalação temporárias foram removidas sem criar
+units. Hashes e manifesto interno/externo foram comparados; caminhos
+operacionais, bancos, caches e cabeçalhos de chave privada foram recusados.
+Os 23 scripts shell do deploy passaram `bash -n` a partir da extração.
+
+Gate de regressão da consolidação (units e HTTP de distribuição simulados;
+cancelamento usa processos reais; instalação usa Restic local real):
+
+```bash
+PYTHONPATH=src python3 -m unittest tests.test_cli \
+  tests.test_systemd.UnitGenerationTests \
+  tests.test_systemd.AdapterCancellationTests \
+  tests.test_distribution tests.test_install -v
+```
+
+Resultado: **99 aprovados, 0 falhos, 0 ignorados**, em 364,637 s.
+Warnings de sockets dos fixtures de distribuição foram observados; não
+representam prova de infraestrutura externa. Os processos de teste encerraram.
+
+Docker/SFTP, build de API/portal, migração PG17 e ensaio de atualização da
+central não foram executados nesta consolidação. Permanecem gates antes de
+qualquer atualização real. A versão disponível das ferramentas não comprova
+esses gates. O piloto representativo de vários dias também permanece aberto.

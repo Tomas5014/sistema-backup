@@ -554,13 +554,15 @@ permite execução remota.
 ## Compatibilidade e limites
 
 Validado neste ambiente: Linux, Python 3.14.4, OpenSSH 10.2p1, restic 0.18.1.
-Integrações locais reais foram homologadas. Host atual não possui `sshd` e o
-daemon Docker/Podman está indisponível; SFTP está pendente de homologação real.
+Integrações locais reais e provas SFTP anteriores estão registradas no
+histórico. A consolidação candidata não reexecuta Docker/SFTP: a homologação
+gerenciada de 03/11/2026 usou destino local. Veja a matriz da candidata para
+separar ambiente observado, mínimo de código e prova efetivamente executada.
 `cat config` e
 código 10 seguem [scripting restic 0.18](https://restic.readthedocs.io/en/v0.18.0/075_scripting.html).
 Backend segue [repositórios SFTP](https://restic.readthedocs.io/en/stable/030_preparing_a_new_repo.html).
 
-### Registro desta revisão
+### Registro histórico da primeira revisão (não é o gate da candidata)
 
 - Aprovados: 31 testes unitários e integrações locais reais.
 - Ignorados: 7 integrações SFTP reais, pois não há daemon Docker/Podman ativo.
@@ -568,9 +570,10 @@ Backend segue [repositórios SFTP](https://restic.readthedocs.io/en/stable/030_p
 - Não executado: `tests/sftp/run-integration.sh` encerrou com código 1 na
   pré-checagem do daemon; isso não é homologação SFTP.
 
-Próximo passo: executar `tests/sftp/run-integration.sh` em host Docker funcional,
-registrar resultado e homologar falhas controladas. Windows, API e portal
-permanecem fora do escopo; SMB, S3 e agenda systemd --user estão implementados.
+Esse registro histórico foi sucedido por provas SFTP separadas e incrementos
+de API/portal. O alcance e as pendências atuais estão em
+[candidata Linux](docs/candidata-linux.md); não inferir aprovação geral a partir
+de uma prova antiga de backend.
 
 ## Integração com a central (opcional)
 

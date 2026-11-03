@@ -2230,3 +2230,57 @@ foram removidos.
   não foi reexecutada.
 - A parada dos timers antigos de consulta e sincronização do laboratório
   ainda depende de confirmação do operador.
+
+## 2026-11-03 — Consolidação da candidata Linux 0.3.0rc1
+
+Branch própria `release/linux-0.3.0rc1`, partindo de `d81ec86`. Ancestralidade
+confirmada: `469b356` → `ef3ff75` → `7ec7b85` → `d81ec86`; sem merge ou
+cherry-pick. Alterações preexistentes ficaram fora dos commits.
+
+A identificação 0.3.0rc1 refere-se à distribuição composta para piloto
+controlado. Agente continua 0.2.1; API/portal 0.1.0; PG17 com migrações
+1..6, SQLite 7 e contrato de tarefas 1. SHA do commit será gravado pelo
+gerador no manifesto externo após o commit final, evitando autorreferência.
+Não é MVP completo nem aprovação de produção.
+
+`deploy/package-candidate.py` usa somente `git archive` de commit explícito,
+allowlist de fontes e staging temporário. Produz tar.gz com fontes e wheel,
+MANIFEST.json interno/externo e SHA256SUMS. Exclui runtime de TLS/backups e
+recusa bancos, logs e arquivos secretos; não empacota working tree sujo.
+Não promete reprodução byte a byte de imagens ou dependências.
+
+Validação do pacote preliminar: hashes, manifestos, importação/versão/ajuda
+da CLI extraída, 23 scripts deploy com bash -n, instalação por install.sh em
+caminho com espaços, versão/ajuda fora do checkout, permissões e install.json.
+Extração e instalação removidas automaticamente; nenhuma unit criada. O
+pacote definitivo é regenerado e conferido novamente após o commit final.
+
+Evidência nova do operador encerra a pendência registrada acima: timers
+`macip-backup-pull-a985252fb52df2de.timer` e
+`macip-backup-sync-67ee9fbc7ff2b5da.timer` estão inactive/disabled. Não houve
+acesso ao laboratório para verificar isso nesta consolidação. Laboratório,
+SQLite, repositório e arquivos recuperados continuam preservados.
+
+A revisão independente tinha PIDs divergentes entre Python e /proc no
+sandbox. As falhas não foram reproduzidas na validação complementar. A nova
+prova não é garantia universal para namespaces; adaptador não foi alterado.
+
+Runbooks distinguem instalação nova, atualização da central e do agente,
+backup/restauração de ensaio, compatibilidade de esquemas e retorno sem perda
+silenciosa de escritas novas. Último principal informado `439e4f2` e
+laboratório `469b356` são históricos, exigindo conferência futura.
+
+Não foram reexecutados Docker/SFTP, build de API/portal, migração PG17 ou
+atualização da central. São gates futuros, não aprovações inferidas. Windows,
+portal restore, alertas, comandos remotos, segredos distribuídos, auto-update,
+SMB/S3 completos, MFA, permissões por cliente, auditoria e volumes
+representativos permanecem pendências de produto. Sem push/tag/deploy.
+
+Gate executado: `PYTHONPATH=src python3 -m unittest tests.test_cli
+tests.test_systemd.UnitGenerationTests tests.test_systemd.AdapterCancellationTests
+tests.test_distribution tests.test_install -v`: **99 aprovados, 0 falhos,
+0 ignorados**, 364,637 s. HTTP/systemd dos fixtures são simulados; cancelamento
+usa processos reais; instalação testa Restic local. Warnings de sockets em
+fixtures de distribuição foram observados. Recursos .test-inst/.test-dist
+foram removidos pelo teardown. Nenhum teste systemd real foi acrescentado
+nesta consolidação; a prova real anterior permanece identificada separadamente.
