@@ -2705,3 +2705,66 @@ Branch: `fix/recovery-cursor-atomic-migration` (base: `70a35dc`).
 
 - `DISCOVERY_BUDGET=5` e `DEFERRED_SECONDS=30` são constantes.
 - Sem UI de diagnóstico no portal.
+
+---
+
+## 2026-11-04 — Correção das provas de rollback e preservação da exceção
+
+### Problemas corrigidos
+
+1. **Injeção de falha inválida nos testes**: `conn.execute = failing_execute`
+   falhava com `AttributeError` (atributo read-only no sqlite3 do Python
+   3.14). A falha acontecia antes da migração, então os testes passavam sem
+   atingir o ponto pretendido. Correção: `sqlite3.connect(factory=...)`
+   com subclasse de `sqlite3.Connection`, marcador sintético
+   `INJECTED:<marker>`, confirmação de que o ponto foi atingido (`hits`),
+   e comparação de esquema/versão/dados por conexão independente após sair
+   do patch.
+
+2. **Exceção original substituída na limpeza**: ao detectar versão futura
+   na releitura após o lock, o código fazia rollback + close dentro do
+   `try` e depois rollback novamente no `except`, gerando
+   `ProgrammingError: Cannot operate on a closed database` que substituía
+   o `ConfigurationError` original. Correção: `try/except` centralizado —
+   `except` faz rollback (tolerante a ausência de transação) + close, sem
+   rollback sobre conexão fechada e sem mascarar a exceção original.
+
+### Comportamento transacional comprovado
+
+`PRAGMA user_version` é transacional no SQLite (rollback desfaz a versão).
+Comentário em `recovery.py` corrigido — dizia que não era transacional.
+
+### Arquivos alterados
+
+- `src/macip_backup/recovery.py`: `try/except` centralizado, exceção
+  original preservada, comentário de `user_version` corrigido.
+- `tests/test_recovery_migration.py`: factory de subclasse, marcador
+  `INJECTED:<marker>`, snapshot completo (esquema/versão/dados), 3 novas
+  regressões (falha após ALTER, falha antes de versão, falha antes de
+  commit) + versão futura na releitura após o lock.
+- `docs/recuperacao-portal-linux.md`: atomicidade e comportamento
+  transacional de `user_version` corrigidos.
+- `registro-trabalho.md`: esta entrada.
+
+### Prova de mutação
+
+Removido `BEGIN IMMEDIATE` temporariamente: 4 testes de falha detectaram
+esquema parcialmente aplicado (colunas e tabela discovery_cursor
+persistiram). Implementação restaurada integralmente antes do commit.
+
+### Comandos e resultados
+
+- Worker/CLI/lock/migration: 51/51 OK.
+- Mutação sem `BEGIN IMMEDIATE`: 4 falhas detectadas (prova de que os
+  testes verificam rollback observável, não apenas presença de código).
+- API/PG17 e E2E Playwright: não reexecutados nesta sessão; escopo
+  restrito a testes + tratamento de erro + documentação.
+
+### Recursos descartáveis
+
+Apenas diretórios temporários dos testes (cleanup automático). Nenhum
+contêiner ou serviço novo.
+
+### Branch e SHA
+
+Branch: `fix/recovery-migration-proof` (base: `59731a1`).

@@ -14,8 +14,9 @@ SQLite principal continua v7. A fila separada de recuperação usa esquema v3
 (migração transacional v1→v2→v3 adiciona `deferred_until INTEGER NOT NULL DEFAULT 0`,
 `evaluated_at INTEGER NOT NULL DEFAULT 0` e tabela `discovery_cursor`;
 registros, claims, eventos e resultados existentes são preservados). A
-migração é atômica: `BEGIN IMMEDIATE` serializa poll/worker, `user_version`
-só é atualizado após todos os ALTER/CREATE, e rollback desfaz tudo em falha.
+migração é atômica: `BEGIN IMMEDIATE` serializa poll/worker, rollback desfaz
+esquema, versão (`PRAGMA user_version` é transacional) e dados em falha, e a
+exceção original é propagada — nunca substituída por erro de limpeza.
 Bancos parcialmente migrados pela versão anterior são detectados e concluídos
 sem perda de dados.
 

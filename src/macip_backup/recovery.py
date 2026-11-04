@@ -66,23 +66,20 @@ def _database(path):
     db = sqlite3.connect(path, timeout=10)
     os.chmod(path, 0o600)
     db.row_factory = sqlite3.Row
-    current = db.execute('PRAGMA user_version').fetchone()[0]
-    if current not in (0, 1, 2, 3):
-        db.close()
-        raise ConfigurationError('esquema da fila de recuperação não suportado')
-    db.execute('PRAGMA journal_mode=WAL')
-    db.execute('PRAGMA synchronous=FULL')
-    # Serializa migração entre poll e worker: ambos podem abrir o mesmo
-    # banco simultaneamente, mas a migração é exclusiva. IMMEDIATE adquire
-    # um lock de escrita no início da transação; o segundo esperará.
-    db.execute('BEGIN IMMEDIATE')
     try:
+        current = db.execute('PRAGMA user_version').fetchone()[0]
+        if current not in (0, 1, 2, 3):
+            raise ConfigurationError('esquema da fila de recuperação não suportado')
+        db.execute('PRAGMA journal_mode=WAL')
+        db.execute('PRAGMA synchronous=FULL')
+        # Serializa migração entre poll e worker: ambos podem abrir o mesmo
+        # banco simultaneamente, mas a migração é exclusiva. IMMEDIATE adquire
+        # um lock de escrita no início da transação; o segundo esperará.
+        db.execute('BEGIN IMMEDIATE')
         # Re-lê user_version após adquirir o lock: outra conexão pode ter
         # concluído a migração enquanto esta esperava.
         locked = db.execute('PRAGMA user_version').fetchone()[0]
         if locked not in (0, 1, 2, 3):
-            db.rollback()
-            db.close()
             raise ConfigurationError('esquema da fila de recuperação não suportado')
         db.execute('''CREATE TABLE IF NOT EXISTS recovery_queue (
           bond TEXT NOT NULL, id TEXT NOT NULL, claim TEXT NOT NULL,
@@ -100,14 +97,20 @@ def _database(path):
             db.execute('ALTER TABLE recovery_queue ADD COLUMN evaluated_at INTEGER NOT NULL DEFAULT 0')
         db.execute('''CREATE TABLE IF NOT EXISTS discovery_cursor (
           bond TEXT NOT NULL PRIMARY KEY, cursor TEXT)''')
-        # PRAGMA user_version não é transacional no SQLite: escreve no
-        # cabeçalho do arquivo. Por isso é a ÚLTIMA instrução antes do
-        # commit. Se algo falhar antes, user_version não é alterado e o
-        # rollback desfaz os ALTERs/CREATEs.
+        # PRAGMA user_version=N participa da transação de escrita no SQLite:
+        # um rollback também desfaz a nova versão. Prova empírica em
+        # tests/test_recovery_migration.py.
         db.execute('PRAGMA user_version=3')
         db.commit()
     except Exception:
-        db.rollback()
+        # Limpeza centralizada: rollback tolera ausência de transação ativa
+        # (falha antes/durante BEGIN) e o fechamento cobre qualquer falha na
+        # inicialização. A exceção original é preservada — falha de rollback
+        # não a substitui, e não há rollback sobre conexão já fechada.
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
         raise
     return db
