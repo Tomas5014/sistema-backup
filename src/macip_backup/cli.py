@@ -213,9 +213,23 @@ def main() -> int:
     pull_unblock.add_argument("--central", type=Path, required=True)
     pull_unschedule.add_argument("--store", type=Path, required=True)
     pull_unschedule.add_argument("--central", type=Path, required=True)
+    for name in ("recovery-poll", "recovery-work"):
+        operation = subcommands.add_parser(name, help="fila independente de recuperação Linux")
+        operation.add_argument("--central", type=Path, required=True)
+        operation.add_argument("--queue", type=Path, required=True)
+        if name == "recovery-work":
+            operation.add_argument("--policy", type=Path, required=True)
+            operation.add_argument("--limit", type=int, default=1)
     arguments = parser.parse_args()
 
     try:
+        if arguments.command in {"recovery-poll", "recovery-work"}:
+            from .recovery import poll, work
+            result = (poll(arguments.central, arguments.queue)
+                      if arguments.command == "recovery-poll"
+                      else work(arguments.central, arguments.queue, arguments.policy, arguments.limit))
+            print(json.dumps(result, ensure_ascii=False))
+            return 0
         if arguments.command == "verify-integration":
             return verify_integration()
         if arguments.command == "verify-sftp-integration":
