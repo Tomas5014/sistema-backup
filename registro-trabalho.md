@@ -2768,3 +2768,50 @@ contêiner ou serviço novo.
 ### Branch e SHA
 
 Branch: `fix/recovery-migration-proof` (base: `59731a1`).
+
+## 2026-11-04 — Registro operacional ea74d5d e preparação de reinício
+
+Base/HEAD inspecionado: ea74d5d5bf8792b374addbc6addf98345c3327a7,
+branch original fix/recovery-migration-proof. Ancestralidade confirmada, sem
+commits posteriores nessa sessão; alterações preexistentes preservadas.
+Branch documental: docs/recovery-operational-reboot-proof.
+
+Evidências **fornecidas pelo operador**, não reexecutadas nesta revisão,
+registradas integralmente em docs/homologacao-recuperacao-ea74d5d.md:
+backup inicial local (2 arquivos), recuperação manual, systemd --user real,
+queda/retorno do túnel, resultado terminal durável com reenvio sem worker,
+backup sintético de 512 MiB, parada controlada por serviço com interrupted,
+nova recuperação com conteúdo/exclusão/hash conferidos. Código ea74d5d,
+distribuição 0.4.0dev1, agente 0.2.1, PG1–7, SQLite principal7/fila3.
+retry:2 não significa duas restaurações. completed:1/Result=success do serviço
+não significam sucesso do restore. Parada em cgroup não comprova quantidade
+de bytes transferidos. Não houve reboot/queda abrupta nas evidências.
+
+Timers exclusivos poll/work de recuperação foram parados, antes habilitados;
+disable não confirmado. O roteiro manda disable --now apenas nesses timers,
+confere serviços sem processos e exige disabled/inactive antes e depois.
+Os timers antigos de outro laboratório permanecem confirmados desabilitados.
+
+Roteiro em docs/prova-reinicio-recuperacao.md: operação nova pelo portal,
+fronteira sem poll após worker concluído, evidências SQLite via backup online
+sob lock registrado, hashes de identidade/evento/arquivos, reboot manual,
+reconstrução do túnel/TLS, somente poll e confirmação no portal. Não há
+alteração SQL operacional nem cópia direta ignorando WAL. Resultado ainda
+não aprovado: depende de execução/evidência real do operador.
+
+Não houve acesso ao PC do laboratório, srvdev1, credenciais ou pacote
+congelado. Nenhum deploy, restart, reboot ou regeneração de artefatos.
+
+Verificações locais desta sessão: conferência das flags/parser da CLI,
+contratos da API, esquema v3, seleção/adiamento e ordem envio→descoberta do
+poll, persistência terminal e locks; systemd-cgls --help confirma --user-unit;
+readyz existe na API. Sintaxe: 11 blocos Bash (bash -n), três snippets Python
+(AST). Seis cenários sintéticos de evidência: sucesso before/after/sent,
+recusa de envio antecipado, running, evento alterado, boot igual e esquema
+futuro. Boot/ACK são simulados nessa validação, não reboot real. Recursos
+somente TemporaryDirectory, limpos automaticamente. Nenhum helper de produto
+foi criado nem código de produção alterado.
+
+Repetição final dos seis cenários manteve conexão sintética WAL aberta com
+commits sem checkpoint automático; backup online preservou o evento. O
+preflight também confere URL/UUID/nome da variável de token sem ler segredos.

@@ -1,7 +1,9 @@
 # Recuperação Linux pelo portal — incremento experimental
 
 Esta funcionalidade parte da correção 11a589c, mas **não pertence ao pacote
-0.3.0rc1 corrigido**. Não foi homologada em srvdev1 ou no piloto operacional.
+0.3.0rc1 corrigido**. O operador relatou provas em laboratório real com
+ea74d5d em 04/11/2026: [registro operacional](homologacao-recuperacao-ea74d5d.md).
+Não é homologação de produção ou do piloto original.
 Windows, seleção de arquivos, sobrescrita e recuperação entre agentes ficam fora.
 
 ## Contrato e migração
@@ -190,6 +192,14 @@ Antes de piloto operacional, ensaie instalação dos dois serviços, TLS real,
 parada durante volume representativo, reboot, custódia da fila e recuperação
 de claims abandonados. A confirmação histórica dos timers antigos como
 inactive/disabled permanece válida; nenhum desses timers deve ser reativado.
+
+Atualização do alcance: o operador relatou instalação exclusiva, TLS via túnel,
+systemd real, perda/retorno de comunicação, envio durável e parada controlada
+de serviço no laboratório ea74d5d. Isso não encerra validação com volumes dos
+clientes. Os **timers novos de recuperação** estão parados, mas não há prova
+de disable; não confundir com os timers antigos já desabilitados.
+[Persistência após reinício](prova-reinicio-recuperacao.md) permanece pendente;
+o roteiro deve ser executado pelo operador em janela escolhida.
 
 ## Evidências de desenvolvimento — 04/11/2026
 
