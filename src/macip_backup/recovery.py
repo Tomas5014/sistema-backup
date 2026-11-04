@@ -21,13 +21,18 @@ from .restic import ResticAdapter, ResticCancelledError, ResticError, ResticTime
 
 
 # Adiamento temporário de operação inelegível (tarefa ocupada, falha
-# transitória de comunicação). Persistido em deferred_until para sobreviver
-# a reinícios e impedir que a mesma operação monopolize rodadas seguidas.
+# transitória de comunicação, resposta ambígua de claim). Persistido em
+# deferred_until para sobreviver a reinícios e impedir que a mesma operação
+# monopolize rodadas seguidas.
 DEFERRED_SECONDS = 30
 # Marcador local de bloqueio definitivo (conflito de claim, contrato
-# inválido, resposta ambígua): valor alto enough para nunca ser selecionado
+# inválido, falha de autorização): valor alto enough para nunca ser selecionado
 # novamente, mas finito e diagnosticável no banco local.
 _BLOCKED = 1 << 62
+# Orçamento de descoberta: requisições GET por rodada de poll. Cada requisição
+# traz até DISCOVERY_PAGE_SIZE operações; o cursor persiste entre rodadas.
+DISCOVERY_PAGE_SIZE = 100
+DISCOVERY_BUDGET = 5
 
 
 def _now():
@@ -61,7 +66,7 @@ def _database(path):
     db = sqlite3.connect(path, timeout=10)
     os.chmod(path, 0o600)
     db.row_factory = sqlite3.Row
-    if db.execute('PRAGMA user_version').fetchone()[0] not in (0, 1, 2):
+    if db.execute('PRAGMA user_version').fetchone()[0] not in (0, 1, 2, 3):
         db.close()
         raise ConfigurationError('esquema da fila de recuperação não suportado')
     db.execute('PRAGMA journal_mode=WAL')
@@ -70,12 +75,19 @@ def _database(path):
       bond TEXT NOT NULL, id TEXT NOT NULL, claim TEXT NOT NULL,
       payload TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending',
       event TEXT, sent INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(bond,id))''')
-    # Migração transacional v1->v2: adiamento persistente por operação.
-    # Preserva registros/eventos existentes; default 0 = elegível.
     columns = {row[1] for row in db.execute('PRAGMA table_info(recovery_queue)').fetchall()}
+    # v1->v2: adiamento persistente por operação.
     if 'deferred_until' not in columns:
         db.execute('ALTER TABLE recovery_queue ADD COLUMN deferred_until INTEGER NOT NULL DEFAULT 0')
-    db.execute('PRAGMA user_version=2')
+    # v2->v3: seleção justa. evaluated_at registra quando a operação foi
+    # avaliada pela última vez; ORDER BY evaluated_at, rowid garante que
+    # operações nunca avaliadas (0) ou avaliadas há mais tempo sejam
+    # selecionadas primeiro, independentemente do intervalo entre rodadas.
+    if 'evaluated_at' not in columns:
+        db.execute('ALTER TABLE recovery_queue ADD COLUMN evaluated_at INTEGER NOT NULL DEFAULT 0')
+    db.execute('''CREATE TABLE IF NOT EXISTS discovery_cursor (
+      bond TEXT NOT NULL PRIMARY KEY, cursor TEXT)''')
+    db.execute('PRAGMA user_version=3')
     db.commit()
     return db
 
@@ -107,6 +119,15 @@ def _validate(operation, spec):
         raise ConfigurationError('contrato de operação inválido') from None
 
 
+def _get_cursor(db, bond):
+    row = db.execute('SELECT cursor FROM discovery_cursor WHERE bond=?', (bond,)).fetchone()
+    return row[0] if row else None
+
+
+def _set_cursor(db, bond, cursor):
+    db.execute('INSERT OR REPLACE INTO discovery_cursor(bond,cursor) VALUES(?,?)', (bond, cursor))
+
+
 def poll(central, queue):
     spec = load_central(central)
     locks = _locks(spec, 'poll')
@@ -129,15 +150,31 @@ def poll(central, queue):
             else:
                 summary['retry'] += 1
             db.commit()
-        status, body = _request(spec, 'GET', '/api/v1/agent/recovery', token)
-        if status != 200 or not isinstance(body, dict) or not isinstance(body.get('operations'), list):
-            summary['retry'] += 1
-            return summary
-        for operation in body['operations']:
-            _validate(operation, spec)
-            cursor = db.execute('INSERT OR IGNORE INTO recovery_queue(bond,id,claim,payload) VALUES(?,?,?,?)',
-                                (bond, operation['id'], str(uuid.uuid4()), json.dumps(operation)))
-            summary['received'] += cursor.rowcount
+        # Descoberta paginada: avança além das primeiras 100 operações com
+        # cursor persistente e orçamento por rodada. Retorna ao início ao
+        # concluir uma passagem (next_cursor=None). Deduplicação local
+        # preserva operações já conhecidas.
+        cursor = _get_cursor(db, bond)
+        for _ in range(DISCOVERY_BUDGET):
+            path = f'/api/v1/agent/recovery?limit={DISCOVERY_PAGE_SIZE}'
+            if cursor:
+                path += f'&after={cursor}'
+            status, body = _request(spec, 'GET', path, token)
+            if status != 200 or not isinstance(body, dict) or not isinstance(body.get('operations'), list):
+                summary['retry'] += 1
+                break
+            for operation in body['operations']:
+                _validate(operation, spec)
+                inserted = db.execute('INSERT OR IGNORE INTO recovery_queue(bond,id,claim,payload) VALUES(?,?,?,?)',
+                                      (bond, operation['id'], str(uuid.uuid4()), json.dumps(operation)))
+                summary['received'] += inserted.rowcount
+            db.commit()
+            next_cursor = body.get('next_cursor')
+            if not next_cursor:
+                cursor = None
+                break
+            cursor = next_cursor
+        _set_cursor(db, bond, cursor)
         db.commit()
         return summary
     finally:
@@ -156,9 +193,11 @@ def _finish(db, row, state, result=None, error=None):
 
 def _defer(db, row, until):
     """Adiamento persistente: a operação permanece pending mas é excluída da
-    seleção enquanto ``deferred_until > now``. ``until=0`` reabilita."""
-    db.execute('UPDATE recovery_queue SET deferred_until=? WHERE bond=? AND id=?',
-               (until, row['bond'], row['id']))
+    seleção enquanto ``deferred_until > now``. ``until=0`` reabilita.
+    ``evaluated_at`` é atualizado para seleção justa: operações avaliadas
+    há mais tempo (ou nunca) são selecionadas primeiro na próxima rodada."""
+    db.execute('UPDATE recovery_queue SET deferred_until=?,evaluated_at=? WHERE bond=? AND id=?',
+               (until, _now(), row['bond'], row['id']))
     db.commit()
 
 
@@ -216,7 +255,7 @@ def work(central, queue, policy, limit=1):
         now = _now()
         rows = db.execute(
             "SELECT * FROM recovery_queue WHERE bond=? AND state='pending' AND deferred_until<=? "
-            "ORDER BY rowid LIMIT ?", (bond, now, limit)).fetchall()
+            "ORDER BY evaluated_at, rowid LIMIT ?", (bond, now, limit)).fetchall()
         for row in rows:
             operation = json.loads(row['payload'])
             # Contrato inválido é bloqueio definitivo local: não aborta o
@@ -241,19 +280,24 @@ def work(central, queue, policy, limit=1):
             target = None
             try:
                 status, ack = _request(spec, 'POST', f"/api/v1/agent/recovery/{row['id']}/claim", token, {'claim_id': row['claim']})
-                # 409 = claim definitivo de outro executor: não tomar o claim,
-                # não repetir restauração. Bloqueio local permanente.
+                # 409 = conflito confirmado de claim de outro executor: não
+                # tomar o claim, não repetir restauração. Bloqueio local
+                # permanente. O claim_id local é preservado para diagnóstico.
                 if status == 409:
                     _defer(db, row, _BLOCKED)
                     summary['blocked'] += 1
                     continue
                 # Resposta ambígua/incompatível NUNCA autoriza efeito Restic.
-                # Transitória (0/429/5xx) adia; definitiva (4xx restante ou
-                # ack malformado) bloqueia localmente.
+                # Uma resposta ambígua (200 com ack malformado) não comprova
+                # conflito: a API pode ter registrado o claim corretamente
+                # antes de a resposta ser perdida ou alterada no transporte.
+                # Adia e reenvia o MESMO claim_id (idempotente na API).
+                # Transitória (0/429/5xx) também adia.
+                # Definitiva sem ambiguidade (401/403/404/400/422) bloqueia.
                 if (status != 200 or not isinstance(ack, dict)
                         or ack.get('id') != row['id'] or ack.get('claim_id') != row['claim']
                         or ack.get('state') != 'running'):
-                    if status == 0 or status == 429 or 500 <= status < 600:
+                    if status == 0 or status == 429 or 500 <= status < 600 or status == 200:
                         _defer(db, row, now + DEFERRED_SECONDS)
                         summary['retry'] += 1
                     else:

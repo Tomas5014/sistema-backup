@@ -124,7 +124,8 @@ class RecoveryWorkerTests(unittest.TestCase):
     def request(self, spec, method, path, token, payload=None):
         self.assertEqual(token, 'synthetic-token')
         if method == 'GET':
-            return 200, {'operations': self.remote}
+            after, limit = self._parse_query(path)
+            return self._paginate(after, limit)
         operation_id = path.split('/')[-2]
         if path.endswith('/claim'):
             if operation_id in self.claim_refuse:
@@ -135,6 +136,32 @@ class RecoveryWorkerTests(unittest.TestCase):
             self.drop_result = False
             return 0, None
         return 200, {'id': operation_id, 'state': payload['state']}
+
+    def _parse_query(self, path):
+        if '?' not in path:
+            return None, 100
+        query = path.split('?', 1)[1]
+        params = {}
+        for pair in query.split('&'):
+            if '=' in pair:
+                k, v = pair.split('=', 1)
+                params[k] = v
+        after = params.get('after') or None
+        limit = int(params.get('limit', 100))
+        return after, limit
+
+    def _paginate(self, after, limit):
+        if not self.remote:
+            return 200, {'operations': [], 'next_cursor': None}
+        if after is None:
+            start = 0
+        else:
+            ids = [op['id'] for op in self.remote]
+            start = ids.index(after) + 1 if after in ids else 0
+        page = self.remote[start:start + limit]
+        has_more = start + limit < len(self.remote)
+        next_cursor = page[-1]['id'] if page and has_more else None
+        return 200, {'operations': page, 'next_cursor': next_cursor}
 
     def enqueue(self, operation):
         self.remote = [operation]
@@ -399,11 +426,136 @@ class RecoveryWorkerTests(unittest.TestCase):
         op = self.operation()
         self.enqueue(op)
         self.claim_refuse[op['id']] = (200, {'id': op['id'], 'claim_id': 'not-the-claim', 'state': 'running'})
-        summary = self.work_limit(1)
-        self.assertEqual(summary['blocked'], 1)
+        with patch.object(recovery, 'DEFERRED_SECONDS', 10), patch.object(recovery, '_now', return_value=1000):
+            summary = self.work_limit(1)
+        self.assertEqual(summary['retry'], 1)
+        self.assertEqual(summary['blocked'], 0)
         self.assertEqual(summary['completed'], 0)
         self.assertEqual(self.adapter.restores, 0)
         self.assertEqual(self.state_of(op)[0], 'pending')
+
+    def test_fair_selection_with_long_interval_between_rounds(self):
+        task_a, task_b = str(uuid.uuid4()), str(uuid.uuid4())
+        op_a = self.operation_for(task_a)
+        op_b = self.operation_for(task_b)
+        self.points_for(task_a, task_b)
+        self.enqueue_many([op_a, op_b])
+        self.hold_task_lock(task_a)
+        with patch.object(recovery, 'DEFERRED_SECONDS', 30), patch.object(recovery, '_now', return_value=1000):
+            first = self.work_limit(1)
+        self.assertEqual(first['deferred'], 1)
+        self.assertEqual(self.state_of(op_a)[0], 'pending')
+        # 60s later: A's deferral (1030) expired, but B must be selected first
+        with patch.object(recovery, '_now', return_value=1060):
+            second = self.work_limit(1)
+        self.assertEqual(second['completed'], 1)
+        self.assertEqual(self.event(op_b)[0], 'succeeded')
+        self.assertEqual(self.state_of(op_a)[0], 'pending')
+
+    def test_busy_task_released_runs_without_duplication(self):
+        task_a, task_b = str(uuid.uuid4()), str(uuid.uuid4())
+        op_a = self.operation_for(task_a)
+        op_b = self.operation_for(task_b)
+        self.points_for(task_a, task_b)
+        self.enqueue_many([op_a, op_b])
+        holder = self.hold_task_lock(task_a)
+        with patch.object(recovery, 'DEFERRED_SECONDS', 10), patch.object(recovery, '_now', return_value=1000):
+            self.work_limit(1)
+        with patch.object(recovery, '_now', return_value=1011):
+            summary = self.work_limit(1)
+        self.assertEqual(summary['completed'], 1)
+        self.assertEqual(self.event(op_b)[0], 'succeeded')
+        holder.close()
+        with patch.object(recovery, '_now', return_value=1021):
+            summary = self.work_limit(1)
+        self.assertEqual(summary['completed'], 1)
+        self.assertEqual(self.event(op_a)[0], 'succeeded')
+        self.assertEqual(self.adapter.restores, 2)
+
+    def test_ambiguous_ack_then_valid_ack_single_restore(self):
+        op = self.operation()
+        self.enqueue(op)
+        self.claim_refuse[op['id']] = (200, {'id': op['id'], 'claim_id': 'not-the-claim', 'state': 'running'})
+        with patch.object(recovery, 'DEFERRED_SECONDS', 10), patch.object(recovery, '_now', return_value=1000):
+            summary = self.work_limit(1)
+        self.assertEqual(summary['retry'], 1)
+        self.assertEqual(self.adapter.restores, 0)
+        self.assertEqual(self.state_of(op)[0], 'pending')
+        del self.claim_refuse[op['id']]
+        with patch.object(recovery, '_now', return_value=1011):
+            summary = self.work_limit(1)
+        self.assertEqual(summary['completed'], 1)
+        self.assertEqual(self.adapter.restores, 1)
+        self.assertEqual(self.event(op)[0], 'succeeded')
+
+    def test_lost_claim_response_retries_same_claim(self):
+        op = self.operation()
+        self.enqueue(op)
+        self.claim_refuse[op['id']] = (0, None)
+        with patch.object(recovery, 'DEFERRED_SECONDS', 10), patch.object(recovery, '_now', return_value=1000):
+            summary = self.work_limit(1)
+        self.assertEqual(summary['retry'], 1)
+        self.assertEqual(self.adapter.restores, 0)
+        with closing(sqlite3.connect(self.queue)) as db:
+            original_claim = db.execute('SELECT claim FROM recovery_queue WHERE id=?',
+                                         (op['id'],)).fetchone()[0]
+        del self.claim_refuse[op['id']]
+        with patch.object(recovery, '_now', return_value=1011):
+            summary = self.work_limit(1)
+        self.assertEqual(summary['completed'], 1)
+        self.assertEqual(self.adapter.restores, 1)
+        with closing(sqlite3.connect(self.queue)) as db:
+            final_claim = db.execute('SELECT claim FROM recovery_queue WHERE id=?',
+                                     (op['id'],)).fetchone()[0]
+        self.assertEqual(final_claim, original_claim)
+
+    def test_confirmed_claim_of_other_executor_no_takeover(self):
+        op = self.operation()
+        self.enqueue(op)
+        self.claim_refuse[op['id']] = (409, None)
+        with patch.object(recovery, 'DEFERRED_SECONDS', 10), patch.object(recovery, '_now', return_value=1000):
+            summary = self.work_limit(1)
+        self.assertEqual(summary['blocked'], 1)
+        self.assertEqual(self.adapter.restores, 0)
+        self.assertEqual(self.state_of(op)[0], 'pending')
+        with patch.object(recovery, '_now', return_value=2000):
+            summary = self.work_limit(1)
+        self.assertEqual(summary['completed'], 0)
+        self.assertEqual(self.adapter.restores, 0)
+
+    def test_pagination_discovers_beyond_100_operations(self):
+        task_a = str(uuid.uuid4())
+        task_b = str(uuid.uuid4())
+        ops = [self.operation_for(task_a) for _ in range(100)]
+        op_b = self.operation_for(task_b)
+        ops.append(op_b)
+        self.points_for(task_a, task_b)
+        self.remote = ops
+        summary = recovery.poll(self.central, self.queue)
+        self.assertEqual(summary['received'], 101)
+        self.hold_task_lock(task_a)
+        first = self.work_limit(100)
+        self.assertEqual(first['deferred'], 100)
+        self.assertEqual(first['completed'], 0)
+        # B has evaluated_at=0, A ops have evaluated_at>0: B selected first
+        second = self.work_limit(100)
+        self.assertEqual(second['completed'], 1)
+        self.assertEqual(self.event(op_b)[0], 'succeeded')
+
+    def test_pagination_continues_between_rounds_with_budget(self):
+        task = str(uuid.uuid4())
+        ops = [self.operation_for(task) for _ in range(250)]
+        self.points_for(task)
+        self.remote = ops
+        with patch.object(recovery, 'DISCOVERY_BUDGET', 2):
+            first = recovery.poll(self.central, self.queue)
+        self.assertEqual(first['received'], 200)
+        with patch.object(recovery, 'DISCOVERY_BUDGET', 2):
+            second = recovery.poll(self.central, self.queue)
+        self.assertEqual(second['received'], 50)
+        with closing(sqlite3.connect(self.queue)) as db:
+            count = db.execute('SELECT COUNT(*) FROM recovery_queue').fetchone()[0]
+        self.assertEqual(count, 250)
 
     def test_no_eligible_operations_terminates_quickly(self):
         task_a = str(uuid.uuid4())

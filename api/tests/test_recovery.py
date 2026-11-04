@@ -156,3 +156,34 @@ def test_pending_operations_are_listed_before_running(client, admin_headers, age
     assert states == ["pending", "running"]
     assert operations[0]["id"] == pending["id"]
     assert operations[1]["id"] == first["id"]
+
+
+def test_pagination_discovers_beyond_first_page(client, admin_headers, agent):
+    """Operações além da primeira página (100) devem ser descobertas via
+    cursor. Prova com PostgreSQL real: 3 páginas de 50, cursor estável."""
+    task_id = setup(client, admin_headers, agent)
+    ids = []
+    for _ in range(150):
+        ids.append(request(client, admin_headers, task_id).json()["id"])
+    page = client.get("/api/v1/agent/recovery?limit=50", headers=agent["headers"]).json()
+    assert len(page["operations"]) == 50
+    assert page["next_cursor"] is not None
+    seen = {op["id"] for op in page["operations"]}
+    cursor = page["next_cursor"]
+    while cursor:
+        page = client.get(f"/api/v1/agent/recovery?limit=50&after={cursor}",
+                          headers=agent["headers"]).json()
+        for op in page["operations"]:
+            assert op["id"] not in seen
+            seen.add(op["id"])
+        cursor = page["next_cursor"]
+    assert len(seen) == 150
+    assert seen == set(ids)
+
+
+def test_pagination_cursor_invalid_returns_404(client, admin_headers, agent):
+    task_id = setup(client, admin_headers, agent)
+    request(client, admin_headers, task_id)
+    bad = uuid.uuid4()
+    response = client.get(f"/api/v1/agent/recovery?after={bad}", headers=agent["headers"])
+    assert response.status_code == 404

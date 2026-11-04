@@ -8,10 +8,11 @@ import re
 import uuid
 from typing import Literal
 
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, model_validator
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
+from datetime import datetime
 
 from .auth import csrf_guard, require_agent, require_viewer
 from .db import session
@@ -211,16 +212,31 @@ def register_recovery(app, require_admin_identity):
         return [_out(row) for row in rows]
 
     @app.get("/api/v1/agent/recovery")
-    def agent_operations(agent: Agent = Depends(require_agent), db: Session = Depends(session)):
-        # Pendentes antes de running: operações já reivindicadas (running) são
-        # rastreadas localmente pelo agente e não devem ocupar a janela de
-        # descoberta, escondendo novas pendentes. Sem expiração de claim —
-        # running permanece listável, mas após as pendentes.
+    def agent_operations(agent: Agent = Depends(require_agent), db: Session = Depends(session),
+                         after: uuid.UUID | None = Query(default=None),
+                         limit: int = Query(default=100, ge=1, le=100)):
+        # Paginação por cursor estável: pendentes antes de running; dentro de
+        # cada estado, ordenação por (created_at, id). Cursor = último id da
+        # página. Permite descoberta além das primeiras 100 operações sem
+        # consulta ilimitada. Isolamento por agente autenticado.
+        params = {"agent": agent.id, "limit": limit}
+        if after is not None:
+            params["after"] = str(after)
+            anchor = db.execute(text(
+                "SELECT created_at, id FROM recovery_operations WHERE id=:after AND agent_id=:agent"
+            ), {"after": str(after), "agent": agent.id}).mappings().first()
+            if anchor is None:
+                raise HTTPException(404, "cursor inexistente")
+            params["anchor_created"] = anchor["created_at"]
+            params["anchor_id"] = anchor["id"]
         rows = db.execute(text(
             "SELECT * FROM recovery_operations WHERE agent_id=:agent AND state IN ('pending','running') "
-            "ORDER BY (state='running'), created_at, id LIMIT 100"
-        ), {"agent": agent.id}).mappings()
-        return {"operations": [_out(row, agent=True) for row in rows]}
+            + ("AND (created_at, id) > (:anchor_created, :anchor_id) " if after is not None else "")
+            + "ORDER BY (state='running'), created_at, id LIMIT :limit"
+        ), params).mappings()
+        result = [_out(row, agent=True) for row in rows]
+        next_cursor = result[-1]["id"] if len(result) == limit else None
+        return {"operations": result, "next_cursor": next_cursor}
 
     def locked_operation(db, operation_id, agent_id):
         row = db.execute(text(

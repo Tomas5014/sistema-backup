@@ -2535,3 +2535,91 @@ SHA: ver `git log` ao final.
 - E2E Playwright não reexecutado (ver acima).
 - `DEFERRED_SECONDS=30` é constante; não configurável por operação.
 - `_BLOCKED` é marcador local; nenhuma UI de diagnóstico no portal.
+
+---
+
+## 2026-11-04 — Correção dos três problemas restantes de progresso
+
+### Problemas corrigidos
+
+1. **Seleção justa independentemente do intervalo entre rodadas**: o
+   adiamento de 30s não garantia justiça se o worker rodava a cada 60s — A
+   expirava e era re-selecionada antes de B. Correção: seleção ordena por
+   `(evaluated_at, rowid)`, então operações nunca avaliadas ou avaliadas há
+   mais tempo são selecionadas primeiro, independentemente da frequência.
+2. **ACK ambíguo recuperável**: resposta 200 com ack malformado era marcada
+   `_BLOCKED` (permanente). Correção: adia por `DEFERRED_SECONDS` e reenvia
+   o MESMO `claim_id` (idempotente na API). Um ack válido posterior autoriza
+   o efeito; um 409 confirmado de outro executor continua bloqueio local.
+3. **Descoberta além de 100 operações**: API limitava listagem a 100; B na
+   posição 101 nunca chegava ao SQLite. Correção: paginação por cursor
+   (`after`/`limit`/`next_cursor`) na API; poll persiste cursor no SQLite
+   (`discovery_cursor`) e continua entre rodadas com orçamento de
+   `DISCOVERY_BUDGET` (5) requisições.
+
+### Arquivos alterados
+
+- `src/macip_backup/recovery.py`: `evaluated_at`, `DISCOVERY_BUDGET`,
+  `DISCOVERY_PAGE_SIZE`, seleção justa, ACK ambíguo → defer, paginação com
+  cursor persistente, migração v2→v3.
+- `api/src/macip_backup_api/recovery_routes.py`: paginação por cursor
+  (`after`/`limit`/`next_cursor`), validação de cursor.
+- `tests/test_recovery_worker.py`: 8 novas regressões (seleção justa com
+  intervalo de 60s, liberação sem duplicação, ACK ambíguo→válido, perda de
+  claim→reenvio mesmo claim, 409 sem tomada, paginação além de 100,
+  continuação entre rodadas com orçamento). Mock `_paginate` simula cursor.
+- `api/tests/test_recovery.py`: 2 novas regressões (paginação 150 ops em 3
+  páginas, cursor inválido 404).
+- `docs/recuperacao-portal-linux.md`: seleção justa, ACK ambíguo, paginação,
+  migração v3.
+- `registro-trabalho.md`: esta entrada.
+
+### Migração
+
+Fila SQLite v2→v3: `ALTER TABLE recovery_queue ADD COLUMN evaluated_at
+INTEGER NOT NULL DEFAULT 0` + `CREATE TABLE discovery_cursor`. Transacional,
+preserva registros/claims/eventos/resultados. SQLite principal intacto.
+Testado com banco v2 preenchido (3 registros preservados, evaluated_at=0,
+discovery_cursor criada).
+
+### Regressões que falhavam antes e passaram depois
+
+- `test_fair_selection_with_long_interval_between_rounds`
+- `test_busy_task_released_runs_without_duplication`
+- `test_ambiguous_ack_then_valid_ack_single_restore`
+- `test_lost_claim_response_retries_same_claim`
+- `test_confirmed_claim_of_other_executor_no_takeover`
+- `test_pagination_discovers_beyond_100_operations`
+- `test_pagination_continues_between_rounds_with_budget`
+- `test_ambiguous_claim_response_starts_no_restic_effect` (atualizada:
+  espera retry, não blocked)
+- `test_pagination_discovers_beyond_first_page` (API/PG)
+- `test_pagination_cursor_invalid_returns_404` (API/PG)
+
+### Comandos e resultados
+
+- Worker/CLI/lock: 40/40 OK.
+- API/PG17 real: 183/183 OK (195,94s).
+- Migração v2→v3 com banco preenchido: OK.
+
+### Integração real
+
+E2E Playwright (`portal/e2e/recovery.spec.ts`) aprovado: 1/1 em 15,2s com
+Chrome + API + PG17 + Restic reais. Backup, consulta pelo portal, solicitação
+de recuperação, execução pelo worker, confirmação, comparação de conteúdo
+e exclusão preservada. Build do portal gerado (`npm run build`).
+
+### Recursos descartáveis e limpeza
+
+Contêiner `macip-api-test-pg` (PG17, porta 55432) reutilizado, permanece
+ativo. Build do portal em `portal/dist/` (gerado pelo E2E). Nenhum dado
+operacional acessado.
+
+### Branch e SHA
+
+Branch: `fix/recovery-queue-fairness` (base: `ebd251b`).
+
+### Limitações e pendências
+
+- `DEFERRED_SECONDS=30` e `DISCOVERY_BUDGET=5` são constantes.
+- Sem UI de diagnóstico no portal para operações bloqueadas/adiadas.
