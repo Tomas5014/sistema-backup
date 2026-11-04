@@ -58,20 +58,12 @@ def _now() -> str:
 
 
 def task_lock_directory() -> Path:
-    """MACIP_LOCK_DIR absoluto, senão MACIP_STATE/locks ou default."""
-    override = os.environ.get("MACIP_LOCK_DIR")
-    if override:
-        directory = Path(override)
-        if not directory.is_absolute():
-            raise ResticError("diretório de locks deve ser absoluto")
-        return directory
-    state = os.environ.get("MACIP_STATE")
-    if state:
-        directory = Path(state) / "locks"
-        if not directory.is_absolute():
-            raise ResticError("diretório de locks deve ser absoluto")
-        return directory
-    return Path.home() / ".local" / "state" / "macip-backup" / "locks"
+    """Identidade registrada prevalece também sem launcher."""
+    from .lock_identity import resolve_lock_directory
+    try:
+        return resolve_lock_directory()
+    except (ValueError, OSError) as error:
+        raise ResticError(str(error)) from None
 
 
 def cache_directory() -> Path:

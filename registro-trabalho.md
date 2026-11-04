@@ -2361,3 +2361,22 @@ instalações foram limpas automaticamente, inclusive credenciais e repositório
 Comando de prova: `python3 /tmp/macip-review1-verify.py` (helper descartável).
 O registro dessa prova é incorporado antes de regenerar o artefato definitivo
 em dist/linux-0.3.0rc1-review1-final, sem autorreferência ao SHA final.
+
+## Correção da identidade registrada de manutenção
+
+Base 652ec0e, branch fix/registered-maintenance-lock. O executor ignorava
+lock_directory sem override; Python instalado direto podia contornar EX
+registrado. Resolvedor único stdlib lock_identity identifica install.json
+também pelo prefixo instalado, usa o registro na ausência de override e recusa
+divergência/manifesto inválido sem expor conteúdo. Fluxo de desenvolvimento
+sem manifesto continua válido. Scripts não copiam mais a regra de validação:
+instalação executa o módulo do wheel, uninstall/backup reutilizam módulo.
+Regressões cobrem entrada manual pública sob EX registrado, SH em A contra
+manutenção, caminhos com espaços, ausência/override divergente, manifesto
+inválido, preservação de arquivos e uso sem instalação. Nenhuma mudança de
+API, portal ou contrato pertence a esta candidata corrigida.
+
+Gates: CLI/distribuição/manual/identidade/unidades/cancelamento 84/84,
+37,812 s. Pacote/instalação/credenciais/backup/identidade: 31 aprovações e
+uma falha de restore em lchown no sandbox (32 testes, 324,710 s). A repetição
+desse cenário fora do sandbox é necessária; nenhuma asserção foi removida.

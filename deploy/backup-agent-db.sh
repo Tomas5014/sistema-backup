@@ -3,21 +3,18 @@
 set -euo pipefail
 umask 077
 MACIP_STATE="${MACIP_STATE:-$HOME/.local/state/macip-backup}"
+MACIP_HOME="${MACIP_HOME:-$HOME/.local/share/macip-backup}"
 LOCKS="${MACIP_LOCK_DIR:-$MACIP_STATE/locks}"
 [[ "$LOCKS" = /* ]] || { echo 'erro: diretório de locks deve ser absoluto' >&2; exit 1; }
 [[ -f "$MACIP_STATE/agent.db" ]] || { echo 'erro: banco do agente ausente' >&2; exit 1; }
 TARGET="${1:?uso: backup-agent-db.sh arquivo-novo}"
-python3 - "${MACIP_HOME:-$HOME/.local/share/macip-backup}/install.json" "$LOCKS" "$MACIP_STATE" <<'PY'
-import json, sys
-from pathlib import Path
-manifest = Path(sys.argv[1])
-if manifest.is_file():
-    previous = json.loads(manifest.read_text()).get('lock_directory')
-    if not previous and Path(sys.argv[2]).resolve() != (Path(sys.argv[3]) / 'locks').resolve():
-        sys.exit('erro: instalação legada sem identidade de lock customizado; manutenção recusada')
-    if previous and Path(previous).resolve() != Path(sys.argv[2]).resolve():
-        sys.exit('erro: diretório de locks diverge da instalação existente')
-PY
+export MACIP_HOME MACIP_STATE
+resolver="$(dirname "$0")/../src/macip_backup/lock_identity.py"
+if [ -f "$resolver" ]; then
+  LOCKS="$(python3 "$resolver" --maintenance)"
+else
+  LOCKS="$("$MACIP_HOME/current/bin/python" -m macip_backup.lock_identity --maintenance)"
+fi
 mkdir -p "$LOCKS"
 exec 9>"$LOCKS/maintenance.lock"
 flock -n 9 || { echo 'erro: execução ou manutenção em andamento' >&2; exit 1; }

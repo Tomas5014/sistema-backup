@@ -116,6 +116,43 @@ def _task_config(source: Path, repository: Path, task_id: str) -> dict:
     "flock ausente",
 )
 class InstallFlowTests(unittest.TestCase):
+    def test_manual_installed_python_uses_registered_lock_without_override(self):
+        registered = self.root / 'registered locks with spaces'
+        self.env['MACIP_LOCK_DIR'] = str(registered)
+        self.assertEqual(self._install('--commit', 'registered').returncode, 0)
+        _, config = self._write_task()
+        python = self.macip_home / 'current/bin/python'
+        credentials = self.config_dir / 'agent.env'
+        credentials.write_text('MACIP_RESTIC_PASSWORD=synthetic\n')
+        credentials.chmod(0o600)
+        env = dict(self.env)
+        del env['MACIP_LOCK_DIR']
+        command = [str(python), '-m', 'macip_backup.manual', '--env-file', str(credentials),
+                   '--', 'run', str(config)]
+        with (registered / 'maintenance.lock').open('a') as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            refused = subprocess.run(command, env=env, capture_output=True, text=True, timeout=10)
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertIn('manutenção', refused.stderr)
+            self.assertFalse((self.state_dir / 'locks').exists())
+            self.assertFalse((self.root / 'repo').exists())
+        bad_env = dict(env, MACIP_LOCK_DIR=str(self.root / 'wrong locks'))
+        refused = subprocess.run(command, env=bad_env, capture_output=True, text=True, timeout=10)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertFalse((self.root / 'wrong locks').exists())
+        holder = subprocess.Popen([str(python), '-u', '-c',
+            'from macip_backup.agent import acquire_task_lock; import time; '
+            'locks=acquire_task_lock("proof"); print("ready", flush=True); time.sleep(60)'],
+            env=env, stdout=subprocess.PIPE, text=True)
+        before = (self.bin.read_bytes(), credentials.read_bytes())
+        try:
+            self.assertEqual(holder.stdout.readline().strip(), 'ready')
+            self.assertNotEqual(self._install().returncode, 0)
+            self.assertNotEqual(self._uninstall().returncode, 0)
+            self.assertEqual(before, (self.bin.read_bytes(), credentials.read_bytes()))
+        finally:
+            holder.terminate(); holder.wait(timeout=5); holder.stdout.close()
+
     def test_custom_lock_directory_shared_by_executor_install_backup_and_uninstall(self):
         custom = self.root / 'custom locks with spaces'
         self.env['MACIP_LOCK_DIR'] = str(custom)

@@ -61,17 +61,15 @@ systemctl --user status >/dev/null 2>&1 || warn "systemd --user inativo — agen
 command -v mount.cifs >/dev/null || warn "mount.cifs ausente — necessário apenas para destino SMB"
 
 # ---- lock de manutenção: exclusividade de ponta a ponta --------------
-python3 - "$MACIP_HOME/install.json" "$LOCKS" "$MACIP_STATE" <<'PY'
-import json, sys
-from pathlib import Path
-manifest = Path(sys.argv[1])
-if manifest.is_file():
-    previous = json.loads(manifest.read_text()).get('lock_directory')
-    if not previous and Path(sys.argv[2]).resolve() != (Path(sys.argv[3]) / 'locks').resolve():
-        sys.exit('erro: instalação legada sem identidade de lock customizado; manutenção recusada')
-    if previous and Path(previous).resolve() != Path(sys.argv[2]).resolve():
-        sys.exit('erro: diretório de locks diverge da instalação existente')
+export MACIP_HOME MACIP_STATE
+LOCKS="$(python3 - "$WHEEL" <<'PY'
+import sys, zipfile
+with zipfile.ZipFile(sys.argv[1]) as wheel:
+    code = wheel.read('macip_backup/lock_identity.py')
+sys.argv = ['lock_identity', '--maintenance']
+exec(compile(code, 'lock_identity.py', 'exec'), {'__name__': '__main__'})
 PY
+)"
 mkdir -p "$LOCKS"
 exec 9>"$LOCKS/maintenance.lock"
 flock -n 9 || die "execução ou outra manutenção em andamento — tente mais tarde"

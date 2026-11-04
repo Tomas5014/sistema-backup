@@ -163,3 +163,15 @@ sandbox falhou em lchown (identidade/permissões); não foi ocultada nem motivou
 mudança no adaptador. Extração, instalação, credenciais e repositório de teste
 foram limpos. O pacote definitivo é regenerado do commit documental final,
 em diretório novo `dist/linux-0.3.0rc1-review1-final`.
+
+## Correção posterior da identidade registrada
+
+Na base 652ec0e, executar o Python instalado diretamente podia escolher
+STATE/locks quando MACIP_LOCK_DIR estava ausente, ignorando install.json.
+O resolvedor único agora lê a identidade registrada, inclusive pelo prefixo
+do Python instalado. Ausência de override usa o registro; divergência ou
+manifesto inválido recusa antes de efeitos. Sem instalação registrada,
+desenvolvimento continua usando ambiente/default sem criar manifesto.
+Instalação, desinstalação e backup reutilizam esse mesmo código. O instalador
+lê o resolvedor do wheel selecionado, sem depender da instalação global.
+O pacote corrigido dessa etapa não inclui a funcionalidade futura de portal.

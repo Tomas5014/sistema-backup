@@ -181,7 +181,11 @@ stack isolada compatível, evitando reabrir API candidata sobre esquema antigo.
    O instalador faz backup SQLite online antes da troca, mas isso não inclui
    config, journals, credenciais ou units. Faça custódia privada conjunta
    desses arquivos e do wheel/launcher anterior. Regra única: MACIP_LOCK_DIR
-   absoluto, senão MACIP_STATE/locks, senão default por usuário. Exporte o
+   registrado em install.json prevalece inclusive sem MACIP_LOCK_DIR. Um
+   override divergente ou manifesto inválido recusa execução e manutenção.
+   Sem registro, use MACIP_LOCK_DIR absoluto, MACIP_STATE/locks ou default.
+   A regra é implementada uma vez em macip_backup.lock_identity e usada pelo
+   executor, distribuição, entrada manual e scripts. Exporte o
    mesmo layout em backup, instalação e desinstalação. Instalador fixa a
    escolha no launcher e install.json; divergência posterior é recusada.
    Não exclua/substitua maintenance.lock, pois isso mudaria sua identidade.
