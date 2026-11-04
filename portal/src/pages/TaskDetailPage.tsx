@@ -17,6 +17,7 @@ import {
 import { useAuth } from "../auth";
 import { EmptyState } from "../components/common";
 import TaskForm, { formFromConfig } from "./TaskForm";
+import RecoverySection from "./RecoverySection";
 
 /** Detalhe + edição com concorrência otimista + histórico + exportar. */
 export default function TaskDetailPage() {
@@ -417,6 +418,9 @@ export default function TaskDetailPage() {
             </>
           ) : null}
 
+          <RecoverySection key={`${shownTask.id}:${shownTask.revision.revision}`}
+            taskId={shownTask.id} revision={shownTask.revision.revision} admin={admin}
+            destinations={((shownTask.revision.config.spec as {destinations?: {id: string; name: string}[]})?.destinations ?? [])} />
           <h2>Revisões</h2>
           {revisions === null ? <p>Carregando…</p> : null}
           {revisions !== null && revisions.length === 0 ? (

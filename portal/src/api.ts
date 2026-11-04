@@ -377,6 +377,24 @@ export interface TaskDetail extends TaskRow {
   unchanged?: boolean;
 }
 
+export interface RecoverySnapshot { id: string; time?: string; hostname?: string; tags: string[] }
+export interface RecoveryOperation {
+  id: string; kind: 'snapshots' | 'restore'; destination_id: string; revision: number;
+  state: 'pending' | 'running' | 'succeeded' | 'failed' | 'interrupted';
+  result?: { snapshots?: RecoverySnapshot[]; target?: string } | null;
+  error?: string | null; query_id?: string | null; snapshot_id?: string | null;
+}
+export interface RecoveryRequest {
+  id: string; kind: 'snapshots' | 'restore'; destination_id: string;
+  revision?: number; query_id?: string; snapshot_id?: string;
+}
+export async function listRecovery(taskId: string): Promise<RecoveryOperation[]> {
+  return (await apiFetch(`/api/v1/tasks/${taskId}/recovery`)).json();
+}
+export async function createRecovery(taskId: string, body: RecoveryRequest): Promise<RecoveryOperation> {
+  return (await apiFetch(`/api/v1/tasks/${taskId}/recovery`, {method: 'POST', body, csrf: true})).json();
+}
+
 export async function createTask(
   agentId: string,
   config: Record<string, unknown>,

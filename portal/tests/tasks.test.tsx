@@ -83,6 +83,7 @@ function baseRoutes(op: typeof OPERATOR | typeof VIEWER = OPERATOR) {
     "GET /api/v1/clients/cli-1/agents": () => json([AGENT]),
     "GET /api/v1/tasks": () => json([TASK]),
     "GET /api/v1/tasks/task-1": () => json(TASK_DETAIL),
+    "GET /api/v1/tasks/task-1/recovery": () => json([]),
     "GET /api/v1/tasks/task-1/revisions": () => json([
       { revision: 1, contract_version: 1, author_kind: "operator",
         author_ref: "anita", created_at: "x", current: true },
