@@ -2422,8 +2422,14 @@ Casos negativos de API/Restic são controlados/simulados conforme runbook.
 Recursos: contêiner exclusivo macip-recovery-pg17-20261104-01 (PG17), banco
 macip_recovery_test, servidores API8180/preview4173/Chrome e diretórios
 temporários de agente/repositório/credenciais. O E2E limpa arquivos em finally;
-o contêiner e seus volumes são removidos ao fechar a prova. A imagem PG16
-inicial descartável foi removida antes de usar PG17. Nenhuma infraestrutura
+o contêiner e seus volumes são removidos ao fechar a prova. O contêiner PG16
+inicial descartável foi removido antes de usar PG17. Nenhuma infraestrutura
 operacional ou timer preexistente foi acessado; timers antigos continuam
 confirmados inactive/disabled pelo operador. Roteiro e limites em
 docs/recuperacao-portal-linux.md; sem aprovação operacional nem push/tag/deploy.
+
+Limpeza concluída: contêiner PG17 e volume anônimo removidos; imagem/tag PG17
+baixada para a prova removida. Portas 8180 e 4173 recusam conexão após teardown
+do Playwright. Helper temporário do pacote removido; diretórios de extração,
+agente e repositório dos testes foram limpos em finally. Pacotes anteriores e
+o pacote corrigido 11a589c permanecem preservados em dist.
