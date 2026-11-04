@@ -1488,6 +1488,8 @@ def create_app() -> FastAPI:
             "execution_id": payload.execution_id,
         }
 
+    from .recovery_routes import register_recovery
+    register_recovery(app, require_admin_identity)
     return app
 
 

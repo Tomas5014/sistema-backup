@@ -243,6 +243,24 @@ MIGRATIONS: list[tuple[int, str, str]] = [
     ),
 ]
 
+MIGRATIONS.append((7, 'asynchronous-linux-recovery', '''
+CREATE TABLE IF NOT EXISTS recovery_operations (
+ id uuid PRIMARY KEY, client_id uuid NOT NULL REFERENCES clients(id),
+ agent_id uuid NOT NULL REFERENCES agents(id), task_id uuid NOT NULL REFERENCES tasks(id),
+ revision integer NOT NULL, kind text NOT NULL CHECK(kind IN ('snapshots','restore')),
+ destination_id text NOT NULL, snapshot_id text, query_id uuid REFERENCES recovery_operations(id),
+ config jsonb NOT NULL, config_hash text NOT NULL,
+ requester_kind text NOT NULL, requester_ref text NOT NULL,
+ claim_id uuid, state text NOT NULL DEFAULT 'pending'
+ CHECK(state IN ('pending','running','succeeded','failed','interrupted')),
+ result jsonb, error text, created_at timestamptz NOT NULL DEFAULT now(),
+ started_at timestamptz, finished_at timestamptz,
+ UNIQUE(query_id, snapshot_id),
+ FOREIGN KEY(task_id, revision) REFERENCES task_revisions(task_id, revision)
+);
+CREATE INDEX IF NOT EXISTS ix_recovery_agent_pending ON recovery_operations(agent_id, state);
+'''))
+
 _ADVISORY_KEY = 727_203_001
 
 
