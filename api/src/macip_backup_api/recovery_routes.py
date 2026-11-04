@@ -212,9 +212,13 @@ def register_recovery(app, require_admin_identity):
 
     @app.get("/api/v1/agent/recovery")
     def agent_operations(agent: Agent = Depends(require_agent), db: Session = Depends(session)):
+        # Pendentes antes de running: operações já reivindicadas (running) são
+        # rastreadas localmente pelo agente e não devem ocupar a janela de
+        # descoberta, escondendo novas pendentes. Sem expiração de claim —
+        # running permanece listável, mas após as pendentes.
         rows = db.execute(text(
             "SELECT * FROM recovery_operations WHERE agent_id=:agent AND state IN ('pending','running') "
-            "ORDER BY created_at,id LIMIT 100"
+            "ORDER BY (state='running'), created_at, id LIMIT 100"
         ), {"agent": agent.id}).mappings()
         return {"operations": [_out(row, agent=True) for row in rows]}
 

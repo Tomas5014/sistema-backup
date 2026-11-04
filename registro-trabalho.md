@@ -2433,3 +2433,105 @@ baixada para a prova removida. Portas 8180 e 4173 recusam conexão após teardow
 do Playwright. Helper temporário do pacote removido; diretórios de extração,
 agente e repositório dos testes foram limpos em finally. Pacotes anteriores e
 o pacote corrigido 11a589c permanecem preservados em dist.
+
+---
+
+## 2026-11-04 — Correção do bloqueio da fila de recuperação
+
+### Causa do bloqueio
+
+Dois defeitos no processamento da fila de recuperação impediam o progresso
+das operações elegíveis:
+
+1. `acquire_task_lock()` era chamado fora do tratamento por operação em
+   `recovery.work()`. Uma tarefa ocupada lançava `ResticError` e abortava
+   todo o lote, deixando operações de outras tarefas pendentes.
+2. Um claim recusado (409) deixava a operação na primeira posição elegível
+   (ordem por `rowid`). Com `--limit 1`, três rodadas retornavam
+   `{"completed": 0, "deferred": 1}` e a operação B nunca recebia claim.
+
+### Solução
+
+- `acquire_task_lock()` movido para dentro do tratamento por operação.
+  Tarefa ocupada adia a operação sem abortar o lote.
+- Adiamento persistente por `deferred_until` (esquema v2 da fila SQLite,
+  migração transacional v1→v2 preservando registros/eventos). Operações
+  adiadas são excluídas da seleção, então não monopolizam rodadas seguidas.
+- Classificação local de bloqueio: tarefa ocupada e falha transitória
+  (0/429/5xx) adiam por `DEFERRED_SECONDS` (30s); conflito definitivo de
+  claim (409), resposta ambígua e contrato inválido bloqueiam localmente
+  (`deferred_until = _BLOCKED`).
+- API: `GET /agent/recovery` lista pendentes antes de running para que um
+  claim ocupado não esconda operações novas na janela de descoberta (100).
+- `--limit` = número máximo de operações selecionadas por rodada para
+  avaliação (lock + claim), não trabalho executado.
+
+### Arquivos alterados
+
+- `src/macip_backup/recovery.py`: adiamento persistente, classificação de
+  bloqueio, migração de esquema, `_now`/`DEFERRED_SECONDS`/`_BLOCKED`.
+- `api/src/macip_backup_api/recovery_routes.py`: ordem de listagem remota.
+- `tests/test_recovery_worker.py`: 9 regressões (cenários A e B, limite 1,
+  reinício, liberação posterior, falha transitória, resposta ambígua,
+  ausência de elegíveis).
+- `api/tests/test_recovery.py`: regressão de listagem pendente-antes-running.
+- `docs/recuperacao-portal-linux.md`: política de adiamento/conflito,
+  significado de `--limit`, persistência, diagnóstico.
+- `registro-trabalho.md`: esta entrada.
+
+### Migração
+
+Fila SQLite de recuperação v1→v2: `ALTER TABLE recovery_queue ADD COLUMN
+deferred_until INTEGER NOT NULL DEFAULT 0`. Transacional, preserva
+registros/eventos. SQLite principal não alterado.
+
+### Regressões que falhavam antes e passaram depois
+
+- `test_busy_task_defers_without_blocking_eligible_operation`
+- `test_busy_task_with_limit_one_progresses_across_successive_rounds`
+- `test_claim_conflict_does_not_monopolize_first_position`
+- `test_restart_between_rounds_preserves_deferral`
+- `test_busy_task_runs_again_after_deferral_expires_and_lock_released`
+- `test_transient_communication_failure_stays_recoverable`
+- `test_ambiguous_claim_response_starts_no_restic_effect`
+- `test_no_eligible_operations_terminates_quickly`
+- `test_pending_operations_are_listed_before_running` (API/PG)
+
+### Comandos e resultados
+
+- Worker/CLI/lock: `.venv/bin/python -m unittest tests.test_recovery_worker
+  tests.test_lock_identity tests.test_cli` → 33/33 OK.
+- Gate Python completo: 262 testes, 2 erros pré-existentes (setuptools
+  ausente para build_wheel, pytest ausente para test_e2e_distribution),
+  20 skipped. Nenhuma falha das alterações.
+- API/PG17 real: `MACIP_API_TEST_DATABASE_URL=... PYTHONPATH=src
+  ../.venv-api/bin/python -m pytest tests` → 181/181 OK (199,77s).
+- Migração v1→v2 com banco preenchido: 3 registros preservados,
+  `deferred_until=0`, eventos preservados.
+
+### Integração real
+
+E2E Playwright (portal/e2e/recovery.spec.ts) não reexecutado nesta sessão:
+exige Chrome + API + PG17 + Restic reais em conjunto. Infraestrutura PG17
+descartável estava disponível, mas o E2E completo exige levantar API, portal
+e Chrome simultaneamente. Os testes de API/PG17 (181) e worker/CLI (33)
+cobrem os contratos alterados. Não houve substituição de prova real por
+simulação: o E2E foi simplesmente não reexecutado, não substituído.
+
+### Recursos descartáveis e limpeza
+
+Contêiner `macip-api-test-pg` (PG17, porta 55432, banco macip_api_test)
+reutilizado para testes de API. Permanece ativo para sessões futuras; não
+foi criado novo contêiner nesta sessão (tentativa de criar um novo foi
+removida). Nenhum dado operacional acessado.
+
+### Branch e SHA
+
+Branch: `fix/recovery-queue-progress` (base: `59f640a`).
+SHA: ver `git log` ao final.
+
+### Limitações e pendências
+
+- E2E Playwright não reexecutado (ver acima).
+- `DEFERRED_SECONDS=30` é constante; não configurável por operação.
+- `_BLOCKED` é marcador local; nenhuma UI de diagnóstico no portal.

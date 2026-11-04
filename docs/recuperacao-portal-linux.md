@@ -10,7 +10,9 @@ Migração PostgreSQL 7 adiciona recovery_operations sem remover tabelas/dados.
 API/portal anteriores não devem operar esse esquema: código antigo rejeita
 migrações futuras. Faça backup e ensaio antes da atualização; retorno exige
 compatibilidade ou restauração/reconciliação de escritas, conforme runbook.
-SQLite principal continua v7. A fila separada de recuperação usa esquema v1.
+SQLite principal continua v7. A fila separada de recuperação usa esquema v2
+(migração transacional v1→v2 adiciona `deferred_until INTEGER NOT NULL DEFAULT 0`;
+registros e eventos existentes são preservados).
 
 POST /api/v1/tasks/{task}/recovery registra intenção e retorna 202 e ID.
 Tipos exclusivos: snapshots e restore. Não executa Restic em HTTP. Admin
@@ -21,7 +23,9 @@ snapshot_id completo dessa consulta; herda configuração/revisão dela mesmo
 após edição da tarefa. Nenhuma senha/chave entra no contrato.
 
 GET /tasks/{task}/recovery mostra estados e resultados. GET /agent/recovery
-entrega apenas operações do agente autenticado. POST /agent/recovery/{id}/claim
+entrega apenas operações do agente autenticado, listando pendentes antes de
+running para que um claim ocupado não monopolize a janela de descoberta e
+esconda operações novas (limite 100). POST /agent/recovery/{id}/claim
 grava claim_id exclusivo; POST /agent/recovery/{id}/result confirma resultado.
 Identidades autenticadas e locks de linha protegem transições. Reenvio idêntico
 é idempotente; outro claim ou regressão de estado terminal é recusado.
@@ -68,6 +72,51 @@ Worker é exclusivo por agente e usa maintenance SH e lock da tarefa; manutenç�
 EX ou backup concorrente recusa execução sem consumir a intenção. Outra tarefa
 ou reconciliação pode progredir. A configuração fixada não depende de agenda
 ativa. Suspender uma tarefa não impede recuperação e restore não toca timers.
+
+## Seleção, adiamento e significado de --limit
+
+`--limit` = número máximo de operações selecionadas por rodada para avaliação
+(lock de tarefa + claim). Não é trabalho executado nem operações iniciadas:
+uma operação pode ser adiada sem consumir o limite de efeitos. Operações
+adiadas (tarefa ocupada, falha transitória) são excluídas da seleção por
+`deferred_until`, então um item inelegível nunca monopoliza rodadas seguidas
+— inclusive com `--limit 1`, a próxima rodada seleciona outra operação
+elegível. Não há loop infinito nem varredura ilimitada: a rodada processa
+apenas os itens selecionados e termina.
+
+Causa do bloqueio corrigido: `acquire_task_lock()` era chamado fora do
+tratamento por operação, então uma tarefa ocupada abortava todo o lote; e um
+claim recusado (409) deixava a operação na primeira posição elegível, impedindo
+que outras operações recebessem claim. Correção: adiamento persistente por
+`deferred_until` e classificação local de bloqueio.
+
+Política de adiamento/conflito:
+- **Tarefa temporariamente ocupada** (lock EX de outra execução): adia por
+  `DEFERRED_SECONDS` (30s). Permanece `pending`, intenção preservada. Após
+  liberar o lock e expirar o adiamento, volta a executar.
+- **Falha transitória de comunicação** (status 0/429/5xx): adia por
+  `DEFERRED_SECONDS`. Operação continua recuperável, sem sucesso falso.
+- **Conflito definitivo de claim** (409): bloqueio local permanente
+  (`deferred_until = _BLOCKED`). Não toma o claim de outro executor, não
+  repete restauração. Permanece diagnosticável no banco local.
+- **Resposta ambígua/incompatível** (ack malformado, 4xx restante): bloqueio
+  local permanente. Nenhum efeito Restic é iniciado.
+- **Contrato inválido** (ConfigurationError na validação): bloqueio local
+  permanente, sem tentar claim.
+- **Manutenção global ativa**: recusa o worker inteiro (lock SH no início),
+  sem efeito operacional, fila preservada.
+
+Persistência e retomada: `deferred_until` é gravado no SQLite antes de
+continuar, então reiniciar o processo não desfaz a classificação. Running
+órfão continua virando `interrupted/abandoned` e nunca é retomado. Resultados
+concluídos continuam sendo reenviados pelo poll sem repetir o efeito.
+
+Diagnóstico de operações bloqueadas: consulte a fila local
+(`SELECT id,state,deferred_until,event FROM recovery_queue WHERE deferred_until>0`).
+`deferred_until = _BLOCKED` (2^62) indica bloqueio definitivo; valor menor
+indica adiamento temporário e a operação voltará a ser selecionada após
+expirar. Não altere manualmente `deferred_until` para repetir restore cujo
+efeito pode já ter ocorrido.
 
 ## Efeitos, interrupções e resultados
 

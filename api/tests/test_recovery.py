@@ -139,3 +139,20 @@ def test_no_points_is_distinct_from_pending_and_failure(client, admin_headers, a
     assert request(client, admin_headers, task_id, "restore", query_id=operation["id"], snapshot_id=SNAPSHOT).status_code == 422
     listed = client.get(f"/api/v1/tasks/{task_id}/recovery", headers=admin_headers).json()
     assert listed[0]["state"] == "succeeded" and listed[0]["result"]["snapshots"] == []
+
+
+def test_pending_operations_are_listed_before_running(client, admin_headers, agent):
+    """Operações pendentes não podem ser escondidas por running: a janela
+    de descoberta do agente lista pendentes primeiro, para que um claim
+    ocupado não monopolize a primeira posição e impeça o progresso."""
+    task_id = setup(client, admin_headers, agent)
+    first = request(client, admin_headers, task_id).json()
+    claim_id = str(uuid.uuid4())
+    base = f"/api/v1/agent/recovery/{first['id']}"
+    assert client.post(base + "/claim", json={"claim_id": claim_id}, headers=agent["headers"]).status_code == 200
+    pending = request(client, admin_headers, task_id).json()
+    operations = client.get("/api/v1/agent/recovery", headers=agent["headers"]).json()["operations"]
+    states = [op["state"] for op in operations]
+    assert states == ["pending", "running"]
+    assert operations[0]["id"] == pending["id"]
+    assert operations[1]["id"] == first["id"]

@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import sqlite3
 import stat
+import time
 import uuid
 
 from .agent import acquire_task_lock, cache_directory, install_cancel_handlers, restore_signal_handlers, task_lock_directory
@@ -17,6 +18,20 @@ from .distribution import _request
 from .models import ConfigurationError, TaskSpec
 from .orchestrator import password_from_environment
 from .restic import ResticAdapter, ResticCancelledError, ResticError, ResticTimeoutError
+
+
+# Adiamento temporário de operação inelegível (tarefa ocupada, falha
+# transitória de comunicação). Persistido em deferred_until para sobreviver
+# a reinícios e impedir que a mesma operação monopolize rodadas seguidas.
+DEFERRED_SECONDS = 30
+# Marcador local de bloqueio definitivo (conflito de claim, contrato
+# inválido, resposta ambígua): valor alto enough para nunca ser selecionado
+# novamente, mas finito e diagnosticável no banco local.
+_BLOCKED = 1 << 62
+
+
+def _now():
+    return int(time.time())
 
 
 def _bond(spec):
@@ -46,7 +61,7 @@ def _database(path):
     db = sqlite3.connect(path, timeout=10)
     os.chmod(path, 0o600)
     db.row_factory = sqlite3.Row
-    if db.execute('PRAGMA user_version').fetchone()[0] not in (0, 1):
+    if db.execute('PRAGMA user_version').fetchone()[0] not in (0, 1, 2):
         db.close()
         raise ConfigurationError('esquema da fila de recuperação não suportado')
     db.execute('PRAGMA journal_mode=WAL')
@@ -55,7 +70,12 @@ def _database(path):
       bond TEXT NOT NULL, id TEXT NOT NULL, claim TEXT NOT NULL,
       payload TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending',
       event TEXT, sent INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(bond,id))''')
-    db.execute('PRAGMA user_version=1')
+    # Migração transacional v1->v2: adiamento persistente por operação.
+    # Preserva registros/eventos existentes; default 0 = elegível.
+    columns = {row[1] for row in db.execute('PRAGMA table_info(recovery_queue)').fetchall()}
+    if 'deferred_until' not in columns:
+        db.execute('ALTER TABLE recovery_queue ADD COLUMN deferred_until INTEGER NOT NULL DEFAULT 0')
+    db.execute('PRAGMA user_version=2')
     db.commit()
     return db
 
@@ -134,6 +154,14 @@ def _finish(db, row, state, result=None, error=None):
     db.commit()
 
 
+def _defer(db, row, until):
+    """Adiamento persistente: a operação permanece pending mas é excluída da
+    seleção enquanto ``deferred_until > now``. ``until=0`` reabilita."""
+    db.execute('UPDATE recovery_queue SET deferred_until=? WHERE bond=? AND id=?',
+               (until, row['bond'], row['id']))
+    db.commit()
+
+
 def _catalog(adapter, task, destination, password):
     snapshots = adapter.snapshots(destination, password, timeout_seconds=task.timeouts.snapshots_seconds)
     points = []
@@ -167,12 +195,17 @@ def _root(policy):
 
 
 def work(central, queue, policy, limit=1):
+    # ``limit`` = número máximo de operações selecionadas por rodada para
+    # avaliação (lock de tarefa + claim). Operações adiadas (tarefa ocupada,
+    # falha transitória) são excluídas da seleção por deferred_until, então
+    # um item inelegível nunca monopoliza todas as rodadas — inclusive com
+    # limit=1, a próxima rodada seleciona outra operação elegível.
     if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1 or limit > 100:
         raise ConfigurationError('limite do worker deve ser 1..100')
     spec = load_central(central)
     locks = _locks(spec, 'worker')
     db = None
-    summary = {'completed': 0, 'deferred': 0}
+    summary = {'completed': 0, 'deferred': 0, 'blocked': 0, 'retry': 0}
     try:
         db = _database(queue)
         bond = _bond(spec)
@@ -180,20 +213,54 @@ def work(central, queue, policy, limit=1):
         for row in db.execute("SELECT * FROM recovery_queue WHERE bond=? AND state='running'", (bond,)).fetchall():
             _finish(db, row, 'interrupted', error='abandoned')
         token = credential_from_environment_or_os(spec.token_environment)
-        rows = db.execute("SELECT * FROM recovery_queue WHERE bond=? AND state='pending' ORDER BY rowid LIMIT ?", (bond, limit)).fetchall()
+        now = _now()
+        rows = db.execute(
+            "SELECT * FROM recovery_queue WHERE bond=? AND state='pending' AND deferred_until<=? "
+            "ORDER BY rowid LIMIT ?", (bond, now, limit)).fetchall()
         for row in rows:
             operation = json.loads(row['payload'])
-            task = _validate(operation, spec)
-            task_locks = acquire_task_lock(task.id)
+            # Contrato inválido é bloqueio definitivo local: não aborta o
+            # lote e não tenta claim (a API recusaria resultado de operação
+            # não iniciada). Permanece diagnosticável no banco local.
+            try:
+                task = _validate(operation, spec)
+            except ConfigurationError:
+                _defer(db, row, _BLOCKED)
+                summary['blocked'] += 1
+                continue
+            # Tarefa ocupada (lock EX de outra execução) adia sem abortar o
+            # lote: outra operação de tarefa elegível prossegue na mesma rodada.
+            try:
+                task_locks = acquire_task_lock(task.id)
+            except ResticError:
+                _defer(db, row, now + DEFERRED_SECONDS)
+                summary['deferred'] += 1
+                continue
             adapter = ResticAdapter(timeouts=task.timeouts, cache_directory=cache_directory())
             handlers = {}
             target = None
             try:
                 status, ack = _request(spec, 'POST', f"/api/v1/agent/recovery/{row['id']}/claim", token, {'claim_id': row['claim']})
-                if status != 200 or not isinstance(ack, dict) or ack.get('id') != row['id'] or ack.get('claim_id') != row['claim'] or ack.get('state') != 'running':
-                    summary['deferred'] += 1
+                # 409 = claim definitivo de outro executor: não tomar o claim,
+                # não repetir restauração. Bloqueio local permanente.
+                if status == 409:
+                    _defer(db, row, _BLOCKED)
+                    summary['blocked'] += 1
                     continue
-                db.execute("UPDATE recovery_queue SET state='running' WHERE bond=? AND id=?", (bond, row['id']))
+                # Resposta ambígua/incompatível NUNCA autoriza efeito Restic.
+                # Transitória (0/429/5xx) adia; definitiva (4xx restante ou
+                # ack malformado) bloqueia localmente.
+                if (status != 200 or not isinstance(ack, dict)
+                        or ack.get('id') != row['id'] or ack.get('claim_id') != row['claim']
+                        or ack.get('state') != 'running'):
+                    if status == 0 or status == 429 or 500 <= status < 600:
+                        _defer(db, row, now + DEFERRED_SECONDS)
+                        summary['retry'] += 1
+                    else:
+                        _defer(db, row, _BLOCKED)
+                        summary['blocked'] += 1
+                    continue
+                db.execute("UPDATE recovery_queue SET state='running',deferred_until=0 WHERE bond=? AND id=?", (bond, row['id']))
                 db.commit()
                 handlers = install_cancel_handlers(adapter)
                 destination = _destination_by_id(task, operation['destination_id'])
