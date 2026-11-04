@@ -175,3 +175,8 @@ desenvolvimento continua usando ambiente/default sem criar manifesto.
 Instalação, desinstalação e backup reutilizam esse mesmo código. O instalador
 lê o resolvedor do wheel selecionado, sem depender da instalação global.
 O pacote corrigido dessa etapa não inclui a funcionalidade futura de portal.
+
+Provas desta correção: 84/84 no gate CLI/distribuição/identidade; 31/32 no
+gate de instalação/pacote em sandbox (restore falhou em lchown). Repetição de
+restore e identidades instaladas fora do sandbox: 3/3. Publicação final em
+dist/linux-0.3.0rc1-registered-lock, com SHA exato no manifesto gerado.

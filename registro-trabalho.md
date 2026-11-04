@@ -2380,3 +2380,9 @@ Gates: CLI/distribuição/manual/identidade/unidades/cancelamento 84/84,
 37,812 s. Pacote/instalação/credenciais/backup/identidade: 31 aprovações e
 uma falha de restore em lchown no sandbox (32 testes, 324,710 s). A repetição
 desse cenário fora do sandbox é necessária; nenhuma asserção foi removida.
+
+Repetição fora do sandbox: restore de instalação, Python instalado/entrada
+manual sem override e exclusão mútua customizada: 3/3, 159,757 s. Falha
+ambiental original permanece registrada. Pacote desta correção será gerado
+de commit final próprio em dist/linux-0.3.0rc1-registered-lock, sem o fluxo
+de recuperação pelo portal da entrega seguinte.
