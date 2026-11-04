@@ -2386,3 +2386,44 @@ manual sem override e exclusão mútua customizada: 3/3, 159,757 s. Falha
 ambiental original permanece registrada. Pacote desta correção será gerado
 de commit final próprio em dist/linux-0.3.0rc1-registered-lock, sem o fluxo
 de recuperação pelo portal da entrega seguinte.
+
+## 2026-11-04 — Recuperação assíncrona pelo portal Linux (experimental)
+
+Branch feature/linux-portal-recovery criada a partir de 11a589c, depois de
+gerar e validar o pacote corrigido em dist/linux-0.3.0rc1-registered-lock.
+O novo fluxo não integra nem amplia a homologação desse pacote. Identificação
+de desenvolvimento da distribuição: 0.4.0dev1, não foi gerado release novo.
+
+Migração PG7 expand-only registra operações snapshots/restore, solicitante,
+vínculos derivados, configuração imutável/hash, claim, horários e resultado.
+Admin+CSRF solicita; viewer lê; agentes só reivindicam/confirmam suas operações.
+UUID de intenção e query/snapshot deduplicam restaurações, inclusive respostas
+perdidas e término. Estados terminais não regridem. Novo restore deliberado
+exige nova consulta. API não executa Restic nem recebe comandos arbitrários.
+
+Agente: fila SQLite separada v1 (principal permanece v7), manutenção e tarefa
+sob locks existentes, claim exclusivo, running durável antes do efeito,
+interrupção/abandono sem repetição, resultado persistido/reenvio independente.
+recovery-poll e recovery-work são comandos públicos separados; worker longo
+não executa dentro de pull-tasks/sync. Raiz privada local, pasta UUID nova,
+validação de links/sobreposições, catálogo Restic por tag da tarefa, sem init.
+Restore --verify e timeout/término de grupo reutilizados; parciais preservados
+e nunca apresentados como sucesso. SIGKILL exige conferência de órfãos pelo
+operador; política de serviços recomendada KillMode=control-group.
+
+Portal: seleção de destino/ponto, confirmação explícita, estados reais do
+agente, erros como texto, polling e proteção de visitas/respostas atrasadas.
+Testes: API 180/180 em PostgreSQL17, portal 88/88 + typecheck/build, worker/CLI/
+identidade/adaptador 34/34. Playwright real 1/1 em23s com Chrome/API/PG17/Restic:
+backup, consulta/solicitação pelo portal, worker, confirmação, conteúdo e
+exclusão comparados. Suspensão da API permaneceu; não foi usado systemd real.
+Casos negativos de API/Restic são controlados/simulados conforme runbook.
+
+Recursos: contêiner exclusivo macip-recovery-pg17-20261104-01 (PG17), banco
+macip_recovery_test, servidores API8180/preview4173/Chrome e diretórios
+temporários de agente/repositório/credenciais. O E2E limpa arquivos em finally;
+o contêiner e seus volumes são removidos ao fechar a prova. A imagem PG16
+inicial descartável foi removida antes de usar PG17. Nenhuma infraestrutura
+operacional ou timer preexistente foi acessado; timers antigos continuam
+confirmados inactive/disabled pelo operador. Roteiro e limites em
+docs/recuperacao-portal-linux.md; sem aprovação operacional nem push/tag/deploy.

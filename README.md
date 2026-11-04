@@ -8,6 +8,9 @@ Versões, alcance e artefato: [candidata](docs/candidata-linux.md).
 Operação: [instalação, atualização e retorno](docs/instalacao-atualizacao-retorno.md).
 Não representa MVP completo nem autorização de produção.
 
+Branch experimental posterior: [recuperação pelo portal Linux](docs/recuperacao-portal-linux.md).
+Esse incremento não integra o artefato 0.3.0rc1 já fechado.
+
 ## Entrega atual
 
 - Validação JSON antes de criar ou gravar repositórios.
