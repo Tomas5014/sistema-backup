@@ -13,7 +13,11 @@ compatibilidade ou restauração/reconciliação de escritas, conforme runbook.
 SQLite principal continua v7. A fila separada de recuperação usa esquema v3
 (migração transacional v1→v2→v3 adiciona `deferred_until INTEGER NOT NULL DEFAULT 0`,
 `evaluated_at INTEGER NOT NULL DEFAULT 0` e tabela `discovery_cursor`;
-registros, claims, eventos e resultados existentes são preservados).
+registros, claims, eventos e resultados existentes são preservados). A
+migração é atômica: `BEGIN IMMEDIATE` serializa poll/worker, `user_version`
+só é atualizado após todos os ALTER/CREATE, e rollback desfaz tudo em falha.
+Bancos parcialmente migrados pela versão anterior são detectados e concluídos
+sem perda de dados.
 
 POST /api/v1/tasks/{task}/recovery registra intenção e retorna 202 e ID.
 Tipos exclusivos: snapshots e restore. Não executa Restic em HTTP. Admin
@@ -24,9 +28,9 @@ snapshot_id completo dessa consulta; herda configuração/revisão dela mesmo
 após edição da tarefa. Nenhuma senha/chave entra no contrato.
 
 GET /tasks/{task}/recovery mostra estados e resultados. GET /agent/recovery
-entrega apenas operações do agente autenticado, listando pendentes antes de
-running, com paginação por cursor (after/limit, next_cursor) para descoberta
-além de 100 operações. POST /agent/recovery/{id}/claim
+entrega apenas operações do agente autenticado, com paginação por cursor
+(after/limit/next_cursor) ordenada por campos imutáveis (created_at, id),
+para descoberta além de 100 operações. POST /agent/recovery/{id}/claim
 grava claim_id exclusivo; POST /agent/recovery/{id}/result confirma resultado.
 Identidades autenticadas e locks de linha protegem transições. Reenvio idêntico
 é idempotente; outro claim ou regressão de estado terminal é recusado.
@@ -142,13 +146,16 @@ efeito pode já ter ocorrido.
 
 A API limita cada listagem a 100 operações. Para descobrir operações além
 dessa janela, o poll usa paginação por cursor: `GET /api/v1/agent/recovery`
-aceita `after=<id>` e `limit=1..100`, retornando `next_cursor`. O agente
-persiste o cursor no SQLite (`discovery_cursor`) e continua a descoberta
-entre rodadas com orçamento de `DISCOVERY_BUDGET` (5) requisições por poll.
-Ao concluir uma passagem (`next_cursor=None`), o cursor retorna ao início.
-Ordenação estável: pendentes antes de running, depois `(created_at, id)`.
-Deduplicação local via `INSERT OR IGNORE` preserva operações conhecidas.
-Isolamento pelo agente autenticado.
+aceita `after=<id>` e `limit=1..100`, retornando `next_cursor`. A ordenação,
+o cursor e o predicado de continuação representam a MESMA ordem total
+imutável — `(created_at, id)`. Campos imutáveis garantem estabilidade quando
+o estado muda entre páginas (pending→running não move a operação na ordem,
+sem omissão nem duplicação). O agente persiste o cursor no SQLite
+(`discovery_cursor`) e continua a descoberta entre rodadas com orçamento de
+`DISCOVERY_BUDGET` (5) requisições por poll. Ao concluir uma passagem
+(`next_cursor=None`), o cursor retorna ao início. Deduplicação local via
+`INSERT OR IGNORE` preserva operações conhecidas. Isolamento pelo agente
+autenticado. Cursor de outro agente ou inexistente = 404.
 
 ## Efeitos, interrupções e resultados
 

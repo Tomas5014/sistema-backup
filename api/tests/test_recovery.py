@@ -141,21 +141,22 @@ def test_no_points_is_distinct_from_pending_and_failure(client, admin_headers, a
     assert listed[0]["state"] == "succeeded" and listed[0]["result"]["snapshots"] == []
 
 
-def test_pending_operations_are_listed_before_running(client, admin_headers, agent):
-    """Operações pendentes não podem ser escondidas por running: a janela
-    de descoberta do agente lista pendentes primeiro, para que um claim
-    ocupado não monopolize a primeira posição e impeça o progresso."""
+def test_pending_operations_discovered_via_pagination(client, admin_headers, agent):
+    """Operações pendentes não podem ser escondidas por running: a paginação
+    por (created_at, id) garante que running ocupem no máximo as primeiras
+    páginas, e pendentes sejam alcançadas nas seguintes. Sem prioridade de
+    estado na ordenação — a estabilidade sob mudança de estado é garantida
+    por campos imutáveis."""
     task_id = setup(client, admin_headers, agent)
     first = request(client, admin_headers, task_id).json()
     claim_id = str(uuid.uuid4())
     base = f"/api/v1/agent/recovery/{first['id']}"
     assert client.post(base + "/claim", json={"claim_id": claim_id}, headers=agent["headers"]).status_code == 200
     pending = request(client, admin_headers, task_id).json()
-    operations = client.get("/api/v1/agent/recovery", headers=agent["headers"]).json()["operations"]
-    states = [op["state"] for op in operations]
-    assert states == ["pending", "running"]
-    assert operations[0]["id"] == pending["id"]
-    assert operations[1]["id"] == first["id"]
+    page = client.get("/api/v1/agent/recovery?limit=100", headers=agent["headers"]).json()
+    ids = {op["id"] for op in page["operations"]}
+    assert first["id"] in ids
+    assert pending["id"] in ids
 
 
 def test_pagination_discovers_beyond_first_page(client, admin_headers, agent):
@@ -187,3 +188,170 @@ def test_pagination_cursor_invalid_returns_404(client, admin_headers, agent):
     bad = uuid.uuid4()
     response = client.get(f"/api/v1/agent/recovery?after={bad}", headers=agent["headers"])
     assert response.status_code == 404
+
+
+def test_pagination_mixed_states_no_omission(client, admin_headers, agent):
+    """50 running antigas + 100 pending recentes, páginas de 50. A passagem
+    deve incluir TODAS as 150, sem omitir as running antigas. Detecta
+    incompatibilidade entre ORDER BY e predicado de continuação."""
+    task_id = setup(client, admin_headers, agent)
+    running_ids = []
+    for _ in range(50):
+        op = request(client, admin_headers, task_id).json()
+        claim_id = str(uuid.uuid4())
+        base = f"/api/v1/agent/recovery/{op['id']}"
+        assert client.post(base + "/claim", json={"claim_id": claim_id},
+                           headers=agent["headers"]).status_code == 200
+        running_ids.append(op["id"])
+    pending_ids = []
+    for _ in range(100):
+        pending_ids.append(request(client, admin_headers, task_id).json()["id"])
+    seen = set()
+    cursor = None
+    while True:
+        url = "/api/v1/agent/recovery?limit=50"
+        if cursor:
+            url += f"&after={cursor}"
+        page = client.get(url, headers=agent["headers"]).json()
+        for op in page["operations"]:
+            assert op["id"] not in seen
+            seen.add(op["id"])
+        cursor = page["next_cursor"]
+        if not cursor:
+            break
+    assert seen == set(running_ids) | set(pending_ids)
+
+
+def test_pagination_mixed_states_multiple_page_sizes(client, admin_headers, agent):
+    """Mesmo cenário com tamanhos de página 30, 50, 100: nenhuma omissão."""
+    task_id = setup(client, admin_headers, agent)
+    running_ids = []
+    for _ in range(40):
+        op = request(client, admin_headers, task_id).json()
+        claim_id = str(uuid.uuid4())
+        base = f"/api/v1/agent/recovery/{op['id']}"
+        assert client.post(base + "/claim", json={"claim_id": claim_id},
+                           headers=agent["headers"]).status_code == 200
+        running_ids.append(op["id"])
+    pending_ids = [request(client, admin_headers, task_id).json()["id"] for _ in range(60)]
+    all_ids = set(running_ids) | set(pending_ids)
+    for size in (30, 50, 100):
+        seen = set()
+        cursor = None
+        while True:
+            url = f"/api/v1/agent/recovery?limit={size}"
+            if cursor:
+                url += f"&after={cursor}"
+            page = client.get(url, headers=agent["headers"]).json()
+            for op in page["operations"]:
+                assert op["id"] not in seen
+                seen.add(op["id"])
+            cursor = page["next_cursor"]
+            if not cursor:
+                break
+        assert seen == all_ids
+
+
+def test_pagination_same_created_at_uuid_tiebreak(client, admin_headers, agent):
+    """Múltiplos registros com mesmo created_at: desempate por UUID, sem
+    omissão nem duplicação."""
+    task_id = setup(client, admin_headers, agent)
+    ids = [request(client, admin_headers, task_id).json()["id"] for _ in range(80)]
+    seen = set()
+    cursor = None
+    while True:
+        url = "/api/v1/agent/recovery?limit=25"
+        if cursor:
+            url += f"&after={cursor}"
+        page = client.get(url, headers=agent["headers"]).json()
+        for op in page["operations"]:
+            assert op["id"] not in seen
+            seen.add(op["id"])
+        cursor = page["next_cursor"]
+        if not cursor:
+            break
+    assert seen == set(ids)
+
+
+def test_pagination_state_change_between_pages(client, admin_headers, agent):
+    """Operação pending na página 1 vira running antes da página 2: a
+    passagem não pode omiti-la nem duplicá-la."""
+    task_id = setup(client, admin_headers, agent)
+    ids = [request(client, admin_headers, task_id).json()["id"] for _ in range(60)]
+    page1 = client.get("/api/v1/agent/recovery?limit=30", headers=agent["headers"]).json()
+    page1_ids = {op["id"] for op in page1["operations"]}
+    # Move a pending from page 2 to running
+    to_claim = next(op["id"] for op in page1["operations"] if op["state"] == "pending")
+    claim_id = str(uuid.uuid4())
+    base = f"/api/v1/agent/recovery/{to_claim}"
+    assert client.post(base + "/claim", json={"claim_id": claim_id},
+                       headers=agent["headers"]).status_code == 200
+    seen = set(page1_ids)
+    cursor = page1["next_cursor"]
+    while cursor:
+        page = client.get(f"/api/v1/agent/recovery?limit=30&after={cursor}",
+                          headers=agent["headers"]).json()
+        for op in page["operations"]:
+            assert op["id"] not in seen
+            seen.add(op["id"])
+        cursor = page["next_cursor"]
+    assert seen == set(ids)
+
+
+def test_pagination_anchor_completes_between_pages(client, admin_headers, agent):
+    """A âncora (último item da página 1) termina (succeeded) antes da
+    página 2: a continuação não pode falhar nem omitir operações."""
+    task_id = setup(client, admin_headers, agent)
+    ids = [request(client, admin_headers, task_id).json()["id"] for _ in range(60)]
+    page1 = client.get("/api/v1/agent/recovery?limit=30", headers=agent["headers"]).json()
+    anchor_id = page1["operations"][-1]["id"]
+    claim_id = str(uuid.uuid4())
+    base = f"/api/v1/agent/recovery/{anchor_id}"
+    assert client.post(base + "/claim", json={"claim_id": claim_id},
+                       headers=agent["headers"]).status_code == 200
+    result = {"claim_id": claim_id, "state": "succeeded", "result": {"snapshots": []}}
+    assert client.post(base + "/result", json=result,
+                       headers=agent["headers"]).status_code == 200
+    seen = {op["id"] for op in page1["operations"]}
+    cursor = page1["next_cursor"]
+    while cursor:
+        page = client.get(f"/api/v1/agent/recovery?limit=30&after={cursor}",
+                          headers=agent["headers"]).json()
+        for op in page["operations"]:
+            assert op["id"] not in seen
+            seen.add(op["id"])
+        cursor = page["next_cursor"]
+    # Anchor left the pending/running set; remaining ops still discovered
+    assert seen == set(ids)
+
+
+def test_pagination_cursor_of_other_agent_rejected(client, admin_headers, agent):
+    """Cursor de outro agente deve ser recusado (404), sem vazamento."""
+    task_id = setup(client, admin_headers, agent)
+    other = second_agent(client, admin_headers)
+    other_task = setup(client, admin_headers, other)
+    other_op = request(client, admin_headers, other_task).json()
+    response = client.get(f"/api/v1/agent/recovery?after={other_op['id']}",
+                          headers=agent["headers"])
+    assert response.status_code == 404
+
+
+def test_pagination_continues_between_polls_with_budget(client, admin_headers, agent):
+    """Continuação da descoberta entre polls quando o orçamento termina
+    antes da passagem. Verifica que 3 páginas de 100 cobrem 250 operações."""
+    task_id = setup(client, admin_headers, agent)
+    ids = [request(client, admin_headers, task_id).json()["id"] for _ in range(250)]
+    seen = set()
+    cursor = None
+    pages = 0
+    while cursor is not None or pages == 0:
+        url = "/api/v1/agent/recovery?limit=100"
+        if cursor:
+            url += f"&after={cursor}"
+        page = client.get(url, headers=agent["headers"]).json()
+        for op in page["operations"]:
+            seen.add(op["id"])
+        cursor = page["next_cursor"]
+        pages += 1
+    assert seen == set(ids)
+    assert pages == 3

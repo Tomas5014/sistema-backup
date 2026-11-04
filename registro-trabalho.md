@@ -2623,3 +2623,85 @@ Branch: `fix/recovery-queue-fairness` (base: `ebd251b`).
 
 - `DEFERRED_SECONDS=30` e `DISCOVERY_BUDGET=5` são constantes.
 - Sem UI de diagnóstico no portal para operações bloqueadas/adiadas.
+
+---
+
+## 2026-11-04 — Correção do cursor de paginação e atomicidade da migração
+
+### Problemas corrigidos
+
+1. **Inconsistência entre cursor e ordenação da API**: ORDER BY usava
+   `(state='running'), created_at, id` mas o predicado de continuação
+   considerava somente `(created_at, id) > anchor`. Com 50 running antigas
+   + 100 pending recentes, as running eram omitidas da passagem. Correção:
+   ordenação, cursor e predicado representam a MESMA ordem total imutável
+   — `(created_at, id)`. Campos imutáveis garantem estabilidade quando o
+   estado muda entre páginas (pending→running não move a operação, sem
+   omissão nem duplicação). A descoberta além de 100 é garantida pela
+   paginação, não pela prioridade de estado.
+
+2. **Migração SQLite não atômica**: DDL fora de transação explícita. Falha
+   após `ALTER TABLE evaluated_at` e antes de `discovery_cursor` deixava
+   `user_version=2` com `evaluated_at` já existente (parcialmente migrado).
+   Correção: `BEGIN IMMEDIATE` serializa poll/worker; `user_version` só é
+   atualizado após todos os ALTER/CREATE; rollback desfaz tudo em falha;
+   re-leitura de `user_version` após o lock detecta migração concorrente.
+   Bancos parcialmente migrados pela versão anterior são concluídos sem
+   perda de dados.
+
+### Arquivos alterados
+
+- `api/src/macip_backup_api/recovery_routes.py`: cursor ordenado por
+  `(created_at, id)`, predicado de continuação compatível.
+- `src/macip_backup/recovery.py`: migração transacional com `BEGIN
+  IMMEDIATE`, re-leitura de `user_version`, rollback em falha.
+- `api/tests/test_recovery.py`: 7 novas regressões de paginação (estados
+  mistos, múltiplos tamanhos de página, mesmo created_at, mudança de
+  estado entre páginas, âncora concluída, cursor de outro agente,
+  continuação entre polls). `test_pending_operations_discovered_via_pagination`
+  substitui `test_pending_operations_are_listed_before_running`.
+- `tests/test_recovery_migration.py`: 9 regressões de migração (v1/v2
+  preenchidos, v3 sem alterações, falha após ALTER, falha antes de versão,
+  rollback confirmado, retry após falha, esquema futuro recusado, parcialmente
+  migrado, poll+worker simultâneos).
+- `docs/recuperacao-portal-linux.md`: cursor por campos imutáveis,
+  atomicidade da migração, tratamento de bancos parciais.
+- `registro-trabalho.md`: esta entrada.
+
+### Migração
+
+Sem mudança de esquema (v3 mantido). Correção na implementação da migração:
+transação explícita `BEGIN IMMEDIATE` + rollback. Bancos parcialmente
+migrados pela versão anterior são detectados e concluídos. Dados
+preservados: operações, claims, payloads, eventos, resultados, estados de
+envio, adiamentos, evaluated_at, cursor.
+
+### Regressões que falhavam antes e passaram depois
+
+API/PG: `test_pagination_mixed_states_no_omission`,
+`test_pagination_mixed_states_multiple_page_sizes`,
+`test_pagination_state_change_between_pages`.
+Migração: `test_failure_after_first_alter_rolls_back`,
+`test_failure_before_version_update_rolls_back`,
+`test_poll_and_worker_open_simultaneously`,
+`test_partially_migrated_v2_handled`.
+
+### Comandos e resultados
+
+- Worker/CLI/lock/migration: 49/49 OK.
+- API/PG17 real: 190/190 OK (237,71s).
+- E2E Playwright: 1/1 em 15,1s (Chrome+API+PG17+Restic reais).
+
+### Recursos descartáveis
+
+Contêiner `macip-api-test-pg` (PG17, porta 55432) reutilizado, permanece
+ativo. Build do portal em `portal/dist/`.
+
+### Branch e SHA
+
+Branch: `fix/recovery-cursor-atomic-migration` (base: `70a35dc`).
+
+### Limitações
+
+- `DISCOVERY_BUDGET=5` e `DEFERRED_SECONDS=30` são constantes.
+- Sem UI de diagnóstico no portal.

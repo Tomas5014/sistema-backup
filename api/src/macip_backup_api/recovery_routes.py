@@ -215,10 +215,17 @@ def register_recovery(app, require_admin_identity):
     def agent_operations(agent: Agent = Depends(require_agent), db: Session = Depends(session),
                          after: uuid.UUID | None = Query(default=None),
                          limit: int = Query(default=100, ge=1, le=100)):
-        # Paginação por cursor estável: pendentes antes de running; dentro de
-        # cada estado, ordenação por (created_at, id). Cursor = último id da
-        # página. Permite descoberta além das primeiras 100 operações sem
-        # consulta ilimitada. Isolamento por agente autenticado.
+        # Paginação por cursor estável: ordenação, cursor e predicado de
+        # continuação representam a MESMA ordem total imutável —
+        # (created_at, id). Campos imutáveis garantem estabilidade quando o
+        # estado muda entre páginas (pending→running não move a operação
+        # na ordem, então não há omissão nem duplicação). O cursor é o
+        # último id da página; a âncora é resolvida para (created_at, id).
+        # A descoberta além de 100 operações é garantida pela paginação,
+        # não pela prioridade de estado: mesmo que running ocupem as
+        # primeiras páginas, as pendentes são alcançadas nas seguintes.
+        # Isolamento por agente autenticado. Cursor de outro agente ou
+        # inexistente = 404.
         params = {"agent": agent.id, "limit": limit}
         if after is not None:
             params["after"] = str(after)
@@ -232,7 +239,7 @@ def register_recovery(app, require_admin_identity):
         rows = db.execute(text(
             "SELECT * FROM recovery_operations WHERE agent_id=:agent AND state IN ('pending','running') "
             + ("AND (created_at, id) > (:anchor_created, :anchor_id) " if after is not None else "")
-            + "ORDER BY (state='running'), created_at, id LIMIT :limit"
+            + "ORDER BY created_at, id LIMIT :limit"
         ), params).mappings()
         result = [_out(row, agent=True) for row in rows]
         next_cursor = result[-1]["id"] if len(result) == limit else None

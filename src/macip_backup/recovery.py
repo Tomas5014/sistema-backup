@@ -66,29 +66,50 @@ def _database(path):
     db = sqlite3.connect(path, timeout=10)
     os.chmod(path, 0o600)
     db.row_factory = sqlite3.Row
-    if db.execute('PRAGMA user_version').fetchone()[0] not in (0, 1, 2, 3):
+    current = db.execute('PRAGMA user_version').fetchone()[0]
+    if current not in (0, 1, 2, 3):
         db.close()
         raise ConfigurationError('esquema da fila de recuperação não suportado')
     db.execute('PRAGMA journal_mode=WAL')
     db.execute('PRAGMA synchronous=FULL')
-    db.execute('''CREATE TABLE IF NOT EXISTS recovery_queue (
-      bond TEXT NOT NULL, id TEXT NOT NULL, claim TEXT NOT NULL,
-      payload TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending',
-      event TEXT, sent INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(bond,id))''')
-    columns = {row[1] for row in db.execute('PRAGMA table_info(recovery_queue)').fetchall()}
-    # v1->v2: adiamento persistente por operação.
-    if 'deferred_until' not in columns:
-        db.execute('ALTER TABLE recovery_queue ADD COLUMN deferred_until INTEGER NOT NULL DEFAULT 0')
-    # v2->v3: seleção justa. evaluated_at registra quando a operação foi
-    # avaliada pela última vez; ORDER BY evaluated_at, rowid garante que
-    # operações nunca avaliadas (0) ou avaliadas há mais tempo sejam
-    # selecionadas primeiro, independentemente do intervalo entre rodadas.
-    if 'evaluated_at' not in columns:
-        db.execute('ALTER TABLE recovery_queue ADD COLUMN evaluated_at INTEGER NOT NULL DEFAULT 0')
-    db.execute('''CREATE TABLE IF NOT EXISTS discovery_cursor (
-      bond TEXT NOT NULL PRIMARY KEY, cursor TEXT)''')
-    db.execute('PRAGMA user_version=3')
-    db.commit()
+    # Serializa migração entre poll e worker: ambos podem abrir o mesmo
+    # banco simultaneamente, mas a migração é exclusiva. IMMEDIATE adquire
+    # um lock de escrita no início da transação; o segundo esperará.
+    db.execute('BEGIN IMMEDIATE')
+    try:
+        # Re-lê user_version após adquirir o lock: outra conexão pode ter
+        # concluído a migração enquanto esta esperava.
+        locked = db.execute('PRAGMA user_version').fetchone()[0]
+        if locked not in (0, 1, 2, 3):
+            db.rollback()
+            db.close()
+            raise ConfigurationError('esquema da fila de recuperação não suportado')
+        db.execute('''CREATE TABLE IF NOT EXISTS recovery_queue (
+          bond TEXT NOT NULL, id TEXT NOT NULL, claim TEXT NOT NULL,
+          payload TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending',
+          event TEXT, sent INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(bond,id))''')
+        columns = {row[1] for row in db.execute('PRAGMA table_info(recovery_queue)').fetchall()}
+        # v1->v2: adiamento persistente por operação.
+        if 'deferred_until' not in columns:
+            db.execute('ALTER TABLE recovery_queue ADD COLUMN deferred_until INTEGER NOT NULL DEFAULT 0')
+        # v2->v3: seleção justa. evaluated_at registra quando a operação foi
+        # avaliada pela última vez; ORDER BY evaluated_at, rowid garante que
+        # operações nunca avaliadas (0) ou avaliadas há mais tempo sejam
+        # selecionadas primeiro, independentemente do intervalo entre rodadas.
+        if 'evaluated_at' not in columns:
+            db.execute('ALTER TABLE recovery_queue ADD COLUMN evaluated_at INTEGER NOT NULL DEFAULT 0')
+        db.execute('''CREATE TABLE IF NOT EXISTS discovery_cursor (
+          bond TEXT NOT NULL PRIMARY KEY, cursor TEXT)''')
+        # PRAGMA user_version não é transacional no SQLite: escreve no
+        # cabeçalho do arquivo. Por isso é a ÚLTIMA instrução antes do
+        # commit. Se algo falhar antes, user_version não é alterado e o
+        # rollback desfaz os ALTERs/CREATEs.
+        db.execute('PRAGMA user_version=3')
+        db.commit()
+    except Exception:
+        db.rollback()
+        db.close()
+        raise
     return db
 
 
