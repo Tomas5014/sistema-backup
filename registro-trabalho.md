@@ -3023,3 +3023,98 @@ registrado e ressalva de retenção.
 
 Sem SFTP real exercitado (não há servidor descartável nesta sessão) —
 marcado como pendente de provisionamento. Nenhuma ação operacional.
+
+## 2026-11-05 — Sete correções e provas descartáveis do roteiro Linux + SFTP
+
+Base conferida: `13b76a8e358b5fe0b5d7cf1fb89187af52bddc88`, branch inicial
+`fix/pilot-runbook-review`; nova branch `fix/pilot-helpers-verification`.
+Os SHAs informados foram resolvidos localmente e sua ancestralidade foi
+conferida. Não houve reset, merge ou reescrita. Código operacional-alvo
+permanece `ea74d5d5bf8792b374addbc6addf98345c3327a7`; pacote congelado
+não foi regenerado ou substituído. Alterações preexistentes ficaram fora.
+
+### Reprodução e correções A–G
+
+- **A — binários**: o heredoc original de `6713dd8` foi executado em fixture
+  sintética no dia 6 com seleção forçada de binário UTF-8 inválido e produziu
+  UnicodeDecodeError. `tools/pilot_data.py` faz mutações em bytes, verifica
+  confinamento e usa EX no maintenance.lock do piloto antes de escrever.
+  Geração não associada impede nova mutação; hash da origem é conferido ao
+  associar. Doze dias com seleção binária forçada passaram. A geração atual
+  usa PRNG com seed em vez de os.urandom: a reprodução depende da mesma versão
+  do helper/Python e parâmetros. O seed do heredoc antigo não reproduzia os
+  binários os.urandom; a afirmação anterior era excessiva.
+- **B — retenção**: o ensaio agora é exclusivo em tarefa/configuração/origem/
+  repositório próprios, fora das sete ocorrências agendadas. Prova local real
+  com Restic e `agent` aplicou keep_last=7 automaticamente após cada backup:
+  inventários por tarefa/snapshot tiveram contagens 1,2,3,4,5,6,7,7,7. Foram
+  identificados os dois pontos removidos e os sete mantidos, sem pressupor
+  nove pontos antes de forget explícito. Check --read-data e restore de ponto
+  mantido passaram. Isso não equivale a retenção real SFTP.
+- **C — propriedade/inventário**: a checagem anterior podia imprimir conflito
+  para unit alheia e ainda sair com zero. O novo helper exige marcadores
+  completos/literais por tipo, recusa colisão/ambiguidade, inventário incompleto
+  ou desatualizado e serviço activating, e revalida antes de ações seletivas.
+  Nomes CLI registrados substituem busca por substring/prefixo. Nenhuma unit
+  real do operador foi usada nos testes.
+- **D — raiz restaurada**: compare deriva `raiz-operação/<origem absoluta>`
+  da origem imutável registrada, sem find/head. Confere pasta UUID sob a raiz
+  autorizada e recusa links, escape e conteúdo inesperado. A integração real
+  usou caminho absoluto com espaços/acentos, conforme o layout do Restic.
+- **E — referências**: manifestos e associações são publicados atomicamente
+  sem sobrescrita, fora de origem/repositório. Associação exige resultado
+  success, execução identificada, timestamps posteriores à captura,
+  tarefa/destino, snapshot completo confirmado por catálogo e hash do
+  manifesto. History JSON exige seleção explícita por execution UUID.
+  Recusas cobrem alterado/ausente/extra/tmp presente, manifesto vazio/escape,
+  referência de outro snapshot e sobrescrita. Restore histórico é comparado
+  à referência histórica, incluindo arquivo removido da geração atual.
+- **F — units completas**: os dois services e dois timers são gerados por
+  helper versionado, com caminho absoluto, credencial única, layout explícito,
+  KillMode, política de parada e marcadores. Preparação não ativa; não há
+  sobrescrita. Geração e recusas foram verificadas em diretórios descartáveis;
+  ações systemctl são simuladas. Systemd-analyze e execução em ambiente limpo
+  são provas distintas da execução no gerenciador real.
+- **G — configuração exata**: seleção usa task_id/bond/geração/revisão e
+  valida envelope, cliente, agente e destino. Ausência, ambiguidade e vínculo
+  divergente são recusados; current.json não é usado antes da aplicação.
+
+### Verificações e alcance
+
+Helpers de suporte e testes ficam em `tools/pilot_data.py`,
+`tools/pilot_units.py`, `tools/pilot_prepared.py` e respectivos testes.
+Nenhuma alteração de API/portal ou funcionalidade de produto foi feita.
+O fluxo real de dados exercitou geração → referência → backup → associação
+→ mutação → backup → restore histórico → comparação, e nove backups com
+retenção automática. Gate consolidado desta entrega: 17/17 testes
+aprovados (`PYTHONPATH=src python3 -m unittest tests.test_pilot_data
+tests.test_pilot_prepared tests.test_pilot_units`, 77,6 s). Uma execução
+anterior sem PYTHONPATH falhou em 1 teste por import — ambiente, não
+defeito; reexecutado com o caminho correto passou. Revisão adicional do
+roteiro: âncora de tools por caminho explícito do checkout (não $(pwd)),
+criação do maintenance.lock exigido pelo helper e artefatos de texto
+colado corrigidos.
+
+Restic local foi real; não há equivalência inferida com SFTP. O gerenciador
+systemd disponível foi somente consultado; nenhuma unit foi instalada ou
+ativada nele. Provas de propriedade/ações de systemd usam fixtures simuladas;
+geração real dos arquivos e systemd-analyze são informados separadamente.
+SFTP real e execução automática no gerenciador do piloto permanecem gates
+do operador. Recursos dos testes são próprios/descartáveis e limpos pelos
+teardowns; não se acessaram PC/VM/LAN, credenciais ou bancos operacionais.
+
+### Decisões ainda necessárias
+
+1. Máquina Linux, disponibilidade e janela do piloto.
+2. Central exclusiva ou reutilização autorizada da 8445 e projeto isolado.
+3. Nova conta SFTP/diretório e fingerprint conferido por canal seguro.
+4. Chaves, credenciais, TLS e custódia, sem valores nos comandos/documentos.
+5. IDs de cliente/agente/tarefa, vínculo, revisão, geração e destino aprovados.
+6. OnCalendar, sete ocorrências esperadas, linger e ativação explícita das units.
+7. Dimensionamento, margens de disco e limites de duração/indisponibilidade.
+
+O piloto continua **não iniciado e não aprovado**. Evidências anteriores
+Linux/local, inclusive reboot normal e envio sem repetir worker, permanecem
+históricas; não se ampliam a SFTP gerenciado, SIGKILL ou volume de clientes.
+Timers antigos de recuperação permanecem disabled/inactive. Sem push, tag,
+deploy, nova conta operacional ou regeneração do pacote congelado.
