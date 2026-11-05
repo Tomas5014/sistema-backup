@@ -2951,3 +2951,75 @@ a partir de `9a875ee`. Conteúdo:
 
 Nenhuma execução operacional; sem contas, repositórios, timers ou provas
 reais criados. Pacote congelado intacto. Preexistentes preservados.
+
+---
+
+## 2026-11-05 — Correção do roteiro do piloto após revisão independente
+
+### Achados e correções
+
+1. **Credenciais**: era `$AREA/agent.env`; units geradas usam
+   `EnvironmentFile=-$MACIP_CONFIG/agent.env`. Corrigido para identidade
+   única `$MACIP_CONFIG/agent.env`, sem cópias. Comprovado: unit gerada em
+   ambiente descartável contém a linha esperada e `manual` carrega o
+   mesmo caminho. Parser literal preservado (rejeita MACIP_* de layout).
+2. **Ativação prematura**: fluxo reordenado —
+   `pull-tasks --no-activate` (staging em `tasks.d/<id>/staged/`, sem
+   `current.json`, sem confirmação) → inspeção de `config-<gen>.json` e
+   units preparadas → backup inicial via `agent` sobre a configuração
+   **candidata da central** → `pull-tasks` normal só com autorização
+   explícita → confere revisão/geração/timer enabled. Fronteira do
+   primeiro disparo automático documentada (OnCalendar + Persistent).
+3. **Units**: inventário explícito por marcadores
+   (`install=`, `managed-task=`, `pull-id=`, `sync-id=`), nomes reais do
+   produto (`macip-backup-managed-/pull-/sync-/agent-`), checagem por
+   arquivo (não por `systemctl status`), disable somente pelos nomes do
+   inventário (cut -f1 | xargs), oneshot ativo conferido antes de
+   desabilitar, `schedule-sync` incluído para outbox independente.
+4. **SFTP path**: `repositories/mvp` **relativo** ao home SFTP
+   (`sftp:user@host:repositories/mvp`); `/repositories/mvp` absoluto
+   removido — ForceCommand internal-sftp não é chroot.
+5. **Referência imutável**: manifesto sha256 por geração, fora da origem;
+   `conferir()` compara restauração ao manifesto do snapshot — detecta
+   alterado/ausente/extra/exclusão. Testado: controle aceita; 3 falhas
+   rejeitam. Ponto antigo provável por manifesto próprio.
+6. **Retenção**: ensaio separado com N+2 backups manuais, inventário
+   antes/depois de `forget`, `check` dos restantes, restore de ponto
+   mantido. Contradição resolvida: ocorrências esperadas = 7 agendadas;
+   inicial manual e ensaio são extras; cada ocorrência exige evidência;
+   limites temporais separados (início/duração/envio/indisponibilidade)
+   como propostas.
+7. **Rearme**: `pull-unblock`=confirmações de distribuição;
+   `outbox-rearm`=outbox de backup; nenhum rearma recovery.db —
+   limitação documentada com diagnóstico seguro, sem UPDATE SQL.
+
+### Lacunas adicionais corrigidas
+
+A) preflight dividido: host (python3/restic/ssh/systemd) vs pós-instalação;
+B) instalação com sha256+METADATA do wheel e install.sh --commit exato;
+C) `gerar_dados`/`mutar_dia` reproduzíveis (seed), executados em descartável
+(202 arquivos, manifestos por geração); D) `recovery.json`+restore_root
+validados + units completas macip-mvp-* com KillMode e EnvironmentFile;
+E) decisões separadas de comandos, argv em vez de `<>` em Python pronto;
+F) "outbox vazia"→ critério sem pendentes/bloqueados + correspondência
+central; G) snapshots por conjunto filtrado da tarefa com instante
+registrado e ressalva de retenção.
+
+### Verificações executadas
+
+- 23 blocos: bash -n em todos (0 erros), json.loads nos 3 JSONs, 2 blocos
+  ini (units) revisados manualmente.
+- Units reais geradas em HOME descartável: `macip-backup-managed-*`,
+  `pull-<hash16>`, `sync-<hash16>` com marcadores e EnvironmentFile
+  `-…/config/agent.env`.
+- `_assert_managed_units` recusou unit alheia inativa sem marcadores.
+- `TaskSpec.from_dict` + `manual validate` aprovaram o JSON do roteiro.
+- `_repository_reference` confirmou path relativo→`sftp:user@host:repositories/mvp`.
+- Helpers extraídos do doc e exercitados: geração, mutação, conferir
+  (controle/alterado/ausente/extra todos corretos).
+- `git diff --check` limpo.
+
+### Limites
+
+Sem SFTP real exercitado (não há servidor descartável nesta sessão) —
+marcado como pendente de provisionamento. Nenhuma ação operacional.
