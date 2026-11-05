@@ -196,8 +196,12 @@ inactive/disabled permanece válida; nenhum desses timers deve ser reativado.
 Atualização do alcance: o operador relatou instalação exclusiva, TLS via túnel,
 systemd real, perda/retorno de comunicação, envio durável e parada controlada
 de serviço no laboratório ea74d5d. Isso não encerra validação com volumes dos
-clientes. Os **timers novos de recuperação** estão parados, mas não há prova
-de disable; não confundir com os timers antigos já desabilitados.
+clientes. Os **timers exclusivos de recuperação**
+(`macip-recuperacao-ea74d5d-poll.timer` e
+`macip-recuperacao-ea74d5d-work.timer`) estão **disabled/inactive**, conforme
+confirmação do operador antes e depois do reinício. Os serviços foram
+conferidos como inactive, com MainPID=0. Não confundir com os timers
+antigos de outros laboratórios.
 [Persistência após reinício](prova-reinicio-recuperacao.md): executada e
 aprovada pelo operador no laboratório ea74d5d (relato registrado no próprio
 roteiro). Resultado terminal local persistiu após reboot normal do PC e foi
