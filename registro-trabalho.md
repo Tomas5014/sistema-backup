@@ -2899,3 +2899,55 @@ Continuam fora do aceite: queda abrupta/energia/SIGKILL, abandono de
 running, produção, Windows/SMB/SFTP/S3 e volume representativo. Sem
 conclusão de MVP. Gates de API/portal não reexecutados — mudança somente
 documental.
+
+---
+
+## 2026-11-05 — Preparação do piloto de 7 dias (MVP Linux + SFTP)
+
+### Contexto
+
+Entrega documental de preparação: plano operacional executável para
+piloto controlado de sete dias do MVP Linux, destino SFTP e recuperação
+pelo portal. Não cobre iniciar o piloto nem acessar equipamentos.
+
+### Produzido
+
+`docs/piloto-mvp-linux-sftp.md` — branch `docs/pilot-mvp-linux-sftp`
+a partir de `9a875ee`. Conteúdo:
+
+- **Matriz de aceite**: 8 requisitos mínimos (cadastro→publicação→
+  aplicação→backup SFTP→histórico→snapshots→restore portal→conferência)
+  com implementação, evidência existente, evidência a produzir e critério.
+- **Propostas explícitas** (não aprovadas): 7 dias, 1 backup/dia,
+  keep_last 7, ~1 GiB sintético, alteração diária ~5%, ausência >2
+  rodadas dispara investigação, restore <15 min como meta de observação,
+  margem ≤50% do espaço livre.
+- **Arquitetura**: máquina dedicada + SFTP em outra (conta `macipsftpmvp`
+  proposta, repositório `repositories/mvp`; `macipsftppiloto` preservado);
+  chave dedicada + known_hosts próprio; senha Restic e token API em
+  variáveis separadas via env-file 0600; dependência declarada se usar
+  PC+túnel interativo (limite, não arquitetura-alvo).
+- **Runbook**: 14 etapas marcadas [PC]/[VM], comandos conferidos contra
+  `cli.py` (validate/agent/sync/history/check/pull-tasks/pull-status/
+  schedule-pull/recovery-poll/recovery-work/pull-unblock/outbox-rearm);
+  resultado esperado, parada e distinção falha×inconclusivo por etapa.
+- **Registro diário** D1–D7 + critérios aprovado/reprovado/inconclusivo/
+  interrompido; ausência de erro não é prova.
+- **Lacuna identificada**: produto não alerta "backup esperado não
+  ocorreu" — coberta pelo registro manual; proposta mínima anotada como
+  pendência, sem implementação.
+
+### Verificações executadas
+
+- Extração dos 16 blocos `bash`/`json` do documento: `bash -n` aprovado
+  em todos, `json.loads` nos dois JSONs — 0 erros.
+- Conferência dos subcomandos e argumentos contra
+  `src/macip_backup/cli.py` (parser argparse lido): nomes, flags e
+  obrigatórios conferem — inclusive `recovery-work --policy` obrigatório
+  e `--limit` padrão 1.
+- `git diff --check` limpo; escopo 1 arquivo novo + log.
+
+### Limites
+
+Nenhuma execução operacional; sem contas, repositórios, timers ou provas
+reais criados. Pacote congelado intacto. Preexistentes preservados.
