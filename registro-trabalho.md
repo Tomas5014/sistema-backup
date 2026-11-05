@@ -2815,3 +2815,87 @@ foi criado nem código de produção alterado.
 Repetição final dos seis cenários manteve conexão sintética WAL aberta com
 commits sem checkpoint automático; backup online preservou o evento. O
 preflight também confere URL/UUID/nome da variável de token sem ler segredos.
+
+---
+
+## 2026-11-05 — Correção do verificador de reinício e registro da prova real
+
+### Contexto recebido
+
+Corrigir o verificador do roteiro de reinício
+(`docs/prova-reinicio-recuperacao.md`), registrar a prova real de
+persistência enviada pelo operador e atualizar as pendências da
+homologação sem ampliar o aceite. Branch própria a partir de
+`docs/recovery-operational-reboot-proof` (8f37222, contém ea74d5d).
+
+### Causa e correção do verificador
+
+O bloco de evidência do roteiro comparava o vínculo da operação pelo
+prefixo `b73f475a0294f140`, que pertence ao vínculo da **distribuição de
+tarefas** (`distribution._bond_key`), não ao vínculo da fila de
+recuperação. A fila usa `recovery._bond`: SHA-256 de
+`url + '\0' + agent_id` (linha 42-43 de `src/macip_backup/recovery.py`,
+inalterado no congelado ea74d5d). Com URL `https://localhost:18445` e
+agente `dd7d5bae-4717-408c-9e57-b9f4db63aed2`, o vínculo correto é
+`6ae76f7627b3ccb0ef34a4fddf646094616202970655b3e09ecc7c7f68cd1074`
+(conferido por cálculo local). O verificador original falhou durante a
+operação real sem que a fila estivesse corrompida; a revisão anterior não
+detectou a premissa incorreta.
+
+Correção: o snippet agora valida as constantes esperadas do laboratório,
+calcula o vínculo pela regra real e compara o **hash completo** por
+igualdade — nunca o valor recebido do banco nem prefixo. Demais
+verificações (evento, boot, identidade, arquivos) preservadas.
+
+### Verificações locais executadas (fixtures sintéticas)
+
+O snippet corrigido foi extraído do documento e exercitado contra um
+layout sintético completo em `/tmp/verif-fixture` (programa/config/estado/
+locks/recuperacoes, SQLite v3 + agent.db v7, stub de
+`task_lock_directory`):
+
+- vínculo de recuperação correto → **aceito**
+  (`Evidência consistente: before … succeeded 0 arquivos: 3`);
+- vínculo de distribuição `b73f475a…` usado indevidamente → **recusado**
+  (AssertionError);
+- vínculo calculado com URL divergente → **recusado**;
+- evento alterado no banco → **recusado**; arquivo restaurado alterado →
+  **recusado**; controle sem alterações com boot_id sintético diferente →
+  aceito.
+- Sintaxe do snippet conferida por `ast.parse` antes da execução.
+
+Fixtures e stubs em `/tmp/verif-fixture`, removidos ao final. Nenhuma
+consulta a bancos reais, nenhuma execução operacional, nenhuma prova de
+reboot executada por este agente.
+
+### Evidência operacional registrada (relato do operador, não reexecutada)
+
+Prova de reinício aprovada, registrada na seção "Registro da execução pelo
+operador" do roteiro: operação `6bd9b0e3-25c0-4f24-8398-d8ff6f501cb1`,
+restore do snapshot `350165be…`, 3 arquivos não excluídos (incluindo
+`volume-interrupcao.bin`, 512 MiB). Sequência relatada: before
+(succeeded/sent=0) → reboot normal do PC pelo operador (VM intacta, sem
+queda/SIGKILL) → after com boot_id diferente e evidência idêntica →
+somente `recovery-poll` no retorno (`{"received":0,"sent":1,...}`,
+`/readyz` `{"database":"ok"}`) → portal "Concluída pelo agente". Timers
+seguem disabled/inactive. A tentativa parcial com o verificador defeituoso
+foi preservada em pasta própria; a evidência aprovada veio da pasta
+`*-corrigida` com `verificar.py` corrigido e `correcao.txt`.
+
+### Arquivos alterados
+
+- `docs/prova-reinicio-recuperacao.md` — verificador corrigido, nota do
+  defeito, título "executada e aprovada", registro da execução.
+- `docs/homologacao-recuperacao-ea74d5d.md` — item 9 do ciclo, timers
+  disabled/inactive, pendências sem reboot.
+- `docs/recuperacao-portal-linux.md` — prova de reinício deixou de ser
+  pendente.
+- `registro-trabalho.md` — esta entrada.
+
+### Limites
+
+Não houve acesso ao PC/VM/LAN, credenciais, timers ou bancos reais.
+Continuam fora do aceite: queda abrupta/energia/SIGKILL, abandono de
+running, produção, Windows/SMB/SFTP/S3 e volume representativo. Sem
+conclusão de MVP. Gates de API/portal não reexecutados — mudança somente
+documental.

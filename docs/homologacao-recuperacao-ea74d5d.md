@@ -74,15 +74,32 @@ ou conclusão do MVP, nem homologação Windows/SMB/SFTP/S3.
 
 ## Estado e pendências
 
-Timers de recuperação foram **parados**, anteriormente habilitados; não há
-evidência de disable. Podem voltar após sessão/reboot: inactive não implica
-disabled. Não confundir com os timers antigos de consulta/sync de outro
-laboratório, cuja desativação já foi confirmada anteriormente.
+Timers exclusivos de recuperação estão **disabled/inactive** (confirmado
+pelo operador antes e depois do reinício) e serviços inactive, MainPID=0.
+Não confundir com os timers antigos de consulta/sync de outro laboratório,
+cuja desativação já foi confirmada anteriormente.
+
+9. **Persistência após reinício (aprovada, relato do operador)**: restore
+   `6bd9b0e3-25c0-4f24-8398-d8ff6f501cb1`, snapshot 350165be…, 3 arquivos
+   não excluídos incluindo `volume-interrupcao.bin` de 512 MiB. PC reiniciado
+   normalmente pelo operador (sem queda, sem SIGKILL, VM intacta). Estado
+   `succeeded`/`sent=0` preservado com boot_id diferente; somente
+   `recovery-poll` no retorno enviou o resultado (`sent:1`), sem nova
+   execução do worker; portal confirmou “Concluída pelo agente” na pasta
+   `<área>/recuperacoes/6bd9b0e3-…`. Sequência e saídas registradas em
+   [prova-reinicio-recuperacao.md](prova-reinicio-recuperacao.md#registro-da-execução-pelo-operador).
+   A execução revelou um defeito do verificador documental (prefixo do
+   vínculo de distribuição `b73f475a…` usado onde a fila de recuperação
+   exige o vínculo SHA-256 de URL+agent_id, `6ae76f76…`); corrigido, a
+   prova foi refeita em pasta de evidência nova e a tentativa parcial foi
+   preservada.
 
 Nenhuma fila, repositório, pasta parcial ou recuperação foi apagada. 512 MiB
-sintéticos não representam dados/volumes dos clientes. Reboot ainda não foi
-executado; queda abrupta/abandono de running exige ensaio separado.
-Próximo passo: [roteiro de persistência](prova-reinicio-recuperacao.md).
+sintéticos não representam dados/volumes dos clientes. Queda abrupta,
+energia ou SIGKILL e abandono de running continuam fora do aceite e exigem
+ensaio separado. Produção, Windows, SMB, SFTP e S3 também permanecem fora
+desta rodada; não há volume representativo dos clientes nem conclusão do
+MVP.
 
 Testes automatizados anteriores permanecem em recuperação-portal-linux.md e
 registro-trabalho.md. Nesta sessão somente código/documentação do repositório

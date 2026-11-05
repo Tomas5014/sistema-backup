@@ -198,8 +198,13 @@ systemd real, perda/retorno de comunicação, envio durável e parada controlada
 de serviço no laboratório ea74d5d. Isso não encerra validação com volumes dos
 clientes. Os **timers novos de recuperação** estão parados, mas não há prova
 de disable; não confundir com os timers antigos já desabilitados.
-[Persistência após reinício](prova-reinicio-recuperacao.md) permanece pendente;
-o roteiro deve ser executado pelo operador em janela escolhida.
+[Persistência após reinício](prova-reinicio-recuperacao.md): executada e
+aprovada pelo operador no laboratório ea74d5d (relato registrado no próprio
+roteiro). Resultado terminal local persistiu após reboot normal do PC e foi
+enviado por poll sem repetir a restauração, com evento e arquivos
+preservados. A execução revelou e corrigiu um defeito do verificador
+documental (prefixo do vínculo de distribuição usado onde a fila de
+recuperação exige o vínculo SHA-256 de URL+agent_id).
 
 ## Evidências de desenvolvimento — 04/11/2026
 
