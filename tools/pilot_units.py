@@ -8,7 +8,11 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+import time
 import uuid
+
+UNIT_STATES = ('inactive', 'failed', 'active', 'activating', 'deactivating')
+BUSY_STATES = ('active', 'activating', 'deactivating')
 
 
 def digest(data):
@@ -209,6 +213,37 @@ def ctl(*args):
     return subprocess.run(['systemctl','--user',*args], capture_output=True,text=True,check=True,timeout=60)
 
 
+def owned_states(names):
+    states={}
+    for name in names:
+        state=ctl('show',name,'--property=ActiveState','--value').stdout.strip()
+        if state not in UNIT_STATES:
+            raise ValueError('estado do serviço não verificável: '+name)
+        states[name]=state
+    return states
+
+
+def pending_jobs(names):
+    owned=set(names)
+    listing=ctl('list-jobs','--no-legend','--no-pager').stdout
+    return sorted({line.split()[1] for line in listing.splitlines()
+                   if len(line.split())>1 and line.split()[1] in owned})
+
+
+def settle(names, timeout):
+    # Espera limitada: transições/jobs iniciados durante a desativação.
+    deadline=time.monotonic()+timeout
+    while True:
+        states=owned_states(names)
+        jobs=pending_jobs(names)
+        busy=sorted(name for name,state in states.items() if state in BUSY_STATES)
+        if not busy and not jobs:
+            return states
+        if time.monotonic()>=deadline:
+            return states
+        time.sleep(1)
+
+
 def install(plan):
     validate_context(plan)
     files = render(plan)
@@ -251,6 +286,7 @@ def main():
     parser.add_argument('--plan',type=Path,required=True)
     parser.add_argument('--inventory',type=Path)
     parser.add_argument('--allow-stop',action='store_true')
+    parser.add_argument('--settle-seconds',type=float,default=30.0)
     parser.add_argument('command',choices=['preflight','install-recovery','inventory','verify','activate','stop'])
     args=parser.parse_args()
     try:
@@ -269,24 +305,42 @@ def main():
             record=verify(plan,args.inventory)
             if args.command in ('activate','stop'):
                 names=list(record['units'])
-                # Activating oneshots are executing, not idle.
-                running=[]
-                for name in names:
-                    if name.endswith('.service'):
-                        state=ctl('show',name,'--property=ActiveState','--value').stdout.strip()
-                        if state not in ('inactive','failed','active','activating','deactivating'):
-                            raise ValueError('estado do serviço não verificável')
-                        if state in ('active','activating','deactivating'):running.append(name)
-                if running and (args.command=='activate' or not args.allow_stop):
-                    raise ValueError('serviço executando/ativando: parada controlada exige --allow-stop')
-                verify(plan,args.inventory)
+                services=[n for n in names if n.endswith('.service')]
                 timers=[n for n in names if n.endswith('.timer')]
                 if args.command=='activate':
+                    # Activating oneshots are executing, not idle.
+                    states=owned_states(services)
+                    running=sorted(n for n,s in states.items() if s in BUSY_STATES)
+                    jobs=pending_jobs(names)
+                    if running or jobs:
+                        raise ValueError('serviço executando/ativando/job pendente: '+', '.join(running+jobs))
+                    verify(plan,args.inventory)
                     ctl('daemon-reload')
                     if timers:ctl('enable','--now',*timers)
                 else:
+                    # 1) impede novos disparos ANTES de reinspecionar
                     if timers:ctl('disable','--now',*timers)
-                    if running:ctl('stop',*running)
+                    # 2) reinspeção com espera limitada: cobre disparo durante o disable
+                    states=settle(names,args.settle_seconds)
+                    busy=sorted(n for n,s in states.items() if s in BUSY_STATES)
+                    jobs=pending_jobs(names)
+                    if busy or jobs:
+                        if not args.allow_stop:
+                            print(json.dumps({'status':'incomplete','command':'stop',
+                                'timers':'disabled','busy':busy,'jobs':jobs,
+                                'detail':'timers já desabilitados; encerramento pendente: '
+                                         'aguarde o término e repita stop, ou use --allow-stop'}))
+                            parser.exit(3)
+                        targets=sorted(set(busy)|set(jobs))
+                        ctl('stop',*targets)
+                        states=settle(names,args.settle_seconds)
+                        busy=sorted(n for n,s in states.items() if s in BUSY_STATES)
+                        jobs=pending_jobs(names)
+                        if busy or jobs:
+                            raise ValueError('encerramento não concluiu: '+', '.join(busy+jobs))
+                    unconfirmed=[n for n in timers if states[n] not in ('inactive','failed')]
+                    if unconfirmed:
+                        raise ValueError('timer sem estado final confirmado: '+', '.join(unconfirmed))
         print(json.dumps({'status':'ok','command':args.command}))
     except (OSError,ValueError,KeyError,subprocess.SubprocessError) as error:
         parser.exit(2,'recusa: '+str(error)+'\n')

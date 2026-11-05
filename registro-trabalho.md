@@ -3118,3 +3118,68 @@ Linux/local, inclusive reboot normal e envio sem repetir worker, permanecem
 históricas; não se ampliam a SFTP gerenciado, SIGKILL ou volume de clientes.
 Timers antigos de recuperação permanecem disabled/inactive. Sem push, tag,
 deploy, nova conta operacional ou regeneração do pacote congelado.
+
+## 2026-11-05 — Dois bloqueios: ordem da origem e corrida no encerramento
+
+Base: `24a9a191a366381e752e446664fd848fb1eaaefb` (branch
+`fix/pilot-helpers-verification`, já no remoto). Nova branch
+`fix/pilot-shutdown-race`. Sem reset, merge ou reescrita. Produto congelado
+`ea74d5d…` inalterado; helpers continuam externos. Preexistentes fora dos
+commits.
+
+### Achado 1 — origem inexistente na preparação
+
+Reprodução real: envelope de tarefa com `sources` apontando para origem
+ainda não criada é recusado por `distribution._validate_envelope` →
+`TaskSpec.validate_for_execution` ("origem inexistente ou não é
+diretório"), a mesma validação que `pull-tasks --no-activate` executa.
+A ordem antiga (preparar → gerar) falharia numa instalação nova.
+
+Correção: nova seção 4.1 executa `data generate` ANTES da preparação
+(antigas 4.1–4.4 viraram 4.2–4.5). Origem vazia manual foi descartada:
+passaria na validação, mas `generate` a recusa — não é o fluxo.
+Regressão `test_preparation_validates_origin_before_task_preparation`
+usa `_validate_envelope`/`CentralSpec` reais (não um envelope sintético
+que pule a validação de execução): recusa → `generate` recusa origem
+existente → `generate` cria origem+manifesto → validação retorna
+TaskSpec.
+
+### Achado 2 — stop com serviço iniciado durante o disable
+
+Reprodução real do protocolo com systemctl falso com estado: serviço
+`inactive` na primeira consulta, timer dispara durante `disable --now`,
+helper retornava `{"status":"ok"}` sem enviar stop. Protocolo novo em
+`tools/pilot_units.py`:
+
+1. Desabilita os timers do inventário primeiro (impede novos disparos).
+2. Reinspeciona serviços (active/activating/deactivating) e `list-jobs`
+   com espera limitada (`--settle-seconds`, padrão 30s).
+3. Sem `--allow-stop` com execução/job pendente: sai rc=3 com
+   `status:"incomplete"`, `timers:"disabled"` — diagnóstico inequívoco:
+   aguardar e repetir `stop`, ou usar `--allow-stop`.
+4. Com `--allow-stop`: para somente as units próprias ocupadas/com job e
+   recon firma o estado final; se não concluir na espera, recusa.
+5. Timers precisam terminar `inactive`/`failed`; `ok` só sai com tudo
+   confirmado — nunca com estado não verificável.
+
+Regressões em `tests/test_pilot_units.py`: `stateful_ctl` (systemctl
+falso com estado por unit + transição durante disable + jobs);
+`test_service_started_during_disable_is_not_reported_done` prova que a
+corrida agora sai `incomplete` (não `ok`) e que `--allow-stop` para o
+serviço certo; `test_pending_job_blocks_ok_and_is_stopped_with_allow_stop`
+cobre job `start` pendente, ignorando `foreign.service`. O teste de
+`activating` foi reescrito para a semântica nova (disable primeiro,
+depois recusa/parada).
+
+### Verificações
+
+- `PYTHONPATH=src python3 -m unittest tests.test_pilot_data
+  tests.test_pilot_prepared tests.test_pilot_units` → 21/21 (78,7 s),
+  incluindo retenção automática real com Restic local.
+- 13 blocos do roteiro: `bash -n`/`json.loads` 0 erros; `ast.parse` nos
+  três arquivos alterados.
+- `git diff --check` limpo. Ações systemd continuam simuladas; nenhuma
+  unit real foi tocada.
+
+O piloto continua **não iniciado e não aprovado**. Sem push nesta entrega;
+preexistentes preservados.

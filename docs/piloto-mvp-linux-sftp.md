@@ -65,8 +65,11 @@ install -m 600 /dev/null "$AREA/locks/maintenance.lock"
 df -h "$AREA"
 ```
 
-Não crie origem agora: generate recusa origem existente. Preserve ao menos
-2GiB mais margem para origem, recuperações e repositório; meça ambos os hosts.
+Não crie a origem aqui: quem a cria é `data generate` na seção 4.1, ANTES da
+preparação — o produto recusa origem inexistente ao validar a tarefa
+preparada, e generate recusa origem já existente. Origem vazia manual não é
+o fluxo. Preserve ao menos 2GiB mais margem para origem, recuperações e
+repositório; meça ambos os hosts.
 Conexão/gerenciador indisponível é gate pendente, nunca aprovação por `|| true`.
 
 ## 3. Instalação congelada e configurações [PC]
@@ -124,7 +127,27 @@ host key ou credencial interrompe o ensaio; não contorne com modo inseguro.
 
 ## 4. Preparação exata, units e backup inicial [PC + portal]
 
-### 4.1 Preparar antes de ativar
+### 4.1 Dataset inicial e manifesto — antes da preparação
+
+O produto valida a existência das origens ao preparar a tarefa
+(`validate_for_execution` dentro da validação do envelope em
+`pull-tasks --no-activate`). Gerar DEPOIS da preparação falha numa
+instalação nova. Origem vazia manual contornaria a validação e seria
+recusada por `generate`: a sequência correta é gerar primeiro.
+
+```bash
+data generate --generation inicial --seed piloto-v1 --large-bytes 268435456
+```
+
+Manifestos JSON ficam fora da origem/repositório, em referencias.
+Publicação exclusiva recusa sobrescrita. Hashes definem os bytes: seed não
+torna os binários os.urandom reproduzíveis. Não modifique origem com
+editores externos. Helper usa EX no maintenance.lock registrado e recusa
+mutação enquanto uma geração não estiver associada; backup usa SH. Entre
+captura e fim do backup, origem fica estável. Divergência exige parar e
+diagnosticar, nunca refazer referência para fingir que o ponto confere.
+
+### 4.2 Preparar antes de ativar
 
 Publique revisão/agenda aprovadas na central. Não execute pull normal ainda.
 
@@ -149,7 +172,7 @@ cliente/agente/destino, revisão/geração e marcadores completos no staging.
 Ausência/múltiplos/vínculo diferente recusa. Não lê current.json nem escolhe
 `find | head`. Preparação não ativa nem confirma aplicação.
 
-### 4.2 Plano e conflitos
+### 4.3 Plano e conflitos
 
 ```bash
 PLAN="$AREA/evidencias/units-plan.json"
@@ -180,14 +203,13 @@ TimeoutStartSec=infinity e TimeoutStopSec=45s; worker --limit 1. Timers:
 poll aos segundos 00/30, worker 15/45, Persistent=true. Não há ExecStart com
 reticências. São propostas que o operador deve inspecionar antes de ativar.
 
-### 4.3 Dataset, manifesto e associação
+### 4.4 Backup inicial e associação ao snapshot
 
 ```bash
-data generate --generation inicial --seed piloto-v1 --large-bytes 268435456
 (set -o noclobber; manual agent "$CFG" --store "$MACIP_STATE/agent.db" \
   --central "$MACIP_CONFIG/central.json" > "$AREA/evidencias/inicial-result.json")
 (set -o noclobber; manual snapshots "$CFG" "$DESTINATION_ID" > "$AREA/evidencias/inicial-snapshots.json")
-read -r -p 'Snapshot COMPLETO64hex desse resultado/inventário: ' SNAPSHOT
+read -r -p 'Snapshot completo (64 hex) desse resultado/inventário: ' SNAPSHOT
 data bind --generation inicial --result "$AREA/evidencias/inicial-result.json" \
   --snapshots "$AREA/evidencias/inicial-snapshots.json" --task "$TASK_ID" \
   --destination "$DESTINATION_ID" --snapshot "$SNAPSHOT"
@@ -195,17 +217,13 @@ manual check "$CFG" "$DESTINATION_ID" --read-data
 manual sync --store "$MACIP_STATE/agent.db" --central "$MACIP_CONFIG/central.json" --limit 50
 ```
 
-Manifestos JSON e bindings ficam fora da origem/repositório, em referencias.
-Publicação exclusiva recusa sobrescrita. Binding só após backup success com
-execução/tarefa/destino/snapshot compatíveis, tag da tarefa e origem ainda igual
-ao manifesto; registra hash do manifesto e snapshot completo. Hashes definem
-os bytes: seed não torna os binários os.urandom reproduzíveis. Não modifique
-origem com editores externos. Helper usa EX no maintenance.lock registrado e
-recusa mutação enquanto uma geração não estiver associada; backup usa SH.
-Entre captura e fim do backup, origem fica estável. Divergência exige parar
-e diagnosticar, nunca refazer referência para fingir que o ponto confere.
+Bindings são publicados em referencias sem sobrescrita, e só após backup
+success com execução/tarefa/destino/snapshot compatíveis, tag da tarefa e
+origem ainda igual ao manifesto; registra hash do manifesto e snapshot
+completo. Divergência exige parar e diagnosticar, nunca refazer referência
+para fingir que o ponto confere.
 
-### 4.4 Aplicação e inventário completo antes da ativação restante
+### 4.5 Aplicação e inventário completo antes da ativação restante
 
 Somente após aprovação, o pull normal aplica a configuração e pode habilitar
 o timer gerenciado imediatamente (Persistent). Prepare a geração seguinte
@@ -341,12 +359,28 @@ units --inventory "$INV" verify
 units --inventory "$INV" stop
 ```
 
-Stop recusa se um serviço estiver active/activating/deactivating. Se houver
-decisão explícita de parar serviço em execução e registrar parcial:
+O `stop` primeiro DESABILITA os timers do inventário (impede novos
+disparos), depois reinspeciona serviços e jobs pendentes — a primeira
+consulta sozinha não basta: um timer pode disparar durante o próprio
+disable. Active/activating/deactivating contam como execução, e
+`list-jobs` cobre jobs `start` ainda pendentes. Espera limitada por
+`--settle-seconds` (padrão 30s; não é loop infinito). Se algo ainda
+executar e não houver autorização de interromper, o helper sai com
+código 3 e `status:"incomplete"` informando `timers:"disabled"`:
+os timers já foram desligados — aguarde o término e repita `stop`, ou
+use `--allow-stop`. Ele nunca retorna `ok` com serviço rodando, job
+pendente ou estado não verificável; ao final confirma timers inativos.
+Somente `status:"ok"` (rc 0) prova encerramento completo.
+
+Com decisão explícita de interromper execuções e registrar parcial:
 
 ```bash
 units --inventory "$INV" --allow-stop stop
 ```
+
+`--allow-stop` para somente os serviços próprios ocupados/com job e
+reconfirma o estado final; se a parada não concluir dentro da espera,
+recusa (não finge sucesso).
 
 O helper reconfere hashes/propriedade/completude antes das ações, desabilita
 nomes exatos de timers e para somente serviços próprios em execução. Não usa

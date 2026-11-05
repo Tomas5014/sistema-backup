@@ -154,6 +154,41 @@ class PilotDataTests(unittest.TestCase):
         self.assertTrue((restored / next(iter(removed))).is_file())
         self.compare(point, operation)
 
+    def test_preparation_validates_origin_before_task_preparation(self):
+        # Regressão do achado 1: o produto recusa origem ausente na preparação
+        # (validate_for_execution dentro de _validate_envelope). A ordem antiga
+        # do roteiro fazia pull-tasks --no-activate antes de `data generate`.
+        from macip_backup.central import CentralSpec
+        from macip_backup.distribution import _validate_envelope
+        from macip_backup.models import ConfigurationError
+        task, client, agent = str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
+        document = {'id':task,'name':'piloto','client':{'id':client,'name':'cli'},
+                    'device_id':agent,'sources':[str(self.area/'origem')],
+                    'destinations':[{'id':'local-1','name':'d','kind':'local',
+                                     'repository':str(self.area/'repo'),
+                                     'password_environment':'P',
+                                     'retention':{'keep_last':7}}]}
+        envelope = {'task_id':task,'agent_id':agent,'generation':1,'revision':1,
+                    'action':'apply','contract_version':1,'task':document,
+                    'schedule':{'kind':'manual'}}
+        envelope['hash'] = hashlib.sha256(
+            json.dumps(envelope,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+        spec = CentralSpec(url='http://127.0.0.1:1',agent_id=agent,token_environment='X')
+        # Ordem antiga: preparação antes da geração -> recusa real do produto.
+        with self.assertRaises(ConfigurationError):
+            _validate_envelope(envelope,spec)
+        # Uma origem vazia criada à mão passaria na validação, mas generate
+        # recusa origem existente — não é o fluxo correto.
+        (self.area/'origem').mkdir()
+        refused=self.helper('generate','--generation','g1','--seed','t','--large-bytes','64',ok=False)
+        self.assertIn('origem',refused.stderr)
+        (self.area/'origem').rmdir()
+        # Ordem corrigida: geração real primeiro, preparação depois.
+        self.generate()
+        validated=_validate_envelope(envelope,spec)
+        self.assertIsNotNone(validated)
+        self.assertEqual(str(validated.sources[0].path),str(self.area/'origem'))
+
     def test_symlink_escape_and_source_change_before_binding_refused(self):
         self.generate()
         source = self.area / 'origem'
