@@ -94,11 +94,15 @@ a lógica do frontend usa os códigos, não o texto livre.
   início amanhã recebido hoje — são descartadas ANTES da ordenação e
   do limite de 64: não satisfazem ocorrência, não mascaram uma falha
   válida e não entram em `last_execution`/`last_success`. Continuam
-  persistidas no histórico geral; só deixam de influenciar o cálculo.
+  permanecem persistidas no histórico geral — só deixam de ser usadas
+  como evidência pelo monitoramento.
   Limite conhecido: um agente pode afirmar início até ~2 min no futuro
-  sem invalidar a linha — desvios maiores tornam a execução
-  não-evidência até o `received_at` alcançá-la (reprocessada como
-  válida quando o tempo real passar do início alegado).
+  sem invalidar a linha; desvios maiores a tornam não-evidência **de
+  forma permanente** — a validade compara timestamps persistidos
+  (`started_at_utc` do agente vs `received_at` do servidor) e
+  `received_at` é fixado no recebimento: avançar o relógio NÃO
+  revalida um registro rejeitado. Não há mecanismo de correção do
+  histórico nesta versão.
 - **Qual execução satisfaz a ocorrência O:** `started_at_utc >= O`
   E a linha ser temporalmente válida. Execução iniciada antes da
   janela não conta.

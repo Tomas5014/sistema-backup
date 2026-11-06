@@ -33,6 +33,10 @@ export default defineConfig({
             MACIP_API_ADMIN_TOKEN: "test-admin-e2e",
             // exceção local explícita: http no teste; produção usa Secure
             MACIP_API_SESSION_INSECURE_COOKIE: "1",
+            // env documentada do produto, só na stack descartável: prazo
+            // curto permite cobrir 'missing' no E2E com espera de ~2 min
+            // em vez de 30 min reais — não é controle de relógio
+            MACIP_API_MONITOR_TOLERANCE_SECONDS: "5",
           },
         },
         {

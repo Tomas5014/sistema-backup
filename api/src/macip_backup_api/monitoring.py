@@ -222,19 +222,58 @@ def operational_state(distribution: Any | None, applied_schedule: dict | None) -
     return "manual" if applied_schedule.get("kind") == "manual" else "scheduled"
 
 
-def operational_reason(state: str, distribution: Any | None) -> str:
+def operational_reason(
+    state: str,
+    distribution: Any | None,
+    last_effect: str | None = None,
+) -> str:
+    """Explicação coerente com o ÚLTIMO EFEITO CONFIRMADO — o estado
+    operacional mistura desejo pendente com efeito conhecido, e a
+    mensagem não pode afirmar agenda ativa quando o que vigora é
+    suspensão (ou quando nada foi confirmado)."""
     if state == "unpublished":
         return "tarefa nunca publicada para o agente"
     if state == "pending_apply":
-        if (
+        failed = (
             distribution is not None
             and distribution.confirmed_generation == distribution.generation
             and distribution.confirmed_status == "failed"
-        ):
-            return "aplicação publicada falhou no agente — agenda anterior pode continuar ativa"
+        )
+        if last_effect == "suspend":
+            prefix = (
+                "tentativa de retomada falhou no agente"
+                if failed
+                else "retomada publicada; aguardando confirmação do agente"
+            )
+            return f"{prefix} — agenda permanece suspensa"
+        if last_effect == "apply":
+            prefix = (
+                "aplicação da nova revisão falhou no agente"
+                if failed
+                else "nova publicação aguardando confirmação do agente"
+            )
+            return f"{prefix} — agenda anterior continua ativa"
+        if failed:
+            return (
+                "aplicação publicada falhou no agente — "
+                "nenhum efeito operacional confirmado antes"
+            )
         return "aplicação publicada; aguardando confirmação do agente"
     if state == "pending_suspend":
-        return "suspensão solicitada; agenda anterior continua ativa até confirmar"
+        if last_effect == "suspend":
+            return (
+                "nova suspensão solicitada; agenda já estava suspensa "
+                "na última confirmação"
+            )
+        if last_effect == "apply":
+            return (
+                "suspensão solicitada; agenda anterior continua ativa "
+                "até confirmar"
+            )
+        return (
+            "suspensão solicitada; nenhum efeito operacional "
+            "confirmado antes"
+        )
     if state == "suspended":
         return "suspensão confirmada — nenhuma ocorrência nova é esperada"
     if state == "manual":
@@ -316,11 +355,18 @@ def compute(
     # seleção de last_* e das candidatas de ocorrência
     valid = [e for e in ordered if _valid_execution(e)]
     last_execution = _execution_brief(valid[0]) if valid else None
-    last_ok = _execution_brief(last_success) if last_success else None
+    # last_success também passa pela política — o coletor SQL já filtra,
+    # mas o cálculo puro não pode emitir evidência que ele mesmo rejeita
+    last_ok = (
+        _execution_brief(last_success)
+        if last_success is not None and _valid_execution(last_success)
+        else None
+    )
     op = operational_state(distribution, applied_schedule)
     base = {
         "operational_state": op,
-        "operational_reason": operational_reason(op, distribution),
+        "operational_reason": operational_reason(op, distribution,
+                                                 last_effect),
         "last_execution": last_execution,
         "last_success": last_ok,
         "received_late": False,

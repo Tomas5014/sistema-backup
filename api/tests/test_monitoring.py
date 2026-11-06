@@ -1052,3 +1052,173 @@ def test_pure_unknown_effect_does_not_fabricate_active_agenda():
     result = _compute(dist, DAILY_UTC_14, now="2026-11-06T16:00:00Z",
                       last_effect=None)
     assert result.result_state != "missing"
+
+
+# ---- ajuste A: explicação operacional coerente com o efeito confirmado -------
+
+def test_pure_reason_pending_suspend_over_already_suspended():
+    # suspensão JÁ confirmada + novo pedido pendente: a explicação não
+    # pode afirmar "agenda anterior continua ativa" — ela está suspensa
+    anchor = _at("2026-11-06T10:00:00Z")
+    dist = _dist("suspend", confirmed_status=None, last_applied_at=anchor)
+    result = _compute(dist, DAILY_UTC_14, now="2026-11-06T16:00:00Z",
+                      last_effect="suspend")
+    assert result.operational_state == "pending_suspend"
+    assert result.result_state == "no_history"  # nada cobrado
+    assert "ativa" not in result.operational_reason
+    assert "suspensa" in result.operational_reason
+
+
+def test_pure_reason_resume_pending_over_suspended():
+    # retomada publicada sobre agenda suspensa: explicação diz que
+    # permanece suspensa até confirmar — nunca "aguardando" genérico
+    anchor = _at("2026-11-06T10:00:00Z")
+    dist = _dist("apply", confirmed_status=None, last_applied_at=anchor)
+    result = _compute(dist, DAILY_UTC_14, now="2026-11-06T16:00:00Z",
+                      last_effect="suspend")
+    assert result.operational_state == "pending_apply"
+    assert "suspensa" in result.operational_reason
+
+
+def test_pure_reason_failed_resume_over_suspended():
+    # tentativa de retomada falhou: explicação registra a falha E a
+    # suspensão que permanece em efeito
+    anchor = _at("2026-11-06T10:00:00Z")
+    dist = _dist("apply", confirmed_status="failed",
+                 last_applied_at=anchor)
+    result = _compute(dist, DAILY_UTC_14, now="2026-11-06T16:00:00Z",
+                      last_effect="suspend")
+    assert result.operational_state == "pending_apply"
+    assert "falhou" in result.operational_reason
+    assert "suspensa" in result.operational_reason
+
+
+def test_pure_reason_pending_suspend_over_active_keeps_continuity():
+    # agenda REALMENTE ativa + suspensão pendente: a explicação de
+    # continuidade é a correta e deve ser preservada
+    anchor = _at("2026-11-06T10:00:00Z")
+    dist = _dist("suspend", confirmed_status=None, last_applied_at=anchor)
+    result = _compute(dist, DAILY_UTC_14, now="2026-11-06T16:00:00Z",
+                      last_effect="apply")
+    assert result.operational_state == "pending_suspend"
+    assert "ativa" in result.operational_reason
+
+
+def test_pure_reason_pending_apply_over_active_keeps_continuity():
+    anchor = _at("2026-11-06T10:00:00Z")
+    dist = _dist("apply", confirmed_status=None, last_applied_at=anchor)
+    result = _compute(dist, DAILY_UTC_14, now="2026-11-06T16:00:00Z",
+                      last_effect="apply")
+    assert result.operational_state == "pending_apply"
+    assert "anterior" in result.operational_reason
+
+
+def test_pure_reason_unknown_effect_states_uncertainty():
+    # efeito desconhecido: incerteza explícita — não afirma timer ativo
+    # nem suspenso
+    anchor = _at("2026-11-06T10:00:00Z")
+    dist = _dist("suspend", confirmed_status=None, last_applied_at=anchor)
+    result = _compute(dist, DAILY_UTC_14, now="2026-11-06T16:00:00Z",
+                      last_effect=None)
+    assert result.operational_state == "pending_suspend"
+    assert "ativa" not in result.operational_reason
+    assert "suspensa" not in result.operational_reason
+
+
+def test_reason_pending_suspend_after_confirmed_suspension_via_api(
+        client, agent, admin_headers, monkeypatch):
+    """Cenário contraditório pela API real: suspensão confirmada →
+    nova suspensão pendente — a explicação não pode dizer que a agenda
+    anterior continua ativa."""
+    real = datetime.now(UTC)
+    due = (real - timedelta(hours=1)).replace(second=0, microsecond=0)
+    anchor = real - timedelta(hours=3)
+    task = _apply(client, admin_headers, agent["headers"],
+                  agent["agent_id"], _schedule_due_at(due), monkeypatch,
+                  anchor)
+    client.post(f"/api/v1/tasks/{task['id']}/suspend",
+                json={"expected_generation": 1}, headers=admin_headers)
+    _confirm(client, agent["headers"], task["id"], 2,
+             applied_revision=None)  # suspensão CONFIRMADA (gen 2)
+    again = client.post(f"/api/v1/tasks/{task['id']}/suspend",
+                        json={"expected_generation": 2},
+                        headers=admin_headers)  # novo pedido (gen 3)
+    assert again.status_code == 200, again.text
+    _freeze(monkeypatch, due + timedelta(hours=2))
+    body = client.get(f"/api/v1/monitoring/tasks/{task['id']}",
+                      headers=admin_headers).json()
+    assert body["operational_state"] == "pending_suspend"
+    assert body["result_state"] == "no_history"
+    assert "continua ativa" not in body["operational_reason"]
+    assert "suspensa" in body["operational_reason"]
+
+
+# ---- ajuste B: last_success passa pela validade temporal --------------------
+
+def test_pure_invalid_last_success_not_reported():
+    # o mesmo sucesso inválido chega por executions e last_success:
+    # não pode aparecer como evidência em lugar nenhum
+    anchor = _at("2026-11-06T10:00:00Z")
+    dist = _dist(last_applied_at=anchor)
+    future = _exec("success", "2026-11-07T14:00:00Z", "2026-11-06T15:00:00Z")
+    result = _compute(dist, DAILY_UTC_14, [future], last_ok=future,
+                      now="2026-11-06T15:00:00Z")
+    assert result.result_state == "missing"
+    assert result.last_execution is None
+    assert result.last_success is None
+
+
+def test_pure_invalid_last_success_filtered_in_informational_branch():
+    # ramo informativo (manual): a regra também vale fora da cobrança
+    manual = _dist("apply", last_applied_at=_at("2026-11-06T10:00:00Z"))
+    future = _exec("success", "2026-11-07T14:00:00Z", "2026-11-06T15:00:00Z")
+    result = _compute(manual, {"kind": "manual"}, [future], last_ok=future,
+                      now="2026-11-06T15:00:00Z")
+    assert result.last_success is None
+    assert result.last_execution is None
+
+
+def test_pure_valid_last_success_reported_even_off_occurrence():
+    # sucesso válido ANTIGO não satisfaz a ocorrência devida mas segue
+    # informativo em last_success (o SQL o busca fora da janela de 64)
+    anchor = _at("2026-11-06T10:00:00Z")
+    dist = _dist(last_applied_at=anchor)
+    old_ok = _exec("success", "2026-11-05T14:00:00Z", "2026-11-05T14:30:00Z")
+    result = _compute(dist, DAILY_UTC_14, [old_ok], last_ok=old_ok,
+                      now="2026-11-06T15:00:00Z")
+    assert result.result_state == "missing"
+    assert result.last_success is not None
+    assert result.last_success["status"] == "success"
+
+
+def test_pure_last_success_skew_boundaries():
+    anchor = _at("2026-11-06T10:00:00Z")
+    dist = _dist(last_applied_at=anchor)
+    at_limit = _exec("success", "2026-11-06T14:02:00Z",
+                     "2026-11-06T14:00:00Z")      # +120 s: válido
+    over = _exec("success", "2026-11-06T14:02:01Z",
+                 "2026-11-06T14:00:00Z")          # +121 s: inválido
+    ok = _compute(dist, DAILY_UTC_14, [at_limit], last_ok=at_limit,
+                  now="2026-11-06T14:03:00Z")
+    assert ok.last_success is not None
+    bad = _compute(dist, DAILY_UTC_14, [over], last_ok=over,
+                   now="2026-11-06T14:40:00Z")
+    assert bad.last_success is None
+
+
+# ---- ajuste C: avançar `now` não revalida registro rejeitado ----------------
+
+def test_rejected_record_stays_invalid_when_now_advances():
+    # a validade compara timestamps PERSISTIDOS (started vs received) —
+    # `received_at` não avança com `now`: esperar não torna a linha
+    # evidência. O registro permanece no histórico, só não é usado.
+    anchor = _at("2026-11-06T10:00:00Z")
+    dist = _dist(last_applied_at=anchor)
+    future = _exec("success", "2026-11-08T14:00:00Z", "2026-11-06T15:00:00Z")
+    r1 = _compute(dist, DAILY_UTC_14, [future], last_ok=future,
+                  now="2026-11-06T16:00:00Z")
+    r2 = _compute(dist, DAILY_UTC_14, [future], last_ok=future,
+                  now="2026-11-09T16:00:00Z")  # 3 dias DEPOIS do início
+    assert r1.last_execution is None and r1.last_success is None
+    assert r2.last_execution is None and r2.last_success is None
+    assert r2.result_state == "missing"  # sem evidência, segue devendo

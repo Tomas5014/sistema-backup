@@ -3329,3 +3329,76 @@ Contrato continua sem distinguir disparo manual de agendado; skew de
 120 s é tolerância de relógio, não prova de honestidade do agente;
 `missing` segue sem separar atraso de início/execução/envio de falta
 de comunicação. Monitoramento não homologado operacionalmente.
+
+## Segunda rodada de revisão — branch `fix/monitoring-review-2`
+
+Três ajustes finos sobre `742d20c` (revisão de `fix/monitoring-review`),
+com regressões que falharam antes e passam depois — 10 falharam na
+primeira execução, todas pertinentes (não foram erros de fixture).
+
+### Ajuste A — explicação contradizia suspensão confirmada
+
+- **Causa:** `operational_reason(state, distribution)` ignorava
+  `last_effect`: `pending_suspend` sempre dizia "agenda anterior
+  continua ativa" — falso quando a agenda já estava suspensa; o mesmo
+  para `pending_apply` sobre agenda suspensa e para retomada falha.
+- **Correção:** `operational_reason` recebe `last_effect` e distingue
+  os três casos — efeito 'suspend' ("permanece suspensa"/"já estava
+  suspensa"), 'apply' (continuidade real preservada) e desconhecido
+  ("nenhum efeito operacional confirmado antes", sem afirmar timer).
+  Códigos e formato da resposta inalterados — só o texto explicativo.
+- **Regressões (6 puras + 1 HTTP/PG real):** suspensão confirmada→
+  novo pedido pendente, retomada pendente, retomada falha, continuidade
+  sobre agenda ativa (apply/suspend) e efeito desconhecido; cenário
+  contraditório verificado via `GET /monitoring` real.
+
+### Ajuste B — last_success furava a validade no cálculo puro
+
+- **Causa:** `compute()` filtrava `executions` por `_valid_execution`
+  mas emitia `last_success` sem validar — resposta podia carregar um
+  sucesso inválido ao lado de `last_execution: null` e `missing`.
+- **Correção:** `last_success` passa pelo mesmo `_valid_execution`.
+  A proteção SQL foi mantida — a janela dedicada continua encontrando
+  sucesso legítimo fora das 64 recentes (regressão preservada).
+- **Regressões (4 puras):** inválido some da resposta e do ramo
+  informativo (manual); válido antigo segue informativo mesmo sem
+  satisfazer a ocorrência; fronteiras 120/121 s respeitadas.
+
+### Ajuste C — documentação prometia revalidação inexistente
+
+- **Causa:** `acompanhamento-tarefas.md` afirmava que a linha inválida
+  seria "reprocessada como válida" quando o tempo real alcançasse o
+  início alegado — a regra compara `started_at_utc` vs `received_at`
+  fixos no recebimento; `now` não entra na comparação.
+- **Correção:** documentado o comportamento efetivo — rejeição
+  permanente para o monitoramento, histórico preservado, sem mecanismo
+  de correção nesta versão. Comentários do módulo conferidos.
+- **Regressão (1 pura):** avançar `now` 3 dias além do início alegado
+  não revalida — `last_execution`/`last_success` seguem `None` e o
+  estado permanece `missing`.
+
+### Verificações desta rodada
+
+- `pytest tests/test_monitoring.py -k "reason_ or last_success or
+  rejected"` → **10 failed / 2 passed ANTES** (reproduções reais) →
+  **12/12 depois**; suíte do arquivo: **54/54**.
+- Suíte API completa: **244/244** em PostgreSQL descartável.
+- Portal: `vitest run` 94/94, `tsc -b` limpo, `vite build` OK.
+- **E2E real (`e2e/monitoring.spec.ts`, novo):** Chrome do sistema +
+  API real (uvicorn) + PostgreSQL descartável — **2/2**: login de
+  operador; lista e detalhe com selos distintos `missing` (âmbar,
+  "não prova falha") vs `failed` (recebido); suspensão confirmada +
+  novo pedido pendente exibindo explicação coerente ("já estava
+  suspensa", sem "continua ativa"); viewer lê acompanhamento e segue
+  com escrita 403. 'missing' provado com espera REAL ~2 min (agenda
+  horária + tolerância 5 s via env documentada — sem controle de
+  relógio nem rota de teste). Fixtures REST identificadas — não são
+  prova de execução Restic.
+- `git diff --check` limpo. Gate pendente: nenhum — E2E executado.
+
+### Pendências declaradas
+
+Continuam válidas as limitações anteriores (sem distinção manual/
+agendado, skew ≠ prova de honestidade, `missing` não separa causas).
+Monitoramento segue não homologado operacionalmente; piloto `ea74d5d`
+intocado.
