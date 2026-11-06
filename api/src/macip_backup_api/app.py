@@ -14,7 +14,7 @@ import json
 import re
 import secrets
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import math
 from typing import Literal
@@ -1200,6 +1200,7 @@ def create_app() -> FastAPI:
         applied_revision: TaskRevision | None,
         executions: list[Execution],
         last_success: Execution | None,
+        last_effect: str | None,
         agent: Agent | None,
         now: datetime,
         tolerance: int,
@@ -1216,6 +1217,7 @@ def create_app() -> FastAPI:
             ),
             executions=executions,
             last_success=last_success,
+            last_effect=last_effect,
             now=now,
             tolerance=tolerance,
         )
@@ -1267,15 +1269,57 @@ def create_app() -> FastAPI:
         sem N+1: distribuição, revisões aplicadas, agentes e execuções
         recentes são buscados UMA vez para toda a página.
 
-        Execuções por tarefa limitadas a 64 mais recentes (janela fixa):
-        as execuções que satisfazem a ocorrência vencida estão no topo —
-        varrer o histórico inteiro não mudaria o estado calculado.
-        `last_success` usa janela própria com status='success'."""
+        Execuções vinculadas ao PAR (task_id textual, agent_id dono):
+        a ingestão aceita task_id livre para tarefas locais, então só o
+        par autenticado conta — execuções de outro agente com o mesmo
+        task_id nunca entram na janela, ANTES do limite de 64 mais
+        recentes. Linhas temporalmente inválidas (started_at_utc do
+        agente posterior ao recebimento + skew) também saem ANTES do
+        limite para não esconderem resultados válidos.
+        `last_success` usa janela própria com status='success'.
+        O efeito operacional vigente sai do log de confirmações: a
+        linha 'applied' mais nova por tarefa — applied_revision NULL
+        = suspensão confirmada, preenchido = configuração aplicada."""
         now = datetime.now(UTC)
         if not tasks:
             return []
         task_ids = [t.id for t in tasks]
-        task_key = [str(t) for t in task_ids]
+        owner = tuple_(Execution.task_id, Execution.agent_id).in_(
+            [(str(t.id), t.agent_id) for t in tasks]
+        )
+        valid_time = Execution.started_at_utc <= Execution.received_at + (
+            timedelta(seconds=monitoring.FUTURE_SKEW_SECONDS)
+        )
+        # efeito confirmado mais recente por tarefa (log de
+        # confirmações): a tentativa 'applied' de maior (gen, attempt)
+        conf_sub = (
+            select(
+                TaskConfirmation.task_id.label("tid"),
+                TaskConfirmation.applied_revision.label("rev"),
+                func.row_number()
+                .over(
+                    partition_by=TaskConfirmation.task_id,
+                    order_by=(
+                        TaskConfirmation.generation.desc(),
+                        TaskConfirmation.attempt.desc(),
+                    ),
+                )
+                .label("rn"),
+            )
+            .where(
+                TaskConfirmation.task_id.in_(task_ids),
+                TaskConfirmation.status == "applied",
+            )
+            .subquery()
+        )
+        effects = {
+            r.tid: ("suspend" if r.rev is None else "apply")
+            for r in db.execute(
+                select(conf_sub.c.tid, conf_sub.c.rev).where(
+                    conf_sub.c.rn == 1
+                )
+            )
+        }
         dists = {
             d.task_id: d
             for d in db.execute(
@@ -1318,7 +1362,7 @@ def create_app() -> FastAPI:
                     ),
                 )
                 .label("rn"),
-            ).where(Execution.task_id.in_(task_key), *extra).subquery()
+            ).where(owner, valid_time, *extra).subquery()
 
         recent_sub = _window(())
         recent = db.execute(
@@ -1349,6 +1393,7 @@ def create_app() -> FastAPI:
                 ),
                 by_task.get(str(task.id), []),
                 successes.get(str(task.id)),
+                effects.get(task.id),
                 agents.get(task.agent_id),
                 now,
                 tolerance,

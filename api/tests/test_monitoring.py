@@ -67,13 +67,14 @@ def _dist(
 
 
 def _compute(dist, schedule, executions=(), last_ok=None, now="2026-03-10T12:00:00Z",
-             tolerance=1800, basis=1):
+             tolerance=1800, basis=1, last_effect="apply"):
     return monitoring.compute(
         distribution=dist,
         applied_schedule=schedule,
         basis_revision=basis,
         executions=executions,
         last_success=last_ok,
+        last_effect=last_effect,
         now=_at(now),
         tolerance=tolerance,
     )
@@ -292,7 +293,8 @@ def test_revision_change_reanchors_without_reinterpreting_history():
 def test_suspended_and_manual_are_informational_not_charged():
     anchor = _at("2026-03-09T12:00:00Z")
     suspended = _dist("suspend", last_applied_at=anchor)
-    result = _compute(suspended, DAILY_SP_14, now="2026-03-10T19:00:00Z")
+    result = _compute(suspended, DAILY_SP_14, now="2026-03-10T19:00:00Z",
+                      last_effect="suspend")
     assert result.operational_state == "suspended"
     assert result.result_state == "no_history"  # sem cobrança
     manual = _dist("apply", last_applied_at=anchor)
@@ -605,3 +607,448 @@ def test_viewer_session_reads_monitoring(client, portal, admin_headers):
     # viewer não escreve — POST de publicação segue negado pela sessão
     denied = portal.post("/api/v1/tasks/x/publish", json={})
     assert denied.status_code in (400, 403, 422)
+
+
+# ---- defeito B: coerência temporal (started vs recebido) ---------------------
+
+DAILY_UTC_14 = {"kind": "daily", "timezone": "UTC", "hour": 14, "minute": 0}
+
+
+def test_future_success_does_not_satisfy_current_occurrence():
+    # sucesso "de amanhã" recebido hoje: não pode cobrir a ocorrência de
+    # hoje — started_at_utc é informado pelo agente e incoerente com o
+    # recebimento do servidor
+    anchor = _at("2026-11-06T10:00:00Z")
+    dist = _dist(last_applied_at=anchor)
+    future = _exec("success", "2026-11-07T14:00:00Z", "2026-11-06T15:00:00Z")
+    result = _compute(dist, DAILY_UTC_14, [future], now="2026-11-06T15:00:00Z")
+    assert result.result_state == "missing"
+
+
+def test_future_row_does_not_mask_valid_failure():
+    anchor = _at("2026-11-06T10:00:00Z")
+    dist = _dist(last_applied_at=anchor)
+    failed = _exec("failed", "2026-11-06T14:00:30Z", "2026-11-06T14:30:00Z")
+    future = _exec("success", "2026-11-07T14:00:00Z", "2026-11-06T15:00:00Z")
+    result = _compute(dist, DAILY_UTC_14, [failed, future],
+                      now="2026-11-06T15:05:00Z")
+    assert result.result_state == "failed"  # a falha válida prevalece
+
+
+def test_skew_boundary_start_vs_server_receipt():
+    # tolerância de desvio: o relógio do agente pode estar até 120 s à
+    # frente do recebimento; além disso a linha é temporalmente inválida
+    anchor = _at("2026-11-06T10:00:00Z")
+    dist = _dist(last_applied_at=anchor)
+    at_limit = _exec("success", "2026-11-06T14:02:00Z", "2026-11-06T14:00:00Z")
+    over_limit = _exec("success", "2026-11-06T14:02:01Z", "2026-11-06T14:00:00Z")
+    ok = _compute(dist, DAILY_UTC_14, [at_limit], now="2026-11-06T14:03:00Z")
+    assert ok.result_state == "ok"  # +120 s: dentro da tolerância
+    bad = _compute(dist, DAILY_UTC_14, [over_limit], now="2026-11-06T14:40:00Z")
+    assert bad.result_state == "missing"  # +121 s: inválido, não satisfaz
+
+
+def test_valid_late_receipt_and_out_of_order_still_work():
+    anchor = _at("2026-11-06T10:00:00Z")
+    dist = _dist(last_applied_at=anchor)
+    late = _exec("success", "2026-11-06T14:00:20Z", "2026-11-06T15:00:00Z")
+    result = _compute(dist, DAILY_UTC_14, [late], now="2026-11-06T15:10:00Z")
+    assert result.result_state == "ok" and result.received_late is True
+    # fora de ordem: sucesso mais novo vence falha recebida depois
+    ooo = _compute(
+        dist, DAILY_UTC_14,
+        [_exec("success", "2026-11-06T14:40:00Z", "2026-11-06T14:45:00Z"),
+         _exec("failed", "2026-11-06T14:00:20Z", "2026-11-06T14:50:00Z")],
+        now="2026-11-06T15:10:00Z",
+    )
+    assert ooo.result_state == "ok"
+
+
+# ---- defeito A: dono da execução ---------------------------------------------
+
+def test_foreign_agent_same_task_id_does_not_contaminate(client, agent,
+                                                       admin_headers,
+                                                       monkeypatch):
+    """Execução do agente B com o task_id textual da tarefa de A não
+    entra no histórico nem no last_success de A — nem entre clientes
+    diferentes, nem dentro do mesmo cliente."""
+    real = datetime.now(UTC)
+    due = (real - timedelta(hours=1)).replace(second=0, microsecond=0)
+    anchor = real - timedelta(hours=3)
+    task = _apply(client, admin_headers, agent["headers"],
+                  agent["agent_id"], _schedule_due_at(due), monkeypatch,
+                  anchor)
+    _freeze(monkeypatch, due + timedelta(hours=2))
+
+    foreign_same_client = client.post(
+        f"/api/v1/clients/{agent['client_id']}/agents",
+        json={"name": "ag-irmao"}, headers=admin_headers,
+    ).json()
+    cred_same = client.post(
+        f"/api/v1/agents/{foreign_same_client['id']}/credentials",
+        json={}, headers=admin_headers,
+    ).json()
+    from tests.conftest import second_agent
+    other_client = second_agent(client, admin_headers)
+
+    for headers in (
+        {"Authorization": f"Bearer {cred_same['token']}"},
+        other_client["headers"],
+    ):
+        posted = client.post(
+            "/api/v1/agent/executions",
+            json=execution_payload(
+                task_id=task["id"], status="success",
+                started_at_utc=(due + timedelta(seconds=15)).strftime(Z),
+                finished_at_utc=(due + timedelta(minutes=5)).strftime(Z),
+            ),
+            headers=headers,
+        )
+        assert posted.status_code in (200, 201), posted.text
+
+    body = client.get(f"/api/v1/monitoring/tasks/{task['id']}",
+                      headers=admin_headers).json()
+    assert body["result_state"] == "missing"  # sucesso alheio não satisfaz
+    assert body["last_execution"] is None
+    assert body["last_success"] is None
+
+    # execução do PRÓPRIO dono continua contando
+    legit = client.post(
+        "/api/v1/agent/executions",
+        json=execution_payload(
+            task_id=task["id"], status="success",
+            started_at_utc=(due + timedelta(seconds=20)).strftime(Z),
+            finished_at_utc=(due + timedelta(minutes=5)).strftime(Z),
+        ),
+        headers=agent["headers"],
+    )
+    assert legit.status_code in (200, 201)
+    body = client.get(f"/api/v1/monitoring/tasks/{task['id']}",
+                      headers=admin_headers).json()
+    assert body["result_state"] == "ok"
+    assert body["last_success"]["status"] == "success"
+
+
+def test_many_foreign_rows_do_not_push_legit_out_of_window(client, agent,
+                                                           admin_headers,
+                                                           monkeypatch):
+    """70 execuções alheias mais novas não expulsam a legítima da
+    janela de 64: a restrição de dono é aplicada ANTES do limite."""
+    real = datetime.now(UTC)
+    due = (real - timedelta(hours=1)).replace(second=0, microsecond=0)
+    anchor = real - timedelta(hours=3)
+    task = _apply(client, admin_headers, agent["headers"],
+                  agent["agent_id"], _schedule_due_at(due), monkeypatch,
+                  anchor)
+    _freeze(monkeypatch, due + timedelta(hours=2))
+
+    legit = client.post(
+        "/api/v1/agent/executions",
+        json=execution_payload(
+            task_id=task["id"], status="success",
+            started_at_utc=(due + timedelta(seconds=15)).strftime(Z),
+            finished_at_utc=(due + timedelta(minutes=5)).strftime(Z),
+        ),
+        headers=agent["headers"],
+    )
+    assert legit.status_code in (200, 201)
+
+    from tests.conftest import second_agent
+    foreign = second_agent(client, admin_headers)
+    for i in range(70):
+        posted = client.post(
+            "/api/v1/agent/executions",
+            json=execution_payload(
+                task_id=task["id"], status="failed",
+                # mais recentes que a legítima — dominariam a janela
+                started_at_utc=(due + timedelta(minutes=30, seconds=i))
+                .strftime(Z),
+                finished_at_utc=(due + timedelta(minutes=35, seconds=i))
+                .strftime(Z),
+            ),
+            headers=foreign["headers"],
+        )
+        assert posted.status_code in (200, 201)
+
+    body = client.get(f"/api/v1/monitoring/tasks/{task['id']}",
+                      headers=admin_headers).json()
+    assert body["result_state"] == "ok"
+    assert body["last_execution"]["status"] == "success"
+
+
+# ---- defeito B no coletor: futuros não escondem a legítima -------------------
+
+def test_future_rows_do_not_hide_legit_in_collector(client, agent,
+                                                    admin_headers,
+                                                    monkeypatch):
+    """Janela de 64 despreza linhas temporalmente inválidas: 70
+    execuções 'futuras' do próprio agente não escondem a legítima."""
+    real = datetime.now(UTC)
+    due = (real - timedelta(hours=1)).replace(second=0, microsecond=0)
+    anchor = real - timedelta(hours=3)
+    task = _apply(client, admin_headers, agent["headers"],
+                  agent["agent_id"], _schedule_due_at(due), monkeypatch,
+                  anchor)
+    _freeze(monkeypatch, due + timedelta(hours=2))
+
+    for i in range(70):
+        posted = client.post(
+            "/api/v1/agent/executions",
+            json=execution_payload(
+                task_id=task["id"], status="success",
+                started_at_utc=(real + timedelta(days=1, seconds=i))
+                .strftime(Z),
+                finished_at_utc=(real + timedelta(days=1, seconds=i + 60))
+                .strftime(Z),
+            ),
+            headers=agent["headers"],
+        )
+        assert posted.status_code in (200, 201)
+
+    body = client.get(f"/api/v1/monitoring/tasks/{task['id']}",
+                      headers=admin_headers).json()
+    # nenhuma execução temporalmente válida para a ocorrência → missing
+    assert body["result_state"] == "missing"
+
+    legit = client.post(
+        "/api/v1/agent/executions",
+        json=execution_payload(
+            task_id=task["id"], status="success",
+            started_at_utc=(due + timedelta(seconds=15)).strftime(Z),
+            finished_at_utc=(due + timedelta(minutes=5)).strftime(Z),
+        ),
+        headers=agent["headers"],
+    )
+    assert legit.status_code in (200, 201)
+    body = client.get(f"/api/v1/monitoring/tasks/{task['id']}",
+                      headers=admin_headers).json()
+    assert body["result_state"] == "ok"
+    assert body["last_execution"]["started_at_utc"] == (
+        due + timedelta(seconds=15)
+    ).strftime(Z)
+
+
+# ---- defeito C: república/suspensão sobre agenda suspensa --------------------
+
+def _confirm(client, headers, task_id, generation, status="applied",
+             applied_revision=1):
+    return client.post(
+        f"/api/v1/agent/tasks/{task_id}/confirmations",
+        json={"generation": generation, "attempt": 1, "status": status,
+              "applied_revision": applied_revision},
+        headers=headers,
+    )
+
+
+def test_republish_over_suspended_does_not_charge(client, agent,
+                                                  admin_headers, monkeypatch):
+    """Aplicada → suspensa (confirmado) → republicada pendente: a
+    suspensão permanece e NADA é cobrado até a retomada confirmar."""
+    real = datetime.now(UTC)
+    due = (real - timedelta(hours=1)).replace(second=0, microsecond=0)
+    anchor = real - timedelta(hours=3)
+    task = _apply(client, admin_headers, agent["headers"],
+                  agent["agent_id"], _schedule_due_at(due), monkeypatch,
+                  anchor)
+
+    # suspensão pedida e confirmada pelo agente (geração 2)
+    suspended = client.post(
+        f"/api/v1/tasks/{task['id']}/suspend",
+        json={"expected_generation": 1}, headers=admin_headers,
+    )
+    assert suspended.status_code == 200, suspended.text
+    confirmed = _confirm(client, agent["headers"], task["id"], 2,
+                         applied_revision=None)
+    assert confirmed.status_code == 200, confirmed.text
+
+    # república a revisão 1 — geração 3 apply ainda NÃO confirmada
+    republished = client.post(
+        f"/api/v1/tasks/{task['id']}/publish",
+        json={"revision": 1, "expected_generation": 2},
+        headers=admin_headers,
+    )
+    assert republished.status_code == 200, republished.text
+    assert republished.json()["distribution"]["generation"] == 3
+
+    _freeze(monkeypatch, due + timedelta(hours=2))
+    body = client.get(f"/api/v1/monitoring/tasks/{task['id']}",
+                      headers=admin_headers).json()
+    assert body["operational_state"] == "pending_apply"
+    # a agenda segue suspensa — nenhuma cobrança durante a retomada
+    assert body["result_state"] != "missing"
+    assert body["result_state"] == "no_history"
+
+    # retomada confirmada: a cobrança volta SÓ a partir da nova âncora
+    resume_at = due + timedelta(days=2)
+    _freeze(monkeypatch, resume_at)
+    confirmed = _confirm(client, agent["headers"], task["id"], 3,
+                         applied_revision=1)
+    assert confirmed.status_code == 200, confirmed.text
+    body = client.get(f"/api/v1/monitoring/tasks/{task['id']}",
+                      headers=admin_headers).json()
+    assert body["operational_state"] == "scheduled"
+    # a ocorrência no instante da retomada não é cobrada (<= âncora);
+    # a PRIMEIRA cobrada é a do dia seguinte — intervalo suspenso fora
+    _freeze(monkeypatch, resume_at + timedelta(days=1, hours=3))
+    body = client.get(f"/api/v1/monitoring/tasks/{task['id']}",
+                      headers=admin_headers).json()
+    assert body["result_state"] == "missing"
+
+
+def test_suspend_again_over_suspended_does_not_charge(client, agent,
+                                                      admin_headers,
+                                                      monkeypatch):
+    """Suspender de novo uma tarefa já suspensa: pending_suspend sem
+    cobrança nova."""
+    real = datetime.now(UTC)
+    due = (real - timedelta(hours=1)).replace(second=0, microsecond=0)
+    anchor = real - timedelta(hours=3)
+    task = _apply(client, admin_headers, agent["headers"],
+                  agent["agent_id"], _schedule_due_at(due), monkeypatch,
+                  anchor)
+    client.post(f"/api/v1/tasks/{task['id']}/suspend",
+                json={"expected_generation": 1}, headers=admin_headers)
+    _confirm(client, agent["headers"], task["id"], 2,
+             applied_revision=None)
+    again = client.post(
+        f"/api/v1/tasks/{task['id']}/suspend",
+        json={"expected_generation": 2}, headers=admin_headers,
+    )
+    assert again.status_code == 200, again.text
+    _freeze(monkeypatch, due + timedelta(hours=2))
+    body = client.get(f"/api/v1/monitoring/tasks/{task['id']}",
+                      headers=admin_headers).json()
+    assert body["operational_state"] == "pending_suspend"
+    assert body["result_state"] != "missing"
+
+
+def test_pending_apply_over_active_agenda_keeps_monitoring(client, agent,
+                                                           admin_headers,
+                                                           monkeypatch):
+    """Agenda ativa + nova publicação pendente: a agenda ANTERIOR
+    confirmada continua sendo acompanhada (não zera a cobrança)."""
+    real = datetime.now(UTC)
+    due = (real - timedelta(hours=1)).replace(second=0, microsecond=0)
+    anchor = real - timedelta(hours=3)
+    task = _apply(client, admin_headers, agent["headers"],
+                  agent["agent_id"], _schedule_due_at(due), monkeypatch,
+                  anchor)
+    republished = client.post(
+        f"/api/v1/tasks/{task['id']}/publish",
+        json={"revision": 1, "expected_generation": 1},
+        headers=admin_headers,
+    )
+    assert republished.status_code == 200, republished.text
+    _freeze(monkeypatch, due + timedelta(hours=2))
+    body = client.get(f"/api/v1/monitoring/tasks/{task['id']}",
+                      headers=admin_headers).json()
+    assert body["operational_state"] == "pending_apply"
+    assert body["result_state"] == "missing"  # agenda anterior ativa
+
+
+def test_pending_suspend_over_active_agenda_keeps_monitoring(client, agent,
+                                                             admin_headers,
+                                                             monkeypatch):
+    """Suspensão pendente sobre agenda ativa: o timer antigo continua
+    ativo até confirmar — a cobrança permanece."""
+    real = datetime.now(UTC)
+    due = (real - timedelta(hours=1)).replace(second=0, microsecond=0)
+    anchor = real - timedelta(hours=3)
+    task = _apply(client, admin_headers, agent["headers"],
+                  agent["agent_id"], _schedule_due_at(due), monkeypatch,
+                  anchor)
+    suspended = client.post(
+        f"/api/v1/tasks/{task['id']}/suspend",
+        json={"expected_generation": 1}, headers=admin_headers,
+    )
+    assert suspended.status_code == 200, suspended.text
+    _freeze(monkeypatch, due + timedelta(hours=2))
+    body = client.get(f"/api/v1/monitoring/tasks/{task['id']}",
+                      headers=admin_headers).json()
+    assert body["operational_state"] == "pending_suspend"
+    assert body["result_state"] == "missing"
+
+
+def test_resume_failed_attempt_keeps_suspended_state(client, agent,
+                                                     admin_headers,
+                                                     monkeypatch):
+    """Retomada com tentativa falha: continua suspenso, sem cobrança."""
+    real = datetime.now(UTC)
+    due = (real - timedelta(hours=1)).replace(second=0, microsecond=0)
+    anchor = real - timedelta(hours=3)
+    task = _apply(client, admin_headers, agent["headers"],
+                  agent["agent_id"], _schedule_due_at(due), monkeypatch,
+                  anchor)
+    client.post(f"/api/v1/tasks/{task['id']}/suspend",
+                json={"expected_generation": 1}, headers=admin_headers)
+    _confirm(client, agent["headers"], task["id"], 2,
+             applied_revision=None)
+    client.post(f"/api/v1/tasks/{task['id']}/publish",
+                json={"revision": 1, "expected_generation": 2},
+                headers=admin_headers)
+    failed = _confirm(client, agent["headers"], task["id"], 3,
+                      status="failed", applied_revision=None)
+    assert failed.status_code == 200, failed.text
+    _freeze(monkeypatch, due + timedelta(hours=2))
+    body = client.get(f"/api/v1/monitoring/tasks/{task['id']}",
+                      headers=admin_headers).json()
+    assert body["operational_state"] == "pending_apply"
+    assert body["result_state"] != "missing"
+
+
+# ---- defeito C puro: efeito confirmado vs ação desejada ----------------------
+
+def test_pure_republish_over_suspended_stays_uncharged():
+    # pending_apply sobre agenda suspensa: efeito confirmado 'suspend'
+    # preserva a suspensão até a retomada confirmar
+    anchor = _at("2026-11-06T10:00:00Z")
+    dist = _dist("apply", confirmed_status=None, last_applied_at=anchor)
+    result = _compute(dist, DAILY_UTC_14, now="2026-11-06T16:00:00Z",
+                      last_effect="suspend")
+    assert result.operational_state == "pending_apply"
+    assert result.result_state == "no_history"
+
+
+def test_pure_pending_suspend_over_suspended_stays_uncharged():
+    anchor = _at("2026-11-06T10:00:00Z")
+    dist = _dist("suspend", confirmed_status=None, last_applied_at=anchor)
+    result = _compute(dist, DAILY_UTC_14, now="2026-11-06T16:00:00Z",
+                      last_effect="suspend")
+    assert result.operational_state == "pending_suspend"
+    assert result.result_state == "no_history"
+
+
+def test_pure_pending_apply_over_active_keeps_monitoring():
+    # agenda ativa confirmada + republicação pendente: segue cobrando
+    anchor = _at("2026-11-06T10:00:00Z")
+    dist = _dist("apply", confirmed_status=None, last_applied_at=anchor)
+    result = _compute(dist, DAILY_UTC_14, now="2026-11-06T16:00:00Z",
+                      last_effect="apply")
+    assert result.operational_state == "pending_apply"
+    assert result.result_state == "missing"
+
+
+def test_pure_resume_reanchors_without_charging_suspended_interval():
+    # retomada confirmada em T2: ocorrências anteriores a T2 (intervalo
+    # suspenso) nunca são cobradas; a próxima vencida após T2 é
+    anchor = _at("2026-11-08T12:00:00Z")  # retomada confirmada agora
+    dist = _dist("apply", last_applied_at=anchor)
+    # devida 07/11 14:00 (intervalo suspenso) é anterior à âncora →
+    # nunca cobrada, mesmo já vencida
+    result = _compute(dist, DAILY_UTC_14, now="2026-11-08T13:00:00Z",
+                      last_effect="apply")
+    assert result.result_state == "no_history"
+    # depois de 09/11 14:00 + tolerância → cobrança volta
+    result2 = _compute(dist, DAILY_UTC_14, now="2026-11-09T15:00:00Z",
+                       last_effect="apply")
+    assert result2.result_state == "missing"
+
+
+def test_pure_unknown_effect_does_not_fabricate_active_agenda():
+    # efeito desconhecido (None): não inventa agenda ativa — incerteza
+    # explícita vira histórico informativo, não cobrança
+    anchor = _at("2026-11-06T10:00:00Z")
+    dist = _dist("apply", last_applied_at=anchor)
+    result = _compute(dist, DAILY_UTC_14, now="2026-11-06T16:00:00Z",
+                      last_effect=None)
+    assert result.result_state != "missing"

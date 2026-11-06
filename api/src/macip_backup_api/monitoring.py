@@ -20,15 +20,36 @@ Duas dimensões independentes:
     missing     vencida e sem resultado recebido após o prazo
 
 Verdades do cálculo:
-- O relógio é INJETÁVEL (now): nada usa o navegador nem o horário do
-  agente — anchors e prazos usam timestamps atribuídos pelo servidor
-  (last_applied_at, received_at).
+- O relógio é INJETÁVEL (now): âncora e prazos usam timestamps
+  atribuídos pelo servidor (last_applied_at, received_at). Nada usa o
+  horário do navegador.
+- `started_at_utc`/`finished_at_utc` SÃO informados pelo agente — a
+  associação execução↔ocorrência depende deles. A política de
+  coerência abaixo limita o estrago de um relógio de agente errado.
 - Marco inicial: ocorrências só são esperadas DEPOIS de
   `last_applied_at` — a confirmação de que a agenda foi instalada.
-  Tarefa recém-publicada não herda cobrança histórica.
+  Tarefa recém-publicada não herda cobrança histórica. ATENÇÃO:
+  last_applied_* é histórico de configuração, NÃO prova de timer
+  ativo — quem decide se há agenda viva é `last_effect` (abaixo).
+- Último efeito operacional (`last_effect`): a confirmação aplicada
+  mais recente de task_confirmations — 'apply' = agenda instalada,
+  'suspend' = timer desligado, None = nada confirmado. Suspensão
+  confirmada permanece em efeito ATÉ uma retomada ser confirmada:
+  república pendente não cobra uma agenda suspensa; falha na retomada
+  idem. Enquanto o último efeito confirmado for 'apply', a agenda
+  anterior continua acompanhada durante publicações/suspensões
+  pendentes.
 - Uma execução satisfaz a ocorrência O somente se
-  `started_at_utc >= O` — execução anterior à janela não conta.
-- Várias execuções na mesma janela: vence a de maior
+  `started_at_utc >= O` E for temporalmente válida (abaixo) —
+  execução anterior à janela não conta.
+- COERÊNCIA TEMPORAL: uma execução é válida quando
+  `started_at_utc <= received_at + FUTURE_SKEW_SECONDS` — ela não
+  pode ter sido recebida muito ANTES de começar. Linhas inválidas
+  (ex.: "sucesso de amanhã recebido hoje") são não-evidência: não
+  satisfazem ocorrência, não vencem a ordenação nem entram em
+  last_execution/last_success. O relógio do agente pode estar até
+  FUTURE_SKEW_SECONDS adiantado sem prejuízo.
+- Várias execuções válidas na mesma janela: vence a de maior
   (started_at_utc, received_at) — um sucesso posterior corrige um
   estado de falha; um resultado antigo recebido fora de ordem não
   regride um estado já satisfeito.
@@ -71,6 +92,12 @@ RESULT_STATES = (
 
 _MAX_SCAN_DAYS = 400
 _MAX_SCAN_HOURS = 48
+
+# Desvio máximo aceito entre o início informado pelo agente e o
+# recebimento pelo servidor: started_at_utc <= received_at + skew.
+# 120 s cobre drift de NTP sem deixar uma execução "futura" real
+# satisfazer ocorrências — a granularidade das agendas é de minutos.
+FUTURE_SKEW_SECONDS = 120
 
 RESULT_REASONS = {
     "no_history": "nenhum resultado recebido para a tarefa",
@@ -248,6 +275,18 @@ def _execution_brief(row: Any) -> dict:
     }
 
 
+def _valid_execution(row: Any) -> bool:
+    """Coerência temporal: a execução não pode ter sido recebida muito
+    antes de seu início alegado. `received_at` (servidor) é a âncora
+    confiável; `started_at_utc` (agente) é aceito com skew limitado."""
+    if row.started_at_utc is None or row.received_at is None:
+        return False
+    return (
+        row.started_at_utc
+        <= row.received_at + timedelta(seconds=FUTURE_SKEW_SECONDS)
+    )
+
+
 def compute(
     *,
     distribution: Any | None,
@@ -255,6 +294,7 @@ def compute(
     basis_revision: int | None,
     executions: Iterable[Any],
     last_success: Any | None,
+    last_effect: str | None,
     now: datetime,
     tolerance: int,
 ) -> Monitoring:
@@ -263,14 +303,19 @@ def compute(
     `executions`: histórico RECEBIDO da tarefa (qualquer ordem);
     `applied_schedule`/`basis_revision`: config confirmada aplicada
     (task_revisions[last_applied_revision]); `distribution` pode ser
-    None (nunca publicada)."""
+    None (nunca publicada); `last_effect` é o último efeito operacional
+    confirmado ('apply' | 'suspend' | None) conforme o log de
+    confirmações — decide se existe agenda viva para cobrar."""
     executions = list(executions)
     ordered = sorted(
         executions,
         key=lambda e: (e.started_at_utc, e.received_at),
         reverse=True,
     )
-    last_execution = _execution_brief(ordered[0]) if ordered else None
+    # linhas temporalmente inválidas não são evidência: ficam fora da
+    # seleção de last_* e das candidatas de ocorrência
+    valid = [e for e in ordered if _valid_execution(e)]
+    last_execution = _execution_brief(valid[0]) if valid else None
     last_ok = _execution_brief(last_success) if last_success else None
     op = operational_state(distribution, applied_schedule)
     base = {
@@ -293,13 +338,16 @@ def compute(
         and applied_schedule.get("kind") != "manual"
         and distribution is not None
         and distribution.last_applied_at is not None
-        and op != "suspended"
+        and last_effect == "apply"
+        # o que manda é o efeito CONFIRMADO, não a ação desejada:
+        # suspensão confirmada vigora até retomada confirmada; agenda
+        # ativa segue acompanhada durante pending_apply/pending_suspend
     )
     if not monitoring:
         # sem agenda confirmada: o histórico é só informativo — nunca
         # cobrança. Aplica a manual, suspenso, não publicado e
         # aplicação pendente sem config instalada.
-        if not ordered:
+        if not valid:
             state, code = "no_history", "no-executions"
         else:
             state = {
@@ -307,8 +355,8 @@ def compute(
                 "partial": "partial",
                 "failed": "failed",
                 "interrupted": "failed",
-            }[ordered[0].status]
-            code = f"result-{ordered[0].status}"
+            }[valid[0].status]
+            code = f"result-{valid[0].status}"
         return Monitoring(
             result_state=state,
             reason_code=code,
@@ -337,7 +385,7 @@ def compute(
     base["expected_occurrence_utc"] = due
     base["result_deadline_utc"] = deadline
     base["next_occurrence_utc"] = next_occ
-    candidates = [e for e in ordered if e.started_at_utc >= due]
+    candidates = [e for e in valid if e.started_at_utc >= due]
     chosen = candidates[0] if candidates else None
     if chosen is None:
         state = "pending" if now <= deadline else "missing"

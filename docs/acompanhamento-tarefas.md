@@ -32,6 +32,26 @@ administrativo bem-sucedido nunca anuncia efeito instalado:
 | `pending_suspend` | Suspensão pedida; a agenda ANTERIOR continua ativa |
 | `suspended` | Suspensão confirmada — nenhuma ocorrência nova é esperada |
 
+**Decisão de cobrar ou não = último efeito operacional CONFIRMADO**,
+não a ação desejada: o log `task_confirmations` guarda cada resultado
+aplicado (`applied_revision` preenchido = agenda instalada → efeito
+`apply`; `applied_revision` NULL = suspensão instalada → efeito
+`suspend`). Regras que decorrem:
+
+- **Suspensão confirmada permanece em efeito** até uma retomada ser
+  confirmada. Republicar uma revisão (pending_apply) ou pedir nova
+  suspensão sobre tarefa já suspensa NÃO reabre cobrança — e falha na
+  retomada também não (confirmação `failed` não altera o efeito).
+- **Agenda ativa segue acompanhada durante pendências**: se o último
+  efeito confirmado é `apply`, uma publicação ou suspensão pendente
+  mantém a agenda anterior sob monitoramento — a cobrança só muda
+  quando a nova confirmação chega.
+- `last_applied_revision`/`last_applied_at` são **histórico de
+  configuração** (qual agenda/âncora usar quando `apply` vigora), não
+  prova de timer vivo — suspensão propositalmente os preserva.
+- Sem confirmação `applied` registrada, o efeito é indefinido e a
+  tarefa fica apenas informativa — o cálculo não inventa agenda ativa.
+
 ## Dimensão 2 — situação dos resultados
 
 | Estado | Significado |
@@ -60,9 +80,28 @@ a lógica do frontend usa os códigos, não o texto livre.
   `weekly`) interpretado no fuso IANA do contrato; comparações sempre
   em UTC. Horário inexistente no salto de verão é pulado (como
   `OnCalendar` do systemd); horário ambíguo usa a primeira ocorrência
-  (`fold=0`). Nada usa o relógio do navegador nem do agente.
-- **Qual execução satisfaz a ocorrência O:** `started_at_utc >= O`.
-  Execução iniciada antes da janela não conta.
+  (`fold=0`). Nada usa o relógio do navegador.
+- **Fonte dos timestamps:** `started_at_utc`/`finished_at_utc` são
+  informados PELO AGENTE — a associação execução↔ocorrência depende
+  deles, e um relógio de agente errado pode mentir. `received_at` e
+  `last_applied_at` são atribuídos pelo servidor/banco e são as
+  âncoras confiáveis da política abaixo.
+- **Coerência temporal (validade):** uma execução só é evidência se
+  `started_at_utc <= received_at + 120 s` — não pode ter sido recebida
+  muito ANTES de começar. O skew de 120 s cobre drift de NTP sem
+  deixar uma execução "futura" de verdade passar (a granularidade das
+  agendas é de minutos). Linhas inválidas — ex.: sucesso alegando
+  início amanhã recebido hoje — são descartadas ANTES da ordenação e
+  do limite de 64: não satisfazem ocorrência, não mascaram uma falha
+  válida e não entram em `last_execution`/`last_success`. Continuam
+  persistidas no histórico geral; só deixam de influenciar o cálculo.
+  Limite conhecido: um agente pode afirmar início até ~2 min no futuro
+  sem invalidar a linha — desvios maiores tornam a execução
+  não-evidência até o `received_at` alcançá-la (reprocessada como
+  válida quando o tempo real passar do início alegado).
+- **Qual execução satisfaz a ocorrência O:** `started_at_utc >= O`
+  E a linha ser temporalmente válida. Execução iniciada antes da
+  janela não conta.
 - **Várias execuções na mesma janela:** vence a de maior
   `(started_at_utc, received_at)` — um sucesso posterior corrige um
   estado de falha; um resultado antigo recebido fora de ordem não
@@ -91,9 +130,18 @@ Autorização: `require_viewer` (Bearer de automação ou qualquer sessão de
 operador ativa). Token de **agente** não lê acompanhamento (403).
 
 Consultas em lote (sem N+1): distribuições, revisões aplicadas,
-agentes e execuções são buscados uma vez por página; execuções por
-tarefa limitadas às 64 mais recentes (a janela que decide o estado está
-sempre no topo); `last_success` usa janela própria `status='success'`.
+agentes, efeito confirmado e execuções são buscados uma vez por
+página; execuções por tarefa limitadas às 64 mais recentes (a janela
+que decide o estado está sempre no topo); `last_success` usa janela
+própria `status='success'`.
+
+**Vínculo tarefa↔execução = par (task_id, agent_id).** A ingestão
+autentica o agente mas aceita `task_id` textual para tarefas locais —
+dois agentes podem reportar o mesmo id. O coletor restringe cada
+execução ao AGENTE DONO da tarefa central ANTES do limite de 64 e da
+janela de último sucesso: execução de outro agente (mesmo cliente ou
+não) com o task_id coincidente nunca contamina o acompanhamento — e
+muitos registros alheios não podem expulsar os legítimos da janela.
 
 Sem migração: todos os sinais já existiam (`task_distributions`,
 `task_confirmations`, `task_revisions`, `executions`, `agents.last_seen_at`).

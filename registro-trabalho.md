@@ -3242,3 +3242,90 @@ E2E navegador real não executado (Vitest com fetch stubado). Sem
 notificações externas e sem veredito de agente offline — por decisão,
 não por lacuna. O piloto em andamento não foi tocado (UUIDs operacionais
 nunca usados; fixtures descartáveis).
+
+## Correções de revisão do acompanhamento — branch `fix/monitoring-review`
+
+Três defeitos encontrados na revisão de `feature/task-monitoring`
+(6ed2626), corrigidos com regressões que falhavam antes e passam depois.
+Sem push/deploy; piloto congelado intocado; sem migração — os campos
+necessários já existiam.
+
+### Defeito A — histórico de agente alheio contaminava a tarefa
+
+- **Causa:** `_monitoring_collect` filtrava execuções só por `task_id`
+  textual e particionava a janela por esse campo. A ingestão aceita
+  `task_id` livre (tarefas locais), então execuções do agente B com o
+  task_id da tarefa de A entravam na janela e em `last_success` — até
+  entre clientes diferentes.
+- **Correção:** restrição `tuple_(Execution.task_id, Execution.agent_id)
+  .in_(pares dono)` ANTES do `row_number() <= 64` e da janela de
+  `status='success'` — não é filtro Python após o limite.
+- **Regressões (PG real):** agente alheio do mesmo cliente e de outro
+  cliente não alteram o acompanhamento; histórico/último sucesso são
+  exclusivos do dono; 70 linhas estrangeiras não expulsam as do dono
+  da janela de 64; legítimas do dono seguem contando. Antes: `ok` com
+  sucesso alheio e janela dominada por estranhos.
+
+### Defeito B — execução futura satisfazia ocorrência atual
+
+- **Causa:** a condição era só `started_at_utc >= ocorrência`; a
+  ingestão aceita timestamps futuros. Um "sucesso de amanhã recebido
+  hoje" marcava `ok`, mascarava falhas válidas pela ordenação e podia
+  lotar a janela de 64.
+- **Correção (política temporal):** evidência exige
+  `started_at_utc <= received_at + 120 s` — a execução não pode ter
+  sido recebida muito antes de começar. `received_at` (servidor) é a
+  âncora confiável; `started_at_utc` é alegação do agente. Skew de
+  120 s cobre drift de NTP (agendas têm granularidade de minutos).
+  Linhas inválidas saem ANTES da ordenação/limite no SQL e do mesmo
+  filtro no cálculo puro — inclusive no ramo informativo — e de
+  `last_execution`/`last_success`. Nada é apagado do histórico;
+  resultado tardio legítimo e fora-de-ordem seguem funcionando.
+  Documentação corrigida: a associação USA horário do agente, sob a
+  política acima.
+- **Regressões:** sucesso futuro não satisfaz a ocorrência (missing);
+  futuro não mascara falha válida; 70 futuros do próprio dono não
+  escondem a legítima no coletor; fronteiras do skew (120 s ok,
+  121 s não-evidência). Antes: `ok` onde se esperava `missing`/`failed`.
+
+### Defeito C — republicação cobrava agenda ainda suspensa
+
+- **Causa:** a decisão de monitorar usava `op != "suspended"` — mistura
+  de estado DESEJADO com efeito CONFIRMADO. Após suspensão confirmada,
+  republicar (pending_apply) ou pedir nova suspensão (pending_suspend)
+  reabria cobrança sobre agenda desligada.
+- **Correção:** `last_effect` = última confirmação `applied` do log
+  `task_confirmations` (`applied_revision` NULL → `suspend`; senão
+  `apply`), coletado em lote por janela `(generation, attempt) desc`.
+  Monitora só quando `last_effect == 'apply'`: suspensão confirmada
+  vigora até retomada confirmada; agenda ativa permanece acompanhada
+  durante publicação/suspensão pendentes; `last_applied_*` virou só
+  fonte de agenda/âncora, não prova de timer vivo; sem confirmação
+  aplicada o efeito é indefinido → informativo, nunca agenda inventada.
+- **Regressões (puro + HTTP/PG real):** aplicada→suspensa→republicada
+  não cobra; falha na retomada não cobre; suspensão sobre suspensa não
+  cobre; agenda ativa + publicação pendente segue monitorada; agenda
+  ativa + suspensão pendente idem; retomada confirmada reancora sem
+  cobrar o intervalo suspenso. Antes: `missing` durante suspensão nos
+  três cenários.
+
+### Verificações
+
+- `pytest tests/test_monitoring.py` → 42/42 (era 25; +17 regressões:
+  5 unidade novas + integração PG real dos três defeitos). Rodadas
+  antes contra a implementação revisada: 9 falhas pertinentes
+  reproduzindo cada defeito.
+- Suíte API completa: 232/232 em PostgreSQL descartável, incluindo
+  regressões de distribuição/confirmações/execuções — sem N+1 novo
+  (o efeito confirmado é 1 consulta em lote por página).
+- Portal: `vitest run` 94/94, `tsc -b` e `vite build` limpos —
+  contrato de resposta inalterado.
+- `git diff --check` limpo. Gates não executados: E2E navegador real
+  (Vitest usa fetch stubado — simulado, não integração).
+
+### Pendências declaradas
+
+Contrato continua sem distinguir disparo manual de agendado; skew de
+120 s é tolerância de relógio, não prova de honestidade do agente;
+`missing` segue sem separar atraso de início/execução/envio de falta
+de comunicação. Monitoramento não homologado operacionalmente.
