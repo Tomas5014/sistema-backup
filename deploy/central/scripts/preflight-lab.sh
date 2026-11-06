@@ -63,9 +63,24 @@ check_docker() {
 if [[ "${1:-}" == "--post-config" ]]; then
   DIR="${2:?uso: preflight-lab.sh --post-config <caminho>/deploy/central}"
   [[ -f "$DIR/.env" ]] || fail "falta $DIR/.env"
-  configured="$(grep -E '^CENTRAL_HTTPS_PORT=' "$DIR/.env" | tail -1 | cut -d= -f2)"
+
+  # overrides DENTRO do .env: set -a; source .env os exportaria e
+  # retargetariam a stack para outro projeto/arquivo/daemon
+  for v in COMPOSE_PROJECT_NAME COMPOSE_FILE DOCKER_CONTEXT; do
+    grep -qE "^[[:space:]]*(export[[:space:]]+)?$v[[:space:]]*=" "$DIR/.env" \
+      && fail ".env contém $v — override silencioso proibido"
+  done
+
+  configured="$(grep -E '^CENTRAL_HTTPS_PORT=' "$DIR/.env" | tail -1 | cut -d= -f2)" \
+    || fail ".env sem CENTRAL_HTTPS_PORT"
   [[ "$configured" == "$LAB_PORT" ]] \
     || fail "CENTRAL_HTTPS_PORT=$configured diverge da porta aprovada $LAB_PORT"
+
+  # CENTRAL_BIND é opcional: ausente = default do compose (127.0.0.1)
+  bind_line="$(grep -E '^CENTRAL_BIND=' "$DIR/.env" | tail -1 | cut -d= -f2 || true)"
+  bind_eff="${bind_line:-127.0.0.1}"
+  [[ "$bind_eff" == "$LAB_BIND" ]] \
+    || fail "CENTRAL_BIND=$bind_eff diverge do bind aprovado $LAB_BIND"
 
   name_line="$(grep -E '^name:' "$DIR/compose.yaml")" \
     || fail "compose.yaml sem campo 'name:' explícito"
@@ -77,6 +92,7 @@ if [[ "${1:-}" == "--post-config" ]]; then
   [[ "$proj_line" == "PROJECT=\"$LAB_PROJECT\"" ]] \
     || fail "_lib.sh declara '$proj_line', esperado PROJECT=\"$LAB_PROJECT\""
 
+  check_docker # conflito de projeto/volume pode ter surgido entre as fases
   check_port   # a porta pode ter sido tomada entre as fases
   echo "post-config ok: projeto '$LAB_PROJECT', porta $LAB_BIND:$LAB_PORT conferidos"
   exit 0

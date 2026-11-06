@@ -7,6 +7,23 @@ cd "$CENTRAL_DIR"
 # configuração PRIMEIRO — TLS pode vir de caminhos configurados
 require_file .env
 require_file compose.yaml
+
+# Overrides Compose no .env seriam exportados pelo set -a abaixo e
+# retargetariam a stack para outro projeto/arquivo/daemon — proibido.
+for v in COMPOSE_PROJECT_NAME COMPOSE_FILE DOCKER_CONTEXT; do
+  grep -qE "^[[:space:]]*(export[[:space:]]+)?$v[[:space:]]*=" .env && {
+    echo "ERRO: .env contém $v — override silencioso proibido (projeto fixo: $PROJECT)" >&2
+    exit 1; }
+done
+# Overrides já exportados também são recusados — -p garante o alvo,
+# mas divergência declarada indica configuração incoerente.
+[[ -z "${COMPOSE_PROJECT_NAME:-}" || "$COMPOSE_PROJECT_NAME" == "$PROJECT" ]] || {
+  echo "ERRO: COMPOSE_PROJECT_NAME=$COMPOSE_PROJECT_NAME diverge de $PROJECT" >&2; exit 1; }
+[[ -z "${COMPOSE_FILE:-}" ]] || {
+  echo "ERRO: COMPOSE_FILE herdado pode trocar o arquivo da stack" >&2; exit 1; }
+[[ -z "${DOCKER_CONTEXT:-}" ]] || {
+  echo "ERRO: DOCKER_CONTEXT herdado pode apontar outro daemon" >&2; exit 1; }
+
 set -a; source .env; set +a
 require_var CENTRAL_HTTPS_PORT .env
 

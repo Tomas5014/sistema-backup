@@ -6,7 +6,9 @@ CENTRAL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROJECT="macip-central"
 
 compose() {
-  docker compose --project-directory "$CENTRAL_DIR" \
+  # -p explícito: o projeto alvo NUNCA depende de variáveis de ambiente
+  # ou do campo name: — a identidade aprovada vem de PROJECT
+  docker compose --project-directory "$CENTRAL_DIR" -p "$PROJECT" \
     -f "$CENTRAL_DIR/compose.yaml" "$@"
 }
 

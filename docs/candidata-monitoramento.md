@@ -72,10 +72,19 @@ Windows, novos destinos, alterações no piloto.
     `PROJECT=` aplicados);
   - `verify-identity.sh` — cadeia MANIFEST→label OCI da imagem→
     contêiner em execução; ausência/divergência/falha de consulta
-    recusam (arquivo local não é substituto);
+    recusam (arquivo local não é substituto); `db` conferido por
+    política explícita de equivalência (`postgres:17[-*]`, com ou
+    sem prefixos `library/`/`docker.io/` — `postgres:170`, outras
+    majors e outros repositórios recusados);
   - `lab-curl.sh` — chamadas autenticadas com Bearer por stdin
     (`curl -H @-`), TLS verificado, redirects desativados, HTTP≠2xx
-    com diagnóstico sem segredos.
+    com diagnóstico sem segredos;
+  - `up.sh` — além do SHA em VERSION, recusa overrides Compose
+    (`COMPOSE_PROJECT_NAME`/`COMPOSE_FILE`/`DOCKER_CONTEXT` no `.env`
+    ou herdados divergentes) e sempre compõe com `-p "$PROJECT"`;
+  - `portal/e2e/monitoring-fault.spec.ts` — prova C15: aborto
+    seletivo SIMULADO só em `/api/v1/monitoring/*`, controle de
+    recuperação por resposta 200 real.
   - Imagens `api`/`web` carregam `org.opencontainers.image.revision`
     = SHA da fonte (arg `SOURCE_COMMIT` no build via `up.sh`).
 - Rodar o empacotador exige Python ≥3.12 (filtro `data` de tar) e

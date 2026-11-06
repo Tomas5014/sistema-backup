@@ -85,7 +85,9 @@ setup_identity_ok() {
   STUB_PROJ_api=labproj STUB_PROJ_web=labproj STUB_PROJ_db=labproj
   STUB_IMG_api=img-api STUB_IMG_web=img-web STUB_IMG_db=img-db
   STUB_REV_api="$SHA_OK" STUB_REV_web="$SHA_OK"
-  STUB_IMGREF_db="postgres:17-alpine"
+  # referência efetiva do Compose publicado — a fixture reflete a
+  # infraestrutura real, não uma forma simplificada divergente
+  STUB_IMGREF_db="docker.io/library/postgres:17-alpine"
   export STUB_CID_api STUB_CID_web STUB_CID_db STUB_PROJ_api STUB_PROJ_web \
     STUB_PROJ_db STUB_IMG_api STUB_IMG_web STUB_IMG_db STUB_REV_api \
     STUB_REV_web STUB_IMGREF_db
@@ -151,6 +153,23 @@ bash "$LAB/scripts/verify-identity.sh" >/dev/null 2>&1 \
   && bad "VERSION local serviu de substituto" || ok "VERSION local não substitui identidade"
 STUB_CID_api="cid-api"
 
+# política de equivalência do db (bloqueio B) — a fixture positiva usa
+# a referência efetiva do Compose; formas normalizadas aceitas,
+# major/repositório divergentes recusados
+for ref in "postgres:17-alpine" "postgres:17" \
+           "library/postgres:17-alpine" "index.docker.io/library/postgres:17-alpine"; do
+  STUB_IMGREF_db="$ref"
+  bash "$LAB/scripts/verify-identity.sh" >/dev/null 2>&1 \
+    && ok "db ref '$ref' aceita" || bad "db ref '$ref' deveria ser aceita"
+done
+for ref in "postgres:170" "postgres:16-alpine" "postgres:latest" \
+           "evil.io/postgres:17-alpine" "docker.io/evil/postgres:17-alpine"; do
+  STUB_IMGREF_db="$ref"
+  bash "$LAB/scripts/verify-identity.sh" >/dev/null 2>&1 \
+    && bad "db ref '$ref' indevida foi aceita" || ok "db ref '$ref' recusada"
+done
+STUB_IMGREF_db="docker.io/library/postgres:17-alpine"
+
 # ================= preflight-lab.sh (achado B) ========================
 
 echo "== preflight-lab.sh =="
@@ -213,6 +232,65 @@ sed -i 's/^name: labproj$/name: macip-central/' "$LAB2/compose.yaml"  # sed não
 bash "$LAB/scripts/preflight-lab.sh" --post-config "$LAB2" >/dev/null 2>&1 \
   && bad "projeto não aplicado passou" || ok "compose name divergente recusado"
 sed -i 's/^name: macip-central$/name: labproj/' "$LAB2/compose.yaml"
+
+# .env com override de projeto (reprodução do revisor): recusado —
+# carregá-lo retargetaria a stack silenciosamente
+printf 'CENTRAL_HTTPS_PORT=19443\nCOMPOSE_PROJECT_NAME=foreign-fixture\n' > "$LAB2/.env"
+bash "$LAB/scripts/preflight-lab.sh" --post-config "$LAB2" >/dev/null 2>&1 \
+  && bad ".env com COMPOSE_PROJECT_NAME passou" || ok ".env com override de projeto recusado"
+printf 'CENTRAL_HTTPS_PORT=19443\nCENTRAL_BIND=127.0.0.1\n' > "$LAB2/.env"
+
+# bind efetivo divergente do aprovado
+printf 'CENTRAL_HTTPS_PORT=19443\nCENTRAL_BIND=192.168.99.9\n' > "$LAB2/.env"
+bash "$LAB/scripts/preflight-lab.sh" --post-config "$LAB2" >/dev/null 2>&1 \
+  && bad "bind divergente passou" || ok "bind efetivo divergente recusado"
+printf 'CENTRAL_HTTPS_PORT=19443\nCENTRAL_BIND=127.0.0.1\n' > "$LAB2/.env"
+
+# conflito surgido ENTRE as fases: projeto criado depois do preflight
+export STUB_PROJECT_CONTAINERS="cid-surgiu"
+bash "$LAB/scripts/preflight-lab.sh" --post-config "$LAB2" >/dev/null 2>&1 \
+  && bad "projeto surgido entre fases passou" || ok "conflito entre fases recusado"
+unset STUB_PROJECT_CONTAINERS
+
+# ---- entrypoint documental completo (achado A-repro1) ----------------
+# recusa do post-config INTERROMPE: up.sh/check.sh nunca são chamados
+printf 'CENTRAL_HTTPS_PORT=19999\n' > "$LAB2/.env"   # força recusa
+: > "$STUB_LOG"
+bash "$LAB/scripts/preflight-lab.sh" --post-config "$LAB2" \
+  && bash "$LAB2/scripts/up.sh" && bash "$LAB2/scripts/check.sh" \
+  >/dev/null 2>&1
+[[ $? -ne 0 ]] && ok "bloco documental interrompido na recusa" \
+  || bad "bloco documental seguiu após recusa"
+grep -qE "build|up -d" "$STUB_LOG" \
+  && bad "up.sh executou apesar da recusa" || ok "build/up não executados após recusa"
+
+# fluxo aprovado alcança up.sh com projeto EXPLÍCITO (-p labproj)
+printf 'CENTRAL_HTTPS_PORT=19443\nCENTRAL_BIND=127.0.0.1\n' > "$LAB2/.env"
+write_secrets "$LAB2" "" "" "pw-real" "pw-real"; write_tls "$LAB2"
+printf 'a%.0s' $(seq 1 40) > "$LAB2/VERSION"; printf ' ts\n' >> "$LAB2/VERSION"
+: > "$STUB_LOG"
+bash "$LAB/scripts/preflight-lab.sh" --post-config "$LAB2" \
+  && bash "$LAB2/scripts/up.sh" >/dev/null 2>&1 \
+  && ok "fluxo aprovado alcança up.sh" || bad "fluxo aprovado falhou"
+grep -q "build" "$STUB_LOG" \
+  && ok "build executado após aprovação" || bad "build não executado"
+grep -q -- "-p labproj" "$STUB_LOG" \
+  && ok "projeto explícito (-p) nas chamadas compose" || bad "-p ausente"
+
+# up.sh também recusa override DENTRO do .env (defesa além do preflight)
+printf 'CENTRAL_HTTPS_PORT=19443\nCENTRAL_BIND=127.0.0.1\nCOMPOSE_PROJECT_NAME=foreign-fixture\n' > "$LAB2/.env"
+: > "$STUB_LOG"
+bash "$LAB2/scripts/up.sh" >/dev/null 2>&1 \
+  && bad "up.sh aceitou override do .env" || ok "up.sh recusou override do .env"
+grep -q "build" "$STUB_LOG" \
+  && bad "build rodou apesar do override" || ok "build não executado com override"
+printf 'CENTRAL_HTTPS_PORT=19443\nCENTRAL_BIND=127.0.0.1\n' > "$LAB2/.env"
+
+# up.sh recusa override herdado divergente; COMPOSE_FILE/CONTEXT sempre
+COMPOSE_PROJECT_NAME=foreign bash "$LAB2/scripts/up.sh" >/dev/null 2>&1 \
+  && bad "up.sh aceitou herdado divergente" || ok "up.sh recusou herdado divergente"
+COMPOSE_FILE=/tmp/stack.yaml bash "$LAB2/scripts/up.sh" >/dev/null 2>&1 \
+  && bad "up.sh aceitou COMPOSE_FILE" || ok "up.sh recusou COMPOSE_FILE herdado"
 
 # ================= lab-curl.sh (achado C) =============================
 

@@ -84,15 +84,22 @@ bash scripts/mk-lab-tls.sh localhost # tls/lab-ca.pem + cert.pem/key.pem
 ```
 
 `preflight-lab.sh --post-config` CONFERE a cópia antes de subir —
-porta configurada igual à aprovada, `name:` e `PROJECT=` iguais a
-`LAB_PROJECT`, e a porta ainda livre:
+porta configurada igual à aprovada, bind efetivo igual a `LAB_BIND`,
+`name:` e `PROJECT=` iguais a `LAB_PROJECT`, `.env` SEM overrides
+Compose, projeto/volumes ainda inexistentes e a porta ainda livre.
+
+Execute a sequência encadeada — a recusa do preflight precisa
+INTERROMPER o fluxo; comandos soltos continuariam após a recusa:
 
 ```bash
 LAB_DIR="$LAB_DIR" LAB_PROJECT="$LAB_PROJECT" LAB_PORT="$LAB_PORT" \
-  bash scripts/preflight-lab.sh --post-config "$PWD"
-bash scripts/up.sh    # exige VERSION com SHA válido; build carimba
-                      # org.opencontainers.image.revision nas imagens
-bash scripts/check.sh # TLS real (cadeia+hostname) + /readyz + estático
+  bash scripts/preflight-lab.sh --post-config "$PWD" \
+  && bash scripts/up.sh \
+  && bash scripts/check.sh
+# up.sh: exige VERSION com SHA; recusa COMPOSE_PROJECT_NAME/COMPOSE_FILE/
+# DOCKER_CONTEXT no .env ou herdados divergentes; compõe sempre com
+# -p "$PROJECT" — o destino aprovado não depende do ambiente
+# check.sh: TLS real (cadeia+hostname) + /readyz + estático
 ```
 
 `check.sh` valida cadeia **e hostname** — não use `-k` como aceite.
@@ -137,12 +144,25 @@ Credenciais de API em arquivos 0600 (permissão conferida a cada uso):
   (gerado por `gen-secrets.sh` — nunca exibido).
 - **agente** → `secrets/agent-token.env`, criado a partir da resposta
   da criação de credencial — gravado em arquivo, jamais impresso:
+- **operadores (portal)** → `secrets/lab-operator.env` com
+  `MACIP_HOMOLOG_LOGIN=`/`MACIP_HOMOLOG_PASSWORD=` — usado pelo C15
+  dentro de subshell (ver homologacao-monitoramento.md).
 
 ```bash
 bash scripts/lab-curl.sh admin POST \
   /api/v1/agents/<agent_id>/credentials '{"label":"lab"}' \
   | python3 -c 'import json,sys;print("MACIP_AGENT_TOKEN="+json.load(sys.stdin)["token"])' \
   > secrets/agent-token.env    # umask 077 já garante 600; NUNCA ecoar
+```bash
+bash scripts/lab-curl.sh admin POST \
+  /api/v1/agents/<agent_id>/credentials '{"label":"lab"}' \
+  | python3 -c 'import json,sys;print("MACIP_AGENT_TOKEN="+json.load(sys.stdin)["token"])' \
+  > secrets/agent-token.env    # umask 077 já garante 600; NUNCA ecoar
+umask 077
+printf 'MACIP_HOMOLOG_LOGIN=lab-operador\n' > secrets/lab-operator.env
+read -rs -p 'senha do lab-operador: ' PW \
+  && printf 'MACIP_HOMOLOG_PASSWORD=%s\n' "$PW" >> secrets/lab-operator.env \
+  && unset PW                 # digitada em prompt — fora de argv/histórico
 ```
 
 Chamadas de API nos roteiros usam o helper — token por **stdin**

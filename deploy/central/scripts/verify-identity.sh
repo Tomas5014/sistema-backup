@@ -73,8 +73,17 @@ done
 out="$(check_container db)" || fail "$out"
 db_image_ref="$(docker inspect -f '{{.Config.Image}}' "$(compose ps -q db)")" \
   || fail "inspect do db falhou"
-[[ "$db_image_ref" == postgres:17* ]] || {
-  echo "DIVERGENTE: db usa '$db_image_ref', esperado postgres:17*" >&2
+# Política explícita de equivalência: aceita 'postgres:17[-x]',
+# 'library/postgres:17[-x]' e '[index.]docker.io/library/postgres:17[-x]'
+# — o Compose declara docker.io/library/postgres:17-alpine e o daemon
+# pode gravar a forma normalizada. Rejeita postgres:170, outros
+# repositórios e qualquer major diferente.
+db_ref_norm="$db_image_ref"
+db_ref_norm="${db_ref_norm#index.docker.io/}"
+db_ref_norm="${db_ref_norm#docker.io/}"
+db_ref_norm="${db_ref_norm#library/}"
+[[ "$db_ref_norm" == "postgres:17" || "$db_ref_norm" == postgres:17-* ]] || {
+  echo "DIVERGENTE: db usa '$db_image_ref' (normalizado '$db_ref_norm'), esperado postgres:17[-*]" >&2
   ERRORS=$((ERRORS+1)); }
 [[ "$ERRORS" == "0" ]] && echo "ok: db = $db_image_ref (projeto $PROJECT)"
 

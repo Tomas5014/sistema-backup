@@ -3563,3 +3563,44 @@ preflight + 11 lab-curl — 31/31, com stubs docker/curl e porta real);
 com testes reais de restore/backup central. Defeitos reproduzidos
 antes (fallback rc=0, aviso sem bloqueio). Regeneração do pacote ao
 final — identidade = SHA do commit final.
+
+## Correção dos helpers/roteiros de homologação — 4 bloqueios
+
+Branch `fix/monitoring-homologation-runbooks-2` sobre `4cdc1da`
+(pacote `68057733…` preservado — revisão executou test_lab_helpers
+31/31 e reproduziu lacunas adicionais).
+
+- **A (fluxo e isolamento):** revisor forçou recusa do post-config e
+  `up.sh` rodou mesmo assim (bloco solto), e `.env` com
+  `COMPOSE_PROJECT_NAME=foreign` passou no post-config e foi
+  propagado. Correções: `_lib.sh` compõe sempre `-p "$PROJECT"`
+  (identidade explícita, não diagnóstico); `up.sh` recusa
+  COMPOSE_PROJECT_NAME/COMPOSE_FILE/DOCKER_CONTEXT no `.env` ou
+  herdados divergentes ANTES do `set -a; source`; `--post-config`
+  revalida daemon/projeto/volumes (conflito entre fases), recusa
+  overrides no `.env`, confere `CENTRAL_BIND` efetivo = aprovado
+  (e `CENTRAL_HTTPS_PORT` ausente vira erro, não morte silenciosa por
+  pipefail); roteiro encadeia `preflight && up.sh && check.sh`.
+- **B (db):** política explícita de equivalência — aceita
+  `postgres:17[-*]` e formas `library/`/`docker.io/`/`index.docker.io/`;
+  `postgres:170`, outra major e outro repositório recusados. Fixture
+  do teste passa a usar a referência efetiva do Compose publicado.
+- **C (fixtures):** `exec_fig` montada por python3 (sem concatenação);
+  `partial` só na execução — destinos/tentativas usam estados válidos
+  (`mixed` = success+failed); IDs viram UUIDs capturados das respostas
+  (`mk_task`), e `confirm`/publish/GET leem `gen` atual a cada
+  escrita. Validação de contrato: failed/one, success/one,
+  partial/mixed aceitos; partial-em-destino rejeitado — e HTTP real
+  na stack descartável: POST partial/mixed=200, partial-em-destino=422.
+- **D (C15):** roteiro ganhou diretórios, `npm ci`+build, browser,
+  confiança na CA via HOME descartável, variáveis privadas em arquivo
+  0600 dentro de subshell, UUID real e unset de envs herdadas. Spec
+  agora espera conteúdo real carregado, confere tarefa/revisões por
+  DADOS durante a falha, exige controle de que consulta ainda falhando
+  não recupera, e só aprova após resposta 200 da tarefa esperada.
+  Executado de verdade: Chrome+API+PG descartável — 1/1.
+
+Gates: test_lab_helpers 52/52; test_up/backup/restore_mock/
+backup_central/perms compatíveis com `-p`; tsc -b; C15 real 1/1.
+test_restore_real.sh: 9/9 asserções, rc=1 no cleanup do contêiner
+(flake rootless preexistente — fora do escopo).

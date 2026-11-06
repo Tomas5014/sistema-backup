@@ -1,15 +1,16 @@
 /**
  * C15 — falha SELETIVA e SIMULADA de rede só no GET de monitoramento.
  *
- * NÃO é indisponibilidade real da API: `page.route` intercepta apenas
+ * NÃO é indisponibilidade real da API: `page.route` aborta apenas
  * /api/v1/monitoring/* no navegador; tarefa e revisões continuam sendo
- * servidas pela stack real. O objetivo é provar que a seção
- * "Acompanhamento" isola o erro de carga sem fingir falha de backup.
+ * servidas pela stack real (verificado em DADOS, não só em título).
+ * A prova exige: seção isolando o erro, ausência de selos de falha,
+ * controle de que consulta ainda falhando NÃO satisfaz recuperação, e
+ * recuperação somente após resposta 200 real da tarefa esperada.
  *
- * Executa contra o LABORATÓRIO (deploy/central), orquestrado pelo
- * roteiro — variáveis MACIP_HOMOLOG_* como em homologation.spec.ts,
- * mais MACIP_HOMOLOG_TASK=<id real da tarefa criada no laboratório>.
- * Sem as variáveis o arquivo inteiro é ignorado (skip).
+ * Roteiro e variáveis: docs/homologacao-monitoramento.md (C15).
+ * Sem MACIP_HOMOLOG_{URL,LOGIN,PASSWORD,TASK} o arquivo inteiro skipa
+ * — coleta skipada NÃO conta como aprovação.
  */
 
 import { expect, test } from "@playwright/test";
@@ -23,6 +24,9 @@ test.skip(
   !BASE_URL || !OP_LOGIN || !OP_PASSWORD || !TASK_ID,
   "C15 requer MACIP_HOMOLOG_{URL,LOGIN,PASSWORD,TASK} — ver docs/homologacao-monitoramento.md",
 );
+
+const MON_PATH = "/api/v1/monitoring/**";
+const MON_URL = `/api/v1/monitoring/tasks/${TASK_ID}`;
 
 test.use({
   storageState: undefined,
@@ -43,37 +47,64 @@ test("C15: falha seletiva simulada no monitoramento não vira falha de backup", 
     timeout: 15_000,
   });
 
-  // detalhe carregado de verdade ANTES da injeção da falha
+  // detalhe + acompanhamento REALMENTE carregados antes de injetar a
+  // falha — o título sozinho não prova consulta concluída
   await page.goto(`/tasks/${TASK_ID}`);
-  await expect(page.getByRole("heading", { name: "Acompanhamento" })).toBeVisible();
-
-  // SIMULAÇÃO seletiva: aborta SÓ as chamadas de monitoramento — as
-  // demais APIs (tarefa, revisões) seguem atendidas pela stack real
-  await page.route("**/api/v1/monitoring/**", (route) => route.abort());
-  // nova consulta: recarregar é o mecanismo documentado de atualização
-  await page.reload();
-
-  // restante do detalhe permanece disponível (tarefa + revisões)
-  await expect(page.getByRole("heading", { name: /tarefa/i }).first())
-    .toBeVisible({ timeout: 15_000 });
-
-  // a seção mostra ERRO DE CARGA — nunca selo de falha/missing do backup
   const section = page.getByRole("heading", { name: "Acompanhamento" })
     .locator("..");
-  await expect(
-    section.getByRole("alert"),
-  ).toContainText(/Não foi possível carregar o acompanhamento/, {
+  await expect(section.locator(".badge").first()).toBeVisible({
     timeout: 15_000,
   });
+
+  // SIMULAÇÃO seletiva: aborta SÓ monitoramento — demais APIs reais
+  await page.route(MON_PATH, (route) => route.abort());
+  await page.reload();  // mecanismo documentado de nova consulta
+
+  // tarefa e revisões seguem disponíveis COM DADOS REAIS — não apenas
+  // um título: a API ainda responde fora da rota interceptada
+  const taskResp = await page.request.get(`/api/v1/tasks/${TASK_ID}`);
+  expect(taskResp.status()).toBe(200);
+  const taskBody = await taskResp.json();
+  expect(taskBody.id).toBe(TASK_ID);
+  const revResp = await page.request.get(
+    `/api/v1/tasks/${TASK_ID}/revisions`,
+  );
+  expect(revResp.status()).toBe(200);
+  expect((await revResp.json()).length).toBeGreaterThan(0);
+  await expect(page.getByRole("heading").first()).toBeVisible();
+
+  // a seção mostra ERRO DE CARGA — nunca selo de falha/missing
+  await expect(section.getByRole("alert")).toContainText(
+    /Não foi possível carregar o acompanhamento/,
+    { timeout: 15_000 },
+  );
   await expect(section.locator(".badge-failed")).toHaveCount(0);
   await expect(section.locator(".badge-missing")).toHaveCount(0);
 
-  // removida a falha, nova consulta (reload) recupera a seção
-  await page.unroute("**/api/v1/monitoring/**");
+  // CONTROLE: consulta ainda falhando não satisfaz recuperação —
+  // manter o aborto e consultar de novo mantém o erro (heading vazio
+  // ou ausência momentânea de erro NÃO valem como recuperação)
   await page.reload();
-  await expect(
-    page.getByRole("heading", { name: "Acompanhamento" }),
-  ).toBeVisible({ timeout: 15_000 });
+  await expect(section.getByRole("alert")).toBeVisible({
+    timeout: 15_000,
+  });
+
+  // recuperação real: resposta 200 do endpoint da TAREFA ESPERADA e
+  // conteúdo renderizado — ausência de erro não basta
+  await page.unroute(MON_PATH);
+  const [resp] = await Promise.all([
+    page.waitForResponse(
+      (r) => r.url().includes(MON_URL) && r.status() === 200,
+      { timeout: 15_000 },
+    ),
+    page.reload(),
+  ]);
+  const body = await resp.json();
+  expect(body.task_id).toBe(TASK_ID);
+
+  await expect(section.locator(".badge").first()).toBeVisible({
+    timeout: 15_000,
+  });
   await expect(
     page.getByText(/Não foi possível carregar o acompanhamento/),
   ).toHaveCount(0);
