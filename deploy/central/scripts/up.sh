@@ -41,6 +41,19 @@ URL_PW="$(url_password "$MACIP_API_DATABASE_URL")"
   echo "ERRO: senha em api.env (MACIP_API_DATABASE_URL) não corresponde a POSTGRES_PASSWORD — corrija secrets/ antes de subir" >&2
   exit 1; }
 
+# Identidade de fonte carimbada nas imagens: VERSION vem expandido
+# pelo git archive do pacote; num checkout de desenvolvimento (template
+# sem expandir) cai para o HEAD real do git. Sem SHA válido não há
+# cadeia verificável — recusar ANTES do build (verify-identity.sh).
+require_file VERSION
+SOURCE_COMMIT="$(awk 'NR==1{print $1}' VERSION)"
+[[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || {
+  SOURCE_COMMIT="$(git -C "$CENTRAL_DIR" rev-parse --verify HEAD 2>/dev/null || true)"; }
+[[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || {
+  echo "ERRO: sem SHA de commit válido (VERSION='$SOURCE_COMMIT') — instale a partir do pacote verificado" >&2
+  exit 1; }
+export SOURCE_COMMIT
+
 compose build
 compose up -d
 echo "stack $PROJECT iniciada — verifique com scripts/check.sh"

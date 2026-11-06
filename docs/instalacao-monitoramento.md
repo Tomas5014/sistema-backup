@@ -4,12 +4,13 @@ Instalação em laboratório **isolado**, somente após decisão explícita.
 Nada aqui autoriza atualizar o piloto (`ea74d5d`), a central operacional
 ou qualquer ambiente existente. Use Bash, usuário dedicado sem root,
 `umask 077` e caminhos absolutos. Nenhum segredo em argv, histórico ou
-saída. Credenciais abaixo são ILUSTRATIVAS de laboratório.
+saída — os helpers abaixo transportam credenciais por stdin/arquivos
+0600. Credenciais mencionadas são ILUSTRATIVAS de laboratório.
 
-## Isolamento — propostas a confirmar antes de executar
+## Isolamento — propostas a confirmar pelo preflight
 
-Os valores a seguir são PROPOSTAS — confirme conflitos no host do
-laboratório antes de usar; não estão pré-verificados:
+Valores PROPOSTOS — não estão pré-verificados; `preflight-lab.sh`
+confirma ou INTERROMPE o procedimento:
 
 | Recurso | Proposta | Por quê |
 |---|---|---|
@@ -21,10 +22,9 @@ laboratório antes de usar; não estão pré-verificados:
 | Identidades de teste | prefixo `lab-` | clientes/agentes/tarefas exclusivos |
 
 O compose traz `name: macip-central` e os scripts fixam
-`PROJECT="macip-central"` em `deploy/central/scripts/_lib.sh`. No
-laboratório, ajuste **a cópia extraída** (nunca o repositório):
-`name:` em `compose.yaml` e `PROJECT` em `_lib.sh` para `macip-monlab`
-— o nome do projeto define também o prefixo de volumes e rede.
+`PROJECT="macip-central"` em `deploy/central/scripts/_lib.sh`. O
+laboratório ajusta **a cópia extraída** (nunca o repositório) e o
+preflight CONFERE que as substituições aconteceram de fato.
 
 ## 1. Conferência do pacote
 
@@ -37,85 +37,132 @@ tar -tzf macip-backup-linux-0.4.0dev2-*.tar.gz | head -20
 
 Confira `commit` (SHA completo esperado), `candidate=0.4.0dev2`,
 versões e documentos referenciados. Reprodução byte a byte de imagens
-NÃO é prometida — o build acontece na instalação.
+NÃO é prometida — o build acontece na instalação e as imagens carregam
+o SHA da fonte como label OCI (ver §4).
+
+## 2. Preflight BLOQUEANTE — antes de extrair
 
 ```bash
+cd /caminho/onde/o/pacote/será/extraído   # scripts vêm do repositório
+# ou apontando para deploy/central/scripts do checkout
 umask 077
-mkdir -p ~/macip-lab-monitoramento
-tar -xzf macip-backup-linux-0.4.0dev2-*.tar.gz \
-  -C ~/macip-lab-monitoramento
-LAB=~/macip-lab-monitoramento/macip-backup-linux-0.4.0dev2
-cat "$LAB/source/deploy/central/VERSION"   # SHA+data do commit
+export LAB_DIR=~/macip-lab-monitoramento \
+       LAB_PROJECT=macip-monlab LAB_PORT=19443 LAB_BIND=127.0.0.1
+bash /caminho/repo/deploy/central/scripts/preflight-lab.sh
 ```
 
-## 2. Requisitos e preflight
+`preflight-lab.sh` RECUSA (saída ≠ 0) e interrompe o roteiro quando:
+
+- `docker info`/`docker ps`/`docker volume ls` não respondem — estado
+  não verificável nunca conta como "livre";
+- existe contêiner (mesmo parado) ou volume do projeto `LAB_PROJECT`;
+- `LAB_DIR` já existe — conteúdo preservado, nada é removido;
+- a porta `LAB_BIND:LAB_PORT` está ocupada (bind real, não aviso);
+- `COMPOSE_PROJECT_NAME`, `COMPOSE_FILE` ou `DOCKER_CONTEXT` estão
+  exportados — override herdado mudaria o projeto silenciosamente.
+
+Só depois de `preflight ok`, extraia em diretório criado exclusivo:
 
 ```bash
-docker info >/dev/null && docker compose version
-python3 --version        # >=3.12 para o empacotador; imagens carregam o resto
-openssl version
-ss -ltn | grep -w 19443 && echo "PORTA OCUPADA — escolha outra"
-docker ps --format '{{.Names}}' | grep -w macip-monlab \
-  && echo "projeto já existe neste daemon"
+mkdir "$LAB_DIR"    # sem -p: falha se já existir
+tar -xzf macip-backup-linux-0.4.0dev2-*.tar.gz -C "$LAB_DIR"
+LAB="$LAB_DIR/macip-backup-linux-0.4.0dev2"
 ```
 
-## 3. Configuração (sem segredos na saída)
+## 3. Configuração e subida (sem segredos na saída)
 
 ```bash
 cd "$LAB/source/deploy/central"
-# isolamento do projeto (edição da CÓPIA do laboratório):
-sed -i 's/^name: macip-central$/name: macip-monlab/' compose.yaml
-sed -i 's/^PROJECT="macip-central"$/PROJECT="macip-monlab"/' scripts/_lib.sh
+# isolamento do projeto — substituições conferidas pelo preflight depois:
+sed -i 's/^name: macip-central$/name: '"$LAB_PROJECT"'/' compose.yaml
+sed -i 's/^PROJECT="macip-central"$/PROJECT="'"$LAB_PROJECT"'"/' scripts/_lib.sh
 cp .env.example .env
-# edite .env: CENTRAL_HTTPS_PORT=19443 e CENTRAL_HOSTNAME=localhost
-bash scripts/gen-secrets.sh        # secrets/*.env 0600 — nunca impressos
-bash scripts/mk-lab-tls.sh localhost   # tls/lab-ca.pem + cert.pem/key.pem
-bash scripts/up.sh                 # valida .env/secrets/TLS, build + sobe
-bash scripts/check.sh              # TLS real + /readyz + portal estático
+# edite .env: CENTRAL_HTTPS_PORT=19443 (idêntico a LAB_PORT) e
+# CENTRAL_HOSTNAME=localhost
+bash scripts/gen-secrets.sh          # secrets/*.env 0600 — nunca impressos
+bash scripts/mk-lab-tls.sh localhost # tls/lab-ca.pem + cert.pem/key.pem
 ```
 
-`check.sh` valida cadeia **e hostname** com a CA do laboratório — não
-use `-k` como aceite. Para conferir configuração sem segredos, prefira
-`docker compose -f compose.yaml config --services` a `config` completo
-(que expande valores de ambiente).
-
-## 4. Verificação do que está rodando
+`preflight-lab.sh --post-config` CONFERE a cópia antes de subir —
+porta configurada igual à aprovada, `name:` e `PROJECT=` iguais a
+`LAB_PROJECT`, e a porta ainda livre:
 
 ```bash
-docker compose -f compose.yaml ps --format '{{.Name}} {{.Image}}'
-docker compose -f compose.yaml exec -T api \
-  python -c "print(open('/app/deploy/central/VERSION').read())" \
-  2>/dev/null || cat "$LAB/source/deploy/central/VERSION"
-docker compose -f compose.yaml exec -T db \
+LAB_DIR="$LAB_DIR" LAB_PROJECT="$LAB_PROJECT" LAB_PORT="$LAB_PORT" \
+  bash scripts/preflight-lab.sh --post-config "$PWD"
+bash scripts/up.sh    # exige VERSION com SHA válido; build carimba
+                      # org.opencontainers.image.revision nas imagens
+bash scripts/check.sh # TLS real (cadeia+hostname) + /readyz + estático
+```
+
+`check.sh` valida cadeia **e hostname** — não use `-k` como aceite.
+
+## 4. Verificação do que está rodando (cadeia de identidade)
+
+```bash
+bash scripts/verify-identity.sh   # MANIFEST padrão: ../../../MANIFEST.json
+```
+
+`verify-identity.sh` confere, por serviço (`api`, `web`, `db`):
+contêiner encontrado no projeto `LAB_PROJECT`, serviço compose
+correto, e — para `api`/`web` — label `org.opencontainers.image.revision`
+da imagem em execução **igual ao `commit` do MANIFEST.json**; para
+`db`, imagem `postgres:17*`. Identidade ausente, divergente ou não
+consultável **falha** — nenhum arquivo local substitui a identidade
+em execução. O script só lê labels/imagem — nunca imprime inspect
+completo (que pode conter segredos).
+
+O esquema esperado é **1..7** — igual ao piloto; ausência de migração
+nova nesta candidata é fato do código, mas confirme na instalação:
+
+```bash
+docker compose --project-directory "$PWD" -f compose.yaml exec -T db \
   psql -U macip_central -d macip_central \
   -c 'SELECT version FROM schema_migrations ORDER BY version'
 ```
 
-O esquema esperado é **1..7** — igual ao piloto; ausência de migração
-nova nesta candidata é fato do código, mas confirme na instalação, não
-presuma. `/readyz` já prova acesso real da API ao banco (healthcheck
-do Compose depende dele).
+`/readyz` (em `check.sh`) prova acesso real da API ao banco.
 
-## 5. Operador e dados de teste exclusivos
+## 5. Operadores e credenciais — provisionamento sem exposição
 
 ```bash
 bash scripts/bootstrap-operator.sh 'lab-operador' 'Operador Lab' admin
-# senha por getpass — nada em argv
-bash scripts/bootstrap-operator.sh 'lab-viewer' 'Viewer Lab' viewer
+bash scripts/bootstrap-operator.sh 'lab-viewer'  'Viewer Lab'  viewer
+# senhas por getpass — nada em argv
 ```
 
-Portal em `https://localhost:19443` confiando em
-`$LAB/source/deploy/central/tls/lab-ca.pem` (importar no navegador ou
-`curl --cacert`). Cadastre cliente/agente/credencial com prefixo
-`lab-`; guarde o token de agente UMA vez. Tarefas de teste criadas no
-portal ou via API admin — identifique-as para remoção no encerramento.
+Credenciais de API em arquivos 0600 (permissão conferida a cada uso):
+
+- **admin** → `secrets/api.env` já traz `MACIP_API_ADMIN_TOKEN`
+  (gerado por `gen-secrets.sh` — nunca exibido).
+- **agente** → `secrets/agent-token.env`, criado a partir da resposta
+  da criação de credencial — gravado em arquivo, jamais impresso:
+
+```bash
+bash scripts/lab-curl.sh admin POST \
+  /api/v1/agents/<agent_id>/credentials '{"label":"lab"}' \
+  | python3 -c 'import json,sys;print("MACIP_AGENT_TOKEN="+json.load(sys.stdin)["token"])' \
+  > secrets/agent-token.env    # umask 077 já garante 600; NUNCA ecoar
+```
+
+Chamadas de API nos roteiros usam o helper — token por **stdin**
+(`curl -H @-`), TLS sempre verificado, redirects desativados, HTTP ≠2xx
+retorna erro com diagnóstico sem segredos:
+
+```bash
+bash scripts/lab-curl.sh admin GET  /api/v1/tasks
+bash scripts/lab-curl.sh agent POST /api/v1/agent/executions '<json>'
+```
+
+Portal em `https://localhost:19443` confiando em `tls/lab-ca.pem`.
+Cadastre cliente/agente/tarefas com prefixo `lab-`.
 
 ## 6. Registro de recursos criados (para encerramento)
 
 - Projeto Compose `macip-monlab`: containers `macip-monlab-{db,api,web}-1`,
   rede `macip-monlab_central`, volume `macip-monlab_pgdata`.
-- Imagens `macip-monlab-{api,web}` construídas localmente.
-- Diretório `~/macip-lab-monitoramento`, secrets e `tls/` gerados.
+- Imagens `macip-monlab-{api,web}` (label `image.revision` = SHA).
+- Diretório `~/macip-lab-monitoramento`, `secrets/`, `tls/` gerados.
 - Operadores `lab-*`, identidades `lab-*` no banco do laboratório.
 
 ## 7. Encerramento preservando evidências
@@ -123,13 +170,10 @@ portal ou via API admin — identifique-as para remoção no encerramento.
 ```bash
 cd "$LAB/source/deploy/central"
 bash scripts/down.sh        # preserva o volume pgdata
-# evidências: saída de check.sh, gerações de distribuição, capturas do
-# portal e respostas da API — copie para pasta de evidências ANTES de
-# remover diretório e volume com decisão explícita
+# evidências: check.sh, verify-identity.sh, gerações, capturas do
+# portal e respostas da API — copie ANTES de remover diretório/volume
+# com decisão explícita
 ```
-
-Remover volume (`docker volume rm macip-monlab_pgdata`) e imagens é
-decisão separada — faça só depois de arquivar as evidências.
 
 ## 8. Retorno — código/imagens vs. banco
 
@@ -137,28 +181,24 @@ decisão separada — faça só depois de arquivar as evidências.
 
 - **Migrações:** esta candidata não adiciona migração — esquema alvo
   1..7, idêntico ao de `ea74d5d`. Confirme com a consulta da seção 4
-  antes e depois de instalar. Se o laboratório partir de um banco
-  1..7 válido, o código novo e o antigo leem o mesmo esquema.
-- **Retorno de código/imagens:** reconstruir as imagens da linha
-  anterior a partir do pacote correspondente e `up.sh` na MESMA cópia
-  de configuração. Como não houve migração, reverter imagens não
-  desfaz dado nenhum — a troca é compatível nos dois sentidos.
+  antes e depois de instalar; não presuma.
+- **Retorno de código/imagens:** reconstruir imagens da linha anterior
+  a partir do pacote correspondente e `up.sh` na MESMA configuração.
+  Sem migração, reverter imagens não desfaz dados — compatível nos
+  dois sentidos; `verify-identity.sh` confirma qual SHA voltou a rodar.
 - **Escritas posteriores à instalação são preservadas:** tarefas,
-  confirmações e execuções criadas no laboratório continuam válidas
-  para o código antigo (mesmo esquema). Não restaure dump antigo sobre
-  o banco atual como retorno padrão — isso apagaria dados novos sem
-  necessidade.
+  confirmações e execuções continuam válidas (mesmo esquema). Não
+  restaure dump antigo sobre o banco atual como retorno padrão.
 - **Se algo exigir restauração de banco** (corrupção, não rollback):
-  `scripts/backup.sh` antes da operação, `pg_restore -l` para validar
-  catálogo e ensaio em PG17 separado — restauração real exige decisão
-  registrada; `scripts/restore.sh` pede confirmação e retoma serviços.
-- **Não execute retorno nesta tarefa** — este roteiro é preparação;
-  a execução pertence à janela de homologação do operador.
+  `scripts/backup.sh` antes, `pg_restore -l` para validar catálogo,
+  ensaio em PG17 separado; `scripts/restore.sh` pede confirmação.
+- **Não execute retorno nesta tarefa** — pertence à janela do operador.
 
 ## 9. Bloqueios que interrompem o roteiro
 
-Pacote ou manifesto divergente, porta/projeto ocupados sem alternativa
-acordada, TLS inválido (cadeia ou hostname), `schema_migrations` fora
-de 1..7, `/readyz` falhando, ou qualquer recurso fora do isolamento
-proposto. Interrompa e registre — não repita ação destrutiva para
-obter verde.
+Pacote ou manifesto divergente, preflight recusado (porta, projeto,
+volume, diretório, daemon, override herdado), post-config divergente,
+VERSION sem SHA, TLS inválido, identidade de imagem divergente ou
+não verificável, `schema_migrations` fora de 1..7, `/readyz` falhando,
+ou qualquer recurso fora do isolamento proposto. Interrompa e
+registre — não repita ação destrutiva para obter verde.

@@ -3517,3 +3517,49 @@ conferência do pacote definitivo contra o commit final. Evidências
 anteriores (250/250 API, 60/60 monitoramento, E2E 3/3, portal
 94/94+tsc+build) reutilizadas sem reexecução — tarefa de
 consolidação documental e de artefato.
+
+## Correção dos roteiros de homologação — 5 achados da revisão
+
+Branch `fix/monitoring-homologation-runbooks` sobre `edb5bab`
+(pacote `d1da11ba…` preservado — revisão não recebeu o tar.gz).
+
+- **A (identidade em execução):** o roteiro lia `/app/deploy/central/
+  VERSION` inexistente e caía num fallback com rc=0 que imprimia o SHA
+  LOCAL — falsa prova reproduzida (rc=0 com falha injetada). Agora:
+  `Dockerfile.api`/`.portal` recebem `ARG SOURCE_COMMIT` + label OCI
+  `org.opencontainers.image.revision`; `compose.yaml` propaga o arg;
+  `up.sh` resolve o SHA (VERSION expandido, ou `git rev-parse` em
+  checkout) e RECUSA build sem SHA válido; `verify-identity.sh` confere
+  projeto/serviço dos contêineres + revisão das imagens vs MANIFEST —
+  ausente/divergente/inconsultável falha, sem imprimir inspect inteiro.
+- **B (preflight que só avisava):** `preflight-lab.sh` bloqueia antes
+  de extrair: daemon não verificável ≠ livre, projeto/volumes
+  existentes (inclusive parados), `LAB_DIR` existente (preservado),
+  porta ocupada (bind real), `COMPOSE_PROJECT_NAME`/`COMPOSE_FILE`/
+  `DOCKER_CONTEXT` herdados; `--post-config` confere porta efetiva =
+  aprovada e `name:`/`PROJECT=` aplicados (sed verificado).
+- **C (token em argv):** `lab-curl.sh` transporta o Bearer por stdin
+  (`curl -H @-`, curl ≥7.55); credenciais em arquivos 0600 conferidos
+  (`secrets/api.env` → `MACIP_API_ADMIN_TOKEN`; `secrets/agent-token.env`
+  gravado pelo passo de credencial, nunca digitado); TLS por cadeia,
+  `--max-redirs 0`, HTTP≠2xx com diagnóstico sem segredos.
+- **D (C15 impossível):** parar a API derrubava tarefa+revisões e a
+  página aberta não reconsultava. `monitoring-fault.spec.ts` injeta,
+  só no navegador, aborto seletivo em `/api/v1/monitoring/*`
+  (simulação declarada de falha de rede), recarrega (nova consulta) e
+  espera erro isolado na seção — sem selo de falha; ao remover, a
+  seção volta. Sem rotas de teste nem polling no produto.
+- **E (plano/fechamento):** C7–C9 agora trazem fixtures completas
+  (destino+attempts por contrato), âncora anterior à ocorrência
+  obrigatória, HTTP registrado, tardio demonstrado com início dentro
+  da janela + POST após o prazo; gerações lidas antes de cada escrita
+  (sem reuso). Fechamento: aprovado exige TODOS obrigatórios
+  aprovados; pendente/interrompido/exceção de escopo explícitos e
+  nunca contam como cobertura.
+
+Verificações: `test_lab_helpers.sh` (9 casos verify-identity + 11
+preflight + 11 lab-curl — 31/31, com stubs docker/curl e porta real);
+`test_up.sh` ajustado (VERSION no staging + recusa sem SHA) — run-all
+com testes reais de restore/backup central. Defeitos reproduzidos
+antes (fallback rc=0, aviso sem bloqueio). Regeneração do pacote ao
+final — identidade = SHA do commit final.

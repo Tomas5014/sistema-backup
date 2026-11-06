@@ -2,6 +2,12 @@
 # constraints gerado do ambiente homologado (ver api-constraints.txt).
 FROM docker.io/library/python:3.13-slim AS runtime
 
+# Identidade de fonte fixada no build (up.sh exporta SOURCE_COMMIT do
+# deploy/central/VERSION expandido pelo git archive) — sem default que
+# possa passar por commit real; ausência falha a verificação.
+ARG SOURCE_COMMIT
+LABEL org.opencontainers.image.revision="${SOURCE_COMMIT}"
+
 WORKDIR /srv/api
 COPY api/ /srv/api/
 COPY deploy/central/api-constraints.txt /srv/api/

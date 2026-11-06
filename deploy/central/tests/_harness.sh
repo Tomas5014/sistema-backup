@@ -135,6 +135,8 @@ stage_central() {
   cp "$CENTRAL_REAL/scripts/up.sh" "$dst/scripts/"
   cp "$CENTRAL_REAL/scripts/backup.sh" "$dst/scripts/"
   cp "$CENTRAL_REAL/scripts/restore.sh" "$dst/scripts/"
+  # a cópia simula um pacote: VERSION expandido com SHA sintético válido
+  printf 'a%.0s' $(seq 1 40) > "$dst/VERSION"; printf ' 2026-01-01T00:00:00Z\n' >> "$dst/VERSION"
   touch "$dst/compose.yaml"
 }
 

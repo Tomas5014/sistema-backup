@@ -101,5 +101,15 @@ write_env "$C8" ""; write_secrets "$C8" "" "" "pw-real" "pw-real"; write_tls "$C
 set +e; "$C8/scripts/up.sh" >/dev/null 2>&1; rc=$?; set -e
 expect_eq "configuração padrão funciona" "$rc" "0"
 
+# sem identidade de fonte (VERSION inválido e fora de git) → recusa
+# ANTES de qualquer chamada ao Docker — achado A
+C9="$(new_stage c9)"
+write_env "$C9" ""; write_secrets "$C9" "" "" "pw-real" "pw-real"; write_tls "$C9"
+echo 'VERSION-SEM-SHA' > "$C9/VERSION"
+: > "$STUB_LOG"
+set +e; out="$("$C9/scripts/up.sh" 2>&1)"; rc=$?; set -e
+[[ $rc -ne 0 ]] && ok "VERSION sem SHA recusado" || bad "VERSION sem SHA aceito"
+expect_eq "docker NÃO foi chamado" "$(wc -l < "$STUB_LOG")" "0"
+
 echo "-- up/tls: $PASS ok, $FAIL falhas"
 (( FAIL == 0 ))

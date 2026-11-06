@@ -64,7 +64,20 @@ Windows, novos destinos, alterações no piloto.
   dos componentes, migrações, contratos, documentos de escopo/runbook/
   homologação e hash SHA-256 de cada wheel gerado.
 - `deploy/central/VERSION` no pacote carrega SHA+data do commit
-  (expansão `git archive`) — use-o para conferir o que está rodando.
+  (expansão `git archive`) — `up.sh` recusa instalação sem SHA válido.
+- Helpers de laboratório incluídos em `deploy/central/scripts/`:
+  - `preflight-lab.sh` — pré-verificação BLOQUEANTE do laboratório
+    (porta, projeto/volumes, diretório, daemon, overrides herdados) e
+    conferência pós-configuração (porta efetiva = aprovada, `name:` e
+    `PROJECT=` aplicados);
+  - `verify-identity.sh` — cadeia MANIFEST→label OCI da imagem→
+    contêiner em execução; ausência/divergência/falha de consulta
+    recusam (arquivo local não é substituto);
+  - `lab-curl.sh` — chamadas autenticadas com Bearer por stdin
+    (`curl -H @-`), TLS verificado, redirects desativados, HTTP≠2xx
+    com diagnóstico sem segredos.
+  - Imagens `api`/`web` carregam `org.opencontainers.image.revision`
+    = SHA da fonte (arg `SOURCE_COMMIT` no build via `up.sh`).
 - Rodar o empacotador exige Python ≥3.12 (filtro `data` de tar) e
   setuptools ≥68. Build das imagens ocorre na instalação — sem promessa
   de reprodução byte a byte de imagens ou de downloads.

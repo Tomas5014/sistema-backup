@@ -25,6 +25,8 @@ services:
     build:
       context: ../..
       dockerfile: deploy/central/Dockerfile.api
+      args:  # SHA da fonte carimbado na imagem — ver scripts/verify-identity.sh
+        SOURCE_COMMIT:
     env_file: secrets/api.env
     networks: [central]
     depends_on:
@@ -40,6 +42,8 @@ services:
     build:
       context: ../..
       dockerfile: deploy/central/Dockerfile.portal
+      args:
+        SOURCE_COMMIT:
     networks: [central]
     # somente HTTPS publicado — loopback por padrão, porta configurável
     ports:
