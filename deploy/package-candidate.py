@@ -99,11 +99,14 @@ def main():
         api = tomllib.loads((source / "api/pyproject.toml").read_text())["project"]
         portal = json.loads((source / "portal/package.json").read_text())
         manifest = {
-            "candidate": version, "status": "experimental Linux recovery; not homologated",
+            "candidate": version,
+            "status": "experimental central task monitoring; not homologated",
             "commit": sha, "agent": agent["version"], "api": api["version"],
             "portal": portal["version"], "postgresql": "17", "migrations": [1, 2, 3, 4, 5, 6, 7],
             "sqlite_schema": 7, "task_contract": 1,
-            "scope": "docs/candidata-linux.md", "runbook": "docs/instalacao-atualizacao-retorno.md",
+            "scope": "docs/candidata-monitoramento.md",
+            "runbook": "docs/instalacao-monitoramento.md",
+            "homologation": "docs/homologacao-monitoramento.md",
             "build_dependencies": "Python >=3.12 (tar filter), setuptools >=68",
             "reproducibility": "commit-pinned source; no byte-for-byte image/dependency guarantee",
             "wheels": {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in wheels.iterdir()},

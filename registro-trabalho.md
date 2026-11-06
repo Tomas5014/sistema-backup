@@ -3482,3 +3482,38 @@ diretórios simulado em estrutura temporária com comandos externos
 stubados — pytest em `api/`, Vitest/E2E em `portal/`, variável
 confinada ao subshell. Sem reexecução das suítes — tarefa estritamente
 documental sobre os gates já relatados.
+
+## Candidata de homologação 0.4.0dev2 — central com monitoramento
+
+Preparação da homologação operacional do acompanhamento — NÃO é
+instalação nem aprovação. Piloto `ea74d5d`/`0.4.0dev1` congelado.
+
+- `deploy/CANDIDATE`: `0.4.0dev2` — nova identidade da distribuição
+  composta (mesma linha dev, incremento sobre a candidata do piloto).
+- `deploy/package-candidate.py`: manifesto agora descreve esta
+  candidata (status, `scope`=`docs/candidata-monitoramento.md`,
+  `runbook`=`docs/instalacao-monitoramento.md`, novo campo
+  `homologation`). Mecanismo preservado: git archive, filtros de
+  material operacional, wheel, MANIFEST+SHA256SUMS.
+- `docs/candidata-monitoramento.md`: identidade, versões reais
+  conferidas nos arquivos (agente 0.2.1, API/portal 0.1.0, PG 17,
+  migrações 1..7 — SEM migração nova —, SQLite v7, contrato 1),
+  alcance, artefato e evidências reutilizadas (não reexecutadas).
+- `docs/instalacao-monitoramento.md`: laboratório isolado com
+  diretório, projeto Compose (`macip-monlab`, proposta), porta
+  (`19443`, proposta com preflight), volumes/rede/segredos/TLS/
+  identidades próprios; conferência de pacote→config→up→check→
+  bootstrap; retorno separando código/imagens de banco (esquema
+  compatível 1..7, sem dump-sobre-atual como padrão).
+- `docs/homologacao-monitoramento.md`: 15 cenários com preparação,
+  ação, esperado, evidência e critério; separa fixture REST (não
+  prova Restic) de navegador e evidência operacional; exige espera
+  real para `missing` e recarregamento para refletir dados.
+
+Verificações desta etapa: `tests/test_packaging.py` (empacotador
+alterado), sintaxe Bash dos scripts referenciados, `compose config`
+em contexto descartável, fluxo de diretórios dos blocos e extração/
+conferência do pacote definitivo contra o commit final. Evidências
+anteriores (250/250 API, 60/60 monitoramento, E2E 3/3, portal
+94/94+tsc+build) reutilizadas sem reexecução — tarefa de
+consolidação documental e de artefato.
