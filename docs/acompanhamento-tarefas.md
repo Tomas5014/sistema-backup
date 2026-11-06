@@ -187,8 +187,10 @@ cd ../portal && npx vitest run tests/monitoring.test.tsx
 # exporta a variável para build e teste sem sujar o shell do operador;
 # um banco separado evita colisão com a suíte pytest
 docker exec pgtest-mon psql -U postgres -c "CREATE DATABASE macip_e2e;"
-( export MACIP_API_TEST_DATABASE_URL='postgresql+psycopg://postgres:test@127.0.0.1:15432/macip_e2e'
-  cd portal && npm run build && npm run test:e2e -- monitoring )
+(
+  export MACIP_API_TEST_DATABASE_URL='postgresql+psycopg://postgres:test@127.0.0.1:15432/macip_e2e'
+  npm run build && npm run test:e2e -- monitoring
+)
 ```
 
 Os testes controlam o relógio — unidade via `now=` injetável e

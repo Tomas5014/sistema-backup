@@ -3469,3 +3469,16 @@ antes e passa depois. Mecanismos das rodadas anteriores preservados.
 Limitações já registradas seguem (manual/agendado indistinguível,
 skew ≠ honestidade, `missing` não separa causas). Monitoramento não
 homologado; piloto `ea74d5d` intocado.
+
+## Ajuste documental — roteiro E2E dentro de portal/
+
+`docs/acompanhamento-tarefas.md`, bloco "Validação em ambiente
+descartável": o roteiro já entra em `portal/` para o Vitest, então o
+subshell do E2E com `cd portal` falharia em `portal/portal`. Removido
+o `cd` redundante — subshell com `export` e banco `macip_e2e`
+separado preservados; comentários dos specs (que partem da raiz)
+mantidos com `cd portal` correto. Verificação documental: fluxo de
+diretórios simulado em estrutura temporária com comandos externos
+stubados — pytest em `api/`, Vitest/E2E em `portal/`, variável
+confinada ao subshell. Sem reexecução das suítes — tarefa estritamente
+documental sobre os gates já relatados.
