@@ -3,8 +3,11 @@
  * webServer do playwright.config.ts), operador provisionado pelo
  * endpoint administrativo existente, login/logout pela interface.
  *
- *   MACIP_API_TEST_DATABASE_URL='postgresql+psycopg://.../macip_test' \
- *     npm run build && npm run test:e2e
+ * A partir da raiz do repositório, num subshell para a variável
+ * alcançar build e E2E sem ficar no shell do operador:
+ *
+ *   ( export MACIP_API_TEST_DATABASE_URL='postgresql+psycopg://postgres:test@127.0.0.1:15432/macip_test'
+ *     cd portal && npm run build && npm run test:e2e )
  *
  * Exige: .venv-api (FastAPI instalado), Chrome do sistema, dist/ gerado.
  */

@@ -226,11 +226,16 @@ def operational_reason(
     state: str,
     distribution: Any | None,
     last_effect: str | None = None,
+    applied_schedule: dict | None = None,
 ) -> str:
     """Explicação coerente com o ÚLTIMO EFEITO CONFIRMADO — o estado
     operacional mistura desejo pendente com efeito conhecido, e a
     mensagem não pode afirmar agenda ativa quando o que vigora é
-    suspensão (ou quando nada foi confirmado)."""
+    suspensão (ou quando nada foi confirmado).
+
+    Efeito 'apply' também não basta para falar em agenda: a revisão
+    efetivamente APLICADA pode ser 'manual' (sem timer). Só uma agenda
+    automática aplicada sustenta a explicação de continuidade."""
     if state == "unpublished":
         return "tarefa nunca publicada para o agente"
     if state == "pending_apply":
@@ -239,20 +244,26 @@ def operational_reason(
             and distribution.confirmed_generation == distribution.generation
             and distribution.confirmed_status == "failed"
         )
+        prefix = (
+            "aplicação da nova revisão falhou no agente"
+            if failed
+            else "nova publicação aguardando confirmação do agente"
+        )
         if last_effect == "suspend":
-            prefix = (
+            return (
                 "tentativa de retomada falhou no agente"
                 if failed
                 else "retomada publicada; aguardando confirmação do agente"
-            )
-            return f"{prefix} — agenda permanece suspensa"
+            ) + " — agenda permanece suspensa"
         if last_effect == "apply":
-            prefix = (
-                "aplicação da nova revisão falhou no agente"
-                if failed
-                else "nova publicação aguardando confirmação do agente"
-            )
-            return f"{prefix} — agenda anterior continua ativa"
+            if applied_schedule is None:
+                return (
+                    f"{prefix} — configuração aplicada anterior "
+                    "indisponível"
+                )
+            if applied_schedule.get("kind") == "manual":
+                return f"{prefix} — configuração aplicada permanece manual"
+            return f"{prefix} — agenda automática anterior continua ativa"
         if failed:
             return (
                 "aplicação publicada falhou no agente — "
@@ -266,6 +277,16 @@ def operational_reason(
                 "na última confirmação"
             )
         if last_effect == "apply":
+            if applied_schedule is None:
+                return (
+                    "suspensão solicitada; efeito anterior aplicado, "
+                    "mas a configuração está indisponível"
+                )
+            if applied_schedule.get("kind") == "manual":
+                return (
+                    "suspensão solicitada; a configuração aplicada é "
+                    "manual — não há agenda automática instalada"
+                )
             return (
                 "suspensão solicitada; agenda anterior continua ativa "
                 "até confirmar"
@@ -365,8 +386,9 @@ def compute(
     op = operational_state(distribution, applied_schedule)
     base = {
         "operational_state": op,
-        "operational_reason": operational_reason(op, distribution,
-                                                 last_effect),
+        "operational_reason": operational_reason(
+            op, distribution, last_effect, applied_schedule
+        ),
         "last_execution": last_execution,
         "last_success": last_ok,
         "received_late": False,

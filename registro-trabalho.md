@@ -3402,3 +3402,70 @@ Continuam válidas as limitações anteriores (sem distinção manual/
 agendado, skew ≠ prova de honestidade, `missing` não separa causas).
 Monitoramento segue não homologado operacionalmente; piloto `ea74d5d`
 intocado.
+
+## Terceira rodada de revisão — branch `fix/monitoring-review-3`
+
+Três achados finais sobre `0683219`, cada um com regressão que falhou
+antes e passa depois. Mecanismos das rodadas anteriores preservados.
+
+### Achado A — manual aplicada anunciada como agenda automática ativa
+
+- **Causa:** `operational_reason` tratava `last_effect='apply'` como
+  prova de agenda automática — mas `apply` também confirma revisões
+  `manual` (sem timer). `pending_apply`/`pending_suspend` sobre
+  configuração manual diziam "agenda anterior continua ativa" com
+  `next_occurrence_utc` nulo.
+- **Correção:** `operational_reason` recebe `applied_schedule` (a
+  revisão efetivamente APLICADA — `last_applied_revision`) e ramifica
+  por ela: manual → "configuração aplicada permanece manual"; ausente
+  → "configuração aplicada anterior indisponível" (incerteza);
+  automática → "agenda automática anterior continua ativa". Códigos e
+  formato inalterados — só o texto explicativo.
+- **Regressões (5 puras + 1 HTTP/PG real):** manual→publicação,
+  manual→suspensão, manual→revisão automática pendente, automática→
+  revisão manual pendente (continuidade real preservada), agenda
+  aplicada indisponível; fluxo real manual+republicação verificado via
+  `GET /monitoring` (reason manual + `next_occurrence_utc` null).
+  Antes: 5 falharam com "agenda anterior continua ativa" indevida.
+
+### Achado B — E2E do viewer não isolava RBAC de CSRF
+
+- **Causa:** o POST de escrita do viewer ia sem `X-CSRF-Token`; o
+  `csrf_guard` recusa antes do RBAC — o 403 provado era CSRF, não
+  permissão por papel.
+- **Correção (spec, sem tocar guards do produto):** prova separada —
+  (1) POST sem cabeçalho → 403 com detail "…CSRF" (mecanismo CSRF);
+  (2) POST com cookie `macip_csrf` da sessão repetido em
+  `x-csrf-token` → 403 com detail exato "perfil sem permissão de
+  escrita" (RBAC); (3) geração da distribuição inalterada; controle
+  positivo admin pela MESMA via (login UI → sessão → CSRF) → 200 e
+  geração+1. Cookie lido da sessão real, sem valor fixo nem log.
+
+### Achado C — comando documentado perdia a variável no `&&`
+
+- **Causa:** `MACIP_API_TEST_DATABASE_URL=x npm run build && npm run
+  test:e2e` — a atribuição vale só para o build; o E2E rodava sem a
+  variável e skipava tudo.
+- **Correção:** subshell com `export` em `monitoring.spec.ts`,
+  `portal.spec.ts` e `docs/acompanhamento-tarefas.md`; nota pedindo
+  contagens executados/aprovados/skipados (skip total ≠ gate).
+- **Incidente real registrado:** primeira execução do E2E corrigido
+  deadlockou com a suíte pytest no MESMO banco descartável —
+  documentado no doc como motivo para banco separado (`macip_e2e`).
+
+### Verificações desta rodada
+
+- `pytest test_monitoring.py` → **60/60** em PG real (54→60).
+- Suíte API completa: **250/250** em PostgreSQL descartável.
+- **E2E real 3/3** (Chrome + uvicorn + `macip_e2e`): lista/detalhe,
+  `missing`≠`failed`, explicação de suspensão coerente, viewer com
+  recusa provada RBAC (não CSRF) e admin escrevendo pela mesma via.
+  Espera real ~2 min para `missing`; fixtures REST ≠ prova Restic.
+- Portal: `vitest run` 94/94, `tsc -b` limpo, `vite build` OK.
+- `git diff --check` limpo. Gates pendentes: nenhum.
+
+### Pendências declaradas
+
+Limitações já registradas seguem (manual/agendado indistinguível,
+skew ≠ honestidade, `missing` não separa causas). Monitoramento não
+homologado; piloto `ea74d5d` intocado.

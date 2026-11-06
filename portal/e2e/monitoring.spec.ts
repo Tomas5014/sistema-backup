@@ -5,8 +5,15 @@
  * execuções inseridas assim são dados de teste, NÃO prova de backup
  * Restic real. O que o navegador exibe é o produto rodando.
  *
- *   MACIP_API_TEST_DATABASE_URL='postgresql+psycopg://.../macip_test' \
- *     npm run build && npm run test:e2e -- monitoring
+ * Execute a partir da RAIZ do repositório, num subshell para a
+ * variável alcançar build e E2E sem ficar no shell do operador
+ * (credenciais ilustrativas — banco descartável):
+ *
+ *   ( export MACIP_API_TEST_DATABASE_URL='postgresql+psycopg://postgres:test@127.0.0.1:15432/macip_test'
+ *     cd portal && npm run build && npm run test:e2e -- monitoring )
+ *
+ * A saída deve mostrar testes EXECUTADOS — coleta toda "skipped"
+ * indica variável ausente e não fecha o gate.
  */
 
 import { expect, test } from "@playwright/test";
@@ -238,7 +245,15 @@ test("acompanhamento real: lista, detalhe, suspensão e missing≠falha",
   },
 );
 
-test("viewer lê acompanhamento e segue sem permissão de escrita",
+/** Cookie CSRF da sessão corrente — não fixo, não logado. */
+async function currentCsrf(page: import("@playwright/test").Page) {
+  const cookies = await page.context().cookies();
+  const csrf = cookies.find((c) => c.name === "macip_csrf")?.value;
+  expect(csrf).toBeTruthy();
+  return csrf as string;
+}
+
+test("viewer lê acompanhamento e a recusa de escrita é RBAC, não CSRF",
   async ({ page }) => {
     // seeding admin + operador viewer separado — permissões reais
     const { stamp, suspendedTask } = await provision();
@@ -268,11 +283,78 @@ test("viewer lê acompanhamento e segue sem permissão de escrita",
       page.getByRole("heading", { name: "Acompanhamento" }),
     ).toBeVisible();
 
-    // escrita segue negada pela SESSÃO (mesma credencial do navegador)
+    // 1) prova de CSRF isolada: mesma sessão, SEM o cabeçalho → 403
+    //    pela proteção CSRF (mecanismo distinto do RBAC)
+    const noCsrf = await page.request.post(
+      `/api/v1/tasks/${suspendedTask.id}/suspend`,
+      { data: { expected_generation: 3 } },
+    );
+    expect(noCsrf.status()).toBe(403);
+    const csrfBody = await noCsrf.json();
+    expect(csrfBody.detail).toContain("CSRF");
+
+    // 2) prova de AUTORIZAÇÃO: mesma sessão, CSRF válido → o guard
+    //    passa e a recusa vem do papel viewer (não de CSRF, sessão
+    //    ausente ou payload)
+    const csrf = await currentCsrf(page);
+    const before = await (
+      await page.request.get(`/api/v1/tasks/${suspendedTask.id}`)
+    ).json();
     const denied = await page.request.post(
-      `/api/v1/tasks/${suspendedTask.id}/publish`,
-      { data: { revision: 1, expected_generation: 3 } },
+      `/api/v1/tasks/${suspendedTask.id}/suspend`,
+      {
+        data: { expected_generation: before.distribution.generation },
+        headers: { "x-csrf-token": csrf },
+      },
     );
     expect(denied.status()).toBe(403);
+    const deniedBody = await denied.json();
+    expect(deniedBody.detail).toBe("perfil sem permissão de escrita");
+    expect(deniedBody.detail).not.toContain("CSRF");
+
+    // 3) a tentativa negada não alterou a distribuição
+    const after = await (
+      await page.request.get(`/api/v1/tasks/${suspendedTask.id}`)
+    ).json();
+    expect(after.distribution.generation).toBe(
+      before.distribution.generation,
+    );
+  },
+);
+
+test("admin escreve pela mesma via: sessão + CSRF válidos (controle)",
+  async ({ page }) => {
+    // controle positivo: MESMOS mecanismos (login UI → cookie de
+    // sessão → par CSRF), operação e payload equivalentes — prova que
+    // a via de escrita funciona e que a recusa do viewer foi papel
+    const { operatorLogin, suspendedTask } = await provision();
+
+    await page.goto("/login");
+    await page.getByLabel("Login").fill(operatorLogin);
+    await page.getByLabel("Senha").fill(OPERATOR_PASSWORD);
+    await page.getByRole("button", { name: "Entrar" }).click();
+    await expect(
+      page.getByText("Operador Monitoramento E2E"),
+    ).toBeVisible();
+
+    const csrf = await currentCsrf(page);
+    const before = await (
+      await page.request.get(`/api/v1/tasks/${suspendedTask.id}`)
+    ).json();
+    const done = await page.request.post(
+      `/api/v1/tasks/${suspendedTask.id}/suspend`,
+      {
+        data: { expected_generation: before.distribution.generation },
+        headers: { "x-csrf-token": csrf },
+      },
+    );
+    expect(done.status()).toBe(200);
+    const after = await (
+      await page.request.get(`/api/v1/tasks/${suspendedTask.id}`)
+    ).json();
+    expect(after.distribution.generation).toBe(
+      before.distribution.generation + 1,
+    );
+    expect(after.distribution.desired_action).toBe("suspend");
   },
 );

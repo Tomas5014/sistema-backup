@@ -1222,3 +1222,93 @@ def test_rejected_record_stays_invalid_when_now_advances():
     assert r1.last_execution is None and r1.last_success is None
     assert r2.last_execution is None and r2.last_success is None
     assert r2.result_state == "missing"  # sem evidência, segue devendo
+
+
+# ---- achado A: explicação não pode anunciar agenda automática se a
+# configuração aplicada é manual ------------------------------------------------
+
+MANUAL = {"kind": "manual"}
+
+
+def test_pure_reason_manual_applied_pending_apply_is_manual_not_timer():
+    # manual aplicada + nova publicação pendente: a continuidade é
+    # MANUAL — a explicação não pode anunciar agenda automática ativa
+    anchor = _at("2026-11-06T10:00:00Z")
+    dist = _dist("apply", confirmed_status=None, last_applied_at=anchor)
+    result = _compute(dist, MANUAL, now="2026-11-06T16:00:00Z",
+                      last_effect="apply")
+    assert result.operational_state == "pending_apply"
+    assert "manual" in result.operational_reason
+    assert "ativa" not in result.operational_reason
+    assert result.next_occurrence_utc is None  # coerente: não há agenda
+
+
+def test_pure_reason_manual_applied_pending_suspend_no_auto_claim():
+    anchor = _at("2026-11-06T10:00:00Z")
+    dist = _dist("suspend", confirmed_status=None, last_applied_at=anchor)
+    result = _compute(dist, MANUAL, now="2026-11-06T16:00:00Z",
+                      last_effect="apply")
+    assert result.operational_state == "pending_suspend"
+    assert "manual" in result.operational_reason
+    assert "ativa" not in result.operational_reason
+
+
+def test_pure_reason_manual_applied_auto_revision_pending_stays_manual():
+    # publicação de revisão AUTOMÁTICA ainda não confirmada: a
+    # configuração em vigor continua manual — não anuncia timer antes
+    # da confirmação do agente
+    anchor = _at("2026-11-06T10:00:00Z")
+    dist = _dist("apply", confirmed_status=None, last_applied_at=anchor)
+    result = _compute(dist, MANUAL, now="2026-11-06T16:00:00Z",
+                      last_effect="apply")
+    assert "manual" in result.operational_reason
+
+
+def test_pure_reason_auto_applied_manual_revision_pending_keeps_auto():
+    # espelho: automática aplicada + revisão manual pendente — a agenda
+    # automática anterior segue sendo a referência até confirmar
+    anchor = _at("2026-11-06T10:00:00Z")
+    dist = _dist("apply", confirmed_status=None, last_applied_at=anchor)
+    result = _compute(dist, DAILY_UTC_14, now="2026-11-06T16:00:00Z",
+                      last_effect="apply")
+    assert result.operational_state == "pending_apply"
+    assert "ativa" in result.operational_reason
+
+
+def test_pure_reason_unknown_applied_agenda_states_uncertainty():
+    # efeito 'apply' confirmado mas configuração anterior indisponível:
+    # incerteza explícita — sem afirmar agenda ativa nem manual
+    anchor = _at("2026-11-06T10:00:00Z")
+    dist = _dist("suspend", confirmed_status=None, last_applied_at=anchor)
+    result = _compute(dist, None, now="2026-11-06T16:00:00Z",
+                      last_effect="apply")
+    assert result.operational_state == "pending_suspend"
+    assert "indisponível" in result.operational_reason
+    assert "ativa" not in result.operational_reason
+
+
+def test_reason_manual_applied_pending_apply_via_api(client, agent,
+                                                     admin_headers,
+                                                     monkeypatch):
+    """Fluxo real HTTP/PG: tarefa manual aplicada → nova publicação
+    pendente — a explicação fala de continuidade MANUAL, nunca de
+    agenda automática ativa."""
+    real = datetime.now(UTC)
+    anchor = real - timedelta(hours=3)
+    task = _apply(client, admin_headers, agent["headers"],
+                  agent["agent_id"],
+                  {"kind": "manual", "timezone": "UTC"}, monkeypatch,
+                  anchor)
+    republished = client.post(
+        f"/api/v1/tasks/{task['id']}/publish",
+        json={"revision": 1, "expected_generation": 1},
+        headers=admin_headers,
+    )
+    assert republished.status_code == 200, republished.text
+    _freeze(monkeypatch, real + timedelta(hours=1))
+    body = client.get(f"/api/v1/monitoring/tasks/{task['id']}",
+                      headers=admin_headers).json()
+    assert body["operational_state"] == "pending_apply"
+    assert "manual" in body["operational_reason"]
+    assert "continua ativa" not in body["operational_reason"]
+    assert body["next_occurrence_utc"] is None

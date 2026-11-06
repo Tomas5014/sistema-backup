@@ -43,9 +43,15 @@ aplicado (`applied_revision` preenchido = agenda instalada → efeito
   suspensão sobre tarefa já suspensa NÃO reabre cobrança — e falha na
   retomada também não (confirmação `failed` não altera o efeito).
 - **Agenda ativa segue acompanhada durante pendências**: se o último
-  efeito confirmado é `apply`, uma publicação ou suspensão pendente
-  mantém a agenda anterior sob monitoramento — a cobrança só muda
-  quando a nova confirmação chega.
+  efeito confirmado é `apply` **e a revisão aplicada é automática**,
+  uma publicação ou suspensão pendente mantém a agenda anterior sob
+  monitoramento — a cobrança só muda quando a nova confirmação chega.
+- **Efeito `apply` não implica timer**: `apply` também confirma
+  revisões `manual` (sem agenda automática). `operational_reason`
+  consulta a revisão efetivamente APLICADA: pendência sobre manual
+  explica continuidade manual; pendência sobre automática explica a
+  agenda anterior ativa; configuração aplicada indisponível ou efeito
+  desconhecido declara incerteza — nunca anuncia timer inexistente.
 - `last_applied_revision`/`last_applied_at` são **histórico de
   configuração** (qual agenda/âncora usar quando `apply` vigora), não
   prova de timer vivo — suspensão propositalmente os preserva.
@@ -176,6 +182,13 @@ MACIP_API_TEST_DATABASE_URL='postgresql+psycopg://postgres:test@127.0.0.1:15432/
   PYTHONPATH=src:. python -m pytest tests/test_monitoring.py -q
 
 cd ../portal && npx vitest run tests/monitoring.test.tsx
+
+# E2E real (Chrome do sistema + API real + PG descartável): subshell
+# exporta a variável para build e teste sem sujar o shell do operador;
+# um banco separado evita colisão com a suíte pytest
+docker exec pgtest-mon psql -U postgres -c "CREATE DATABASE macip_e2e;"
+( export MACIP_API_TEST_DATABASE_URL='postgresql+psycopg://postgres:test@127.0.0.1:15432/macip_e2e'
+  cd portal && npm run build && npm run test:e2e -- monitoring )
 ```
 
 Os testes controlam o relógio — unidade via `now=` injetável e
