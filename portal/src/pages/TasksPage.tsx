@@ -3,11 +3,12 @@ import { Link, useSearchParams } from "react-router-dom";
 import {
   ApiError,
   listClients,
-  listTasks,
+  listMonitoring,
   type ClientRow,
-  type TaskRow,
+  type TaskMonitoring,
 } from "../api";
 import { EmptyState } from "../components/common";
+import { formatUtc, resultBadge } from "../monitoring";
 
 /** Cadastro central de tarefas — NENHUMA é distribuída ao agente
  * nesta etapa (sem estados fictícios de "aplicada"/"agendada").
@@ -15,7 +16,7 @@ import { EmptyState } from "../components/common";
  * própria geração de invalidação e seu próprio retry. */
 export default function TasksPage() {
   const [params, setParams] = useSearchParams();
-  const [rows, setRows] = useState<TaskRow[] | null>(null);
+  const [rows, setRows] = useState<TaskMonitoring[] | null>(null);
   const [clients, setClients] = useState<ClientRow[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [clientsError, setClientsError] = useState<string | null>(null);
@@ -55,7 +56,7 @@ export default function TasksPage() {
     if (clientId) filters.client_id = clientId;
     if (agentId) filters.agent_id = agentId;
     if (archived !== "all") filters.archived = archived === "true";
-    listTasks(filters, 51, offset)
+    listMonitoring(filters, 51, offset)
       .then((page) => {
         if (gen !== tasksGeneration.current) return;
         setRows(page.slice(0, 50));
@@ -86,8 +87,9 @@ export default function TasksPage() {
     <section>
       <h1>Tarefas cadastradas</h1>
       <p className="hint">
-        Configurações versionadas na central — ainda <strong>não
-        distribuídas</strong> aos agentes (etapa posterior).
+        O selo resume o acompanhamento da página atual — "sem resultado"
+        significa resultado <strong>não recebido</strong> no prazo, não
+        prova de falha do backup.
       </p>
       <div className="filters">
         <select
@@ -138,16 +140,41 @@ export default function TasksPage() {
       ) : null}
       {rows && rows.length > 0 ? (
         <ul>
-          {rows.map((t) => (
-            <li key={t.id}>
-              <Link to={`/tasks/${t.id}`}>{t.name}</Link>
-              {" — "}
-              {clientName(t.client_id)}
-              {" — revisão "}
-              {t.current_revision}
-              {t.archived ? " — (arquivada)" : ""}
-            </li>
-          ))}
+          {rows.map((t) => {
+            const badge = resultBadge(t.result_state);
+            return (
+              <li key={t.task_id}>
+                <Link to={`/tasks/${t.task_id}`}>{t.name}</Link>
+                {" — "}
+                {t.client_id ? clientName(t.client_id) : "—"}
+                {" — revisão "}
+                {t.current_revision}
+                {t.archived ? " — (arquivada)" : ""}
+                {" "}
+                <span
+                  className={`badge ${badge.className}`}
+                  title={`${t.operational_reason}. ${t.detail}`}
+                >
+                  {badge.label}
+                </span>
+                {t.result_state === "missing" &&
+                t.expected_occurrence_utc ? (
+                  <span className="hint">
+                    {" "}— esperado {formatUtc(t.expected_occurrence_utc)}
+                    , prazo {formatUtc(t.result_deadline_utc)}
+                  </span>
+                ) : null}
+                {t.next_occurrence_utc &&
+                (t.result_state === "awaiting" ||
+                  t.result_state === "no_history" ||
+                  t.result_state === "ok") ? (
+                  <span className="hint">
+                    {" "}— próxima {formatUtc(t.next_occurrence_utc)}
+                  </span>
+                ) : null}
+              </li>
+            );
+          })}
         </ul>
       ) : null}
       <div className="pager">

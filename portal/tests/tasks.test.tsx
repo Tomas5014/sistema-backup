@@ -59,6 +59,26 @@ const REV2 = {
 };
 
 const TASK_DETAIL = { ...TASK, revision: REV1 };
+
+/** Linha mínima de acompanhamento — tarefa recém-cadastrada ainda não
+ * publicada: operacional 'unpublished', resultado 'no_history'. */
+function monRow(over: Record<string, unknown> = {}) {
+  return {
+    task_id: "task-1", name: "Financeiro diário", agent_id: "ag-1",
+    client_id: "cli-1", archived: false, current_revision: 1,
+    operational_state: "unpublished",
+    operational_reason: "tarefa nunca publicada para o agente",
+    result_state: "no_history", reason_code: "no-executions",
+    detail: "nenhum resultado recebido para a tarefa",
+    schedule: CONFIG.schedule, basis_revision: null,
+    last_execution: null, last_success: null,
+    expected_occurrence_utc: null, result_deadline_utc: null,
+    next_occurrence_utc: null, received_late: false,
+    agent_last_seen_at: null, computed_at_utc: "2026-10-29T06:05:00Z",
+    tolerance_seconds: 1800,
+    ...over,
+  };
+}
 const TASK_DETAIL_V2 = {
   ...TASK, name: "Financeiro diário v2",
   current_revision: 2, revision: REV2,
@@ -82,6 +102,8 @@ function baseRoutes(op: typeof OPERATOR | typeof VIEWER = OPERATOR) {
     "GET /api/v1/agents": () => json([AGENT]),
     "GET /api/v1/clients/cli-1/agents": () => json([AGENT]),
     "GET /api/v1/tasks": () => json([TASK]),
+    "GET /api/v1/monitoring/tasks": () => json([monRow()]),
+    "GET /api/v1/monitoring/tasks/task-1": () => json(monRow()),
     "GET /api/v1/tasks/task-1": () => json(TASK_DETAIL),
     "GET /api/v1/tasks/task-1/recovery": () => json([]),
     "GET /api/v1/tasks/task-1/revisions": () => json([
@@ -99,22 +121,26 @@ beforeEach(() => {
 });
 
 describe("lista de tarefas", () => {
-  it("lista com nome, cliente, revisão e aviso de não distribuída", async () => {
+  it("lista com nome, cliente, revisão e selo de acompanhamento", async () => {
     portal("/tasks");
     expect(await screen.findByText("Financeiro diário")).toBeInTheDocument();
-    expect(screen.getByText(/não\s*distribuídas/)).toBeInTheDocument();
     expect(screen.getByText(/revisão 1/)).toBeInTheDocument();
-    expect(screen.queryByText(/aplicada|agendada no dispositivo/)).toBeNull();
+    // selo da linha: tarefa não publicada — neutro, nunca tranquilizador
+    expect(screen.getByText("sem histórico")).toHaveClass("badge-muted");
+    expect(screen.queryByText(/aplicada|agendada no dispositivo|em dia/))
+      .toBeNull();
   });
 
   it("filtros viram query e estado vazio é explícito", async () => {
     calls = stubFetch({
       ...baseRoutes(),
-      "GET /api/v1/tasks": () => json([]),
+      "GET /api/v1/monitoring/tasks": () => json([]),
     });
     portal("/tasks?client_id=cli-1&archived=true");
     await screen.findByText("Nenhuma tarefa neste filtro.");
-    const call = calls.find((c) => c.key === "GET /api/v1/tasks");
+    const call = calls.find(
+      (c) => c.key === "GET /api/v1/monitoring/tasks",
+    );
     expect(call?.url.searchParams.get("client_id")).toBe("cli-1");
     expect(call?.url.searchParams.get("archived")).toBe("true");
   });
@@ -271,14 +297,18 @@ describe("pendência e respostas atrasadas", () => {
   it("resposta atrasada da tarefa A não sobrescreve a tarefa B", async () => {
     let releaseA!: (r: Response) => void;
     const gateA = new Promise<Response>((res) => (releaseA = res));
-    const taskB = { ...TASK, id: "task-2", name: "Tarefa B" };
     const detailB = {
       ...TASK_DETAIL, id: "task-2", name: "Tarefa B",
       revision: { ...REV1, config: { ...CONFIG, name: "Tarefa B" } },
     };
     calls = stubFetch({
       ...baseRoutes(),
-      "GET /api/v1/tasks": () => json([TASK, taskB]),
+      "GET /api/v1/monitoring/tasks": () => json([
+        monRow(),
+        monRow({ task_id: "task-2", name: "Tarefa B" }),
+      ]),
+      "GET /api/v1/monitoring/tasks/task-2": () =>
+        json(monRow({ task_id: "task-2", name: "Tarefa B" })),
       "GET /api/v1/tasks/task-1": () => gateA,
       "GET /api/v1/tasks/task-1/revisions": () => json([]),
       "GET /api/v1/tasks/task-2": () => json(detailB),
@@ -318,7 +348,7 @@ describe("seletor de clientes", () => {
     await userEvent.selectOptions(select, "cli-1");
     await waitFor(() => {
       const call = [...calls].reverse().find(
-        (c) => c.key === "GET /api/v1/tasks",
+        (c) => c.key === "GET /api/v1/monitoring/tasks",
       );
       expect(call?.url.searchParams.get("client_id")).toBe("cli-1");
     });
@@ -351,13 +381,13 @@ describe("retry de tarefas", () => {
     let fail = true;
     calls = stubFetch({
       ...baseRoutes(),
-      "GET /api/v1/tasks": () =>
-        fail ? json({ detail: "rede" }, 500) : json([TASK]),
+      "GET /api/v1/monitoring/tasks": () =>
+        fail ? json({ detail: "rede" }, 500) : json([monRow()]),
     });
     portal("/tasks");
     expect(await screen.findByRole("alert")).toBeInTheDocument();
     const before = calls.filter(
-      (c) => c.key === "GET /api/v1/tasks",
+      (c) => c.key === "GET /api/v1/monitoring/tasks",
     ).length;
     fail = false;
     await userEvent.click(
@@ -366,7 +396,7 @@ describe("retry de tarefas", () => {
     await screen.findByText("Financeiro diário");
     // nova requisição REAL — não apenas re-render do mesmo estado
     expect(
-      calls.filter((c) => c.key === "GET /api/v1/tasks").length,
+      calls.filter((c) => c.key === "GET /api/v1/monitoring/tasks").length,
     ).toBeGreaterThan(before);
   });
 });

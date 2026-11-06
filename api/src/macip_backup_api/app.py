@@ -33,12 +33,13 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from . import config
+from . import monitoring
 from .auth import (
     _admin_bearer_ok,
     current_operator,
@@ -1186,6 +1187,211 @@ def create_app() -> FastAPI:
             for d in destinations
         ]
         return ExecutionDetail(**detail)
+
+    # ---- acompanhamento de tarefas ------------------------------------
+    #
+    # Cálculo de LEITURA sobre dados já persistidos — nenhuma migração,
+    # nenhum efeito colateral. Semântica em monitoring.py. Tudo em UTC no
+    # contrato; a agenda é interpretada no fuso IANA da revisão aplicada.
+
+    def _monitoring_payload(
+        task: Task,
+        dist: TaskDistribution | None,
+        applied_revision: TaskRevision | None,
+        executions: list[Execution],
+        last_success: Execution | None,
+        agent: Agent | None,
+        now: datetime,
+        tolerance: int,
+    ) -> dict:
+        result = monitoring.compute(
+            distribution=dist,
+            applied_schedule=(
+                applied_revision.config.get("schedule")
+                if applied_revision is not None
+                else None
+            ),
+            basis_revision=(
+                applied_revision.revision if applied_revision is not None else None
+            ),
+            executions=executions,
+            last_success=last_success,
+            now=now,
+            tolerance=tolerance,
+        )
+        return {
+            "task_id": str(task.id),
+            "name": task.name,
+            "agent_id": str(task.agent_id),
+            "client_id": str(agent.client_id) if agent is not None else None,
+            "archived": task.archived_at is not None,
+            "current_revision": task.current_revision,
+            "operational_state": result.operational_state,
+            "operational_reason": result.operational_reason,
+            "result_state": result.result_state,
+            "reason_code": result.reason_code,
+            "detail": result.detail,
+            "schedule": result.schedule,
+            "basis_revision": result.basis_revision,
+            "last_execution": result.last_execution,
+            "last_success": result.last_success,
+            "expected_occurrence_utc": (
+                result.expected_occurrence_utc.isoformat()
+                if result.expected_occurrence_utc
+                else None
+            ),
+            "result_deadline_utc": (
+                result.result_deadline_utc.isoformat()
+                if result.result_deadline_utc
+                else None
+            ),
+            "next_occurrence_utc": (
+                result.next_occurrence_utc.isoformat()
+                if result.next_occurrence_utc
+                else None
+            ),
+            "received_late": result.received_late,
+            "agent_last_seen_at": (
+                agent.last_seen_at.isoformat()
+                if agent is not None and agent.last_seen_at
+                else None
+            ),
+            "computed_at_utc": result.computed_at_utc.isoformat(),
+            "tolerance_seconds": result.tolerance_seconds,
+        }
+
+    def _monitoring_collect(
+        db: Session, tasks: list[Task], tolerance: int
+    ) -> list[dict]:
+        """Monta o acompanhamento da página em consultas em lote —
+        sem N+1: distribuição, revisões aplicadas, agentes e execuções
+        recentes são buscados UMA vez para toda a página.
+
+        Execuções por tarefa limitadas a 64 mais recentes (janela fixa):
+        as execuções que satisfazem a ocorrência vencida estão no topo —
+        varrer o histórico inteiro não mudaria o estado calculado.
+        `last_success` usa janela própria com status='success'."""
+        now = datetime.now(UTC)
+        if not tasks:
+            return []
+        task_ids = [t.id for t in tasks]
+        task_key = [str(t) for t in task_ids]
+        dists = {
+            d.task_id: d
+            for d in db.execute(
+                select(TaskDistribution).where(
+                    TaskDistribution.task_id.in_(task_ids)
+                )
+            ).scalars()
+        }
+        needed = {
+            (d.task_id, d.last_applied_revision)
+            for d in dists.values()
+            if d.last_applied_revision is not None
+        }
+        revisions = {}
+        if needed:
+            for row in db.execute(
+                select(TaskRevision).where(
+                    tuple_(TaskRevision.task_id, TaskRevision.revision).in_(
+                        needed
+                    )
+                )
+            ).scalars():
+                revisions[(row.task_id, row.revision)] = row
+        agents = {
+            a.id: a
+            for a in db.execute(
+                select(Agent).where(Agent.id.in_({t.agent_id for t in tasks}))
+            ).scalars()
+        }
+
+        def _window(extra):
+            return select(
+                Execution.id.label("eid"),
+                func.row_number()
+                .over(
+                    partition_by=Execution.task_id,
+                    order_by=(
+                        Execution.started_at_utc.desc(),
+                        Execution.received_at.desc(),
+                    ),
+                )
+                .label("rn"),
+            ).where(Execution.task_id.in_(task_key), *extra).subquery()
+
+        recent_sub = _window(())
+        recent = db.execute(
+            select(Execution)
+            .join(recent_sub, Execution.id == recent_sub.c.eid)
+            .where(recent_sub.c.rn <= 64)
+        ).scalars()
+        success_sub = _window((Execution.status == "success",))
+        successes = {
+            e.task_id: e
+            for e in db.execute(
+                select(Execution)
+                .join(success_sub, Execution.id == success_sub.c.eid)
+                .where(success_sub.c.rn <= 1)
+            ).scalars()
+        }
+        by_task: dict[str, list[Execution]] = {}
+        for row in recent:
+            by_task.setdefault(row.task_id, []).append(row)
+        return [
+            _monitoring_payload(
+                task,
+                dists.get(task.id),
+                (
+                    revisions.get((task.id, dist.last_applied_revision))
+                    if (dist := dists.get(task.id)) is not None
+                    else None
+                ),
+                by_task.get(str(task.id), []),
+                successes.get(str(task.id)),
+                agents.get(task.agent_id),
+                now,
+                tolerance,
+            )
+            for task in tasks
+        ]
+
+    @app.get("/api/v1/monitoring/tasks", dependencies=[Depends(require_viewer)])
+    def list_monitoring(
+        client_id: uuid.UUID | None = None,
+        agent_id: uuid.UUID | None = None,
+        archived: bool | None = None,
+        limit: int = Query(50, ge=1, le=500),
+        offset: int = Query(0, ge=0),
+        db: Session = Depends(session),
+    ) -> list[dict]:
+        """Acompanhamento por tarefa — mesmos filtros/paginação da lista
+        de tarefas; o alcance dos dados é SEMPRE a página pedida."""
+        tolerance = monitoring.tolerance_seconds()
+        query = select(Task).order_by(Task.created_at.desc())
+        if agent_id is not None:
+            query = query.where(Task.agent_id == agent_id)
+        if client_id is not None:
+            query = query.join(Agent, Agent.id == Task.agent_id).where(
+                Agent.client_id == client_id
+            )
+        if archived is False:
+            query = query.where(Task.archived_at.is_(None))
+        elif archived is True:
+            query = query.where(Task.archived_at.is_not(None))
+        tasks = db.execute(query.limit(limit).offset(offset)).scalars()
+        return _monitoring_collect(db, list(tasks), tolerance)
+
+    @app.get(
+        "/api/v1/monitoring/tasks/{task_id}",
+        dependencies=[Depends(require_viewer)],
+    )
+    def get_monitoring(
+        task_id: uuid.UUID, db: Session = Depends(session)
+    ) -> dict:
+        tolerance = monitoring.tolerance_seconds()
+        task = _get_task(db, task_id)
+        return _monitoring_collect(db, [task], tolerance)[0]
 
     # ---- operadores: sessão ------------------------------------------
     def _set_session_cookie(response: Response, token: str) -> None:

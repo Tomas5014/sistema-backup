@@ -523,3 +523,83 @@ export async function revokeCredential(
     { method: "POST", csrf: true },
   );
 }
+
+// ---- acompanhamento ---------------------------------------------------------
+
+export type OperationalState =
+  | "unpublished"
+  | "pending_apply"
+  | "manual"
+  | "scheduled"
+  | "pending_suspend"
+  | "suspended";
+
+export type ResultState =
+  | "no_history"
+  | "awaiting"
+  | "pending"
+  | "ok"
+  | "failed"
+  | "partial"
+  | "missing";
+
+export interface ExecutionBrief {
+  id: string;
+  execution_id: string;
+  status: string;
+  started_at_utc: string;
+  finished_at_utc: string;
+  received_at: string;
+}
+
+/** Acompanhamento calculado na leitura — `missing` significa resultado
+ * NÃO RECEBIDO no prazo; não prova falha do backup nem agente offline.
+ * `reason_code`/`detail` explicam o estado — a lógica usa os códigos. */
+export interface TaskMonitoring {
+  task_id: string;
+  name: string;
+  agent_id: string;
+  client_id: string | null;
+  archived: boolean;
+  current_revision: number;
+  operational_state: OperationalState;
+  operational_reason: string;
+  result_state: ResultState;
+  reason_code: string;
+  detail: string;
+  schedule: Record<string, unknown> | null;
+  basis_revision: number | null;
+  last_execution: ExecutionBrief | null;
+  last_success: ExecutionBrief | null;
+  expected_occurrence_utc: string | null;
+  result_deadline_utc: string | null;
+  next_occurrence_utc: string | null;
+  received_late: boolean;
+  agent_last_seen_at: string | null;
+  computed_at_utc: string;
+  tolerance_seconds: number;
+}
+
+export async function listMonitoring(
+  filters: { client_id?: string; agent_id?: string; archived?: boolean },
+  limit = 50,
+  offset = 0,
+): Promise<TaskMonitoring[]> {
+  const params = new URLSearchParams();
+  if (filters.client_id) params.set("client_id", filters.client_id);
+  if (filters.agent_id) params.set("agent_id", filters.agent_id);
+  if (filters.archived !== undefined) {
+    params.set("archived", String(filters.archived));
+  }
+  params.set("limit", String(limit));
+  params.set("offset", String(offset));
+  const response = await apiFetch(`/api/v1/monitoring/tasks?${params}`);
+  return response.json() as Promise<TaskMonitoring[]>;
+}
+
+export async function getMonitoring(
+  taskId: string,
+): Promise<TaskMonitoring> {
+  const response = await apiFetch(`/api/v1/monitoring/tasks/${taskId}`);
+  return response.json() as Promise<TaskMonitoring>;
+}

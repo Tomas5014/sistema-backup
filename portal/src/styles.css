@@ -137,3 +137,8 @@ input, select {
 .token-box { display: flex; align-items: center; gap: .5rem; margin: .8rem 0; }
 .token-box code { flex: 1; overflow-wrap: anywhere; background: #f3f4f6; padding: .5rem; border-radius: 4px; user-select: all; }
 .confirm-inline { display: inline-flex; align-items: center; gap: .4rem; flex-wrap: wrap; }
+
+/* acompanhamento: neutro para "sem dado ainda", âmbar para ausência de
+   resultado (atenção que NÃO é vermelho de falha) */
+.badge-muted { background: #eef0f3; color: var(--muted); border-color: #d4d8df; }
+.badge-missing { background: #fdf1d6; color: var(--warn); border-color: #ecd9a8; }

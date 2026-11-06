@@ -7,15 +7,22 @@ import {
   exportRevisionUrl,
   findAgent,
   findClient,
+  getMonitoring,
   getTask,
   listRevisions,
   publishTask,
   suspendTask,
   type RevisionSummary,
   type TaskDetail,
+  type TaskMonitoring,
 } from "../api";
 import { useAuth } from "../auth";
 import { EmptyState } from "../components/common";
+import {
+  OPERATIONAL_LABELS,
+  formatUtc,
+  resultBadge,
+} from "../monitoring";
 import TaskForm, { formFromConfig } from "./TaskForm";
 import RecoverySection from "./RecoverySection";
 
@@ -27,6 +34,8 @@ export default function TaskDetailPage() {
   const [agentName, setAgentName] = useState<string | null>(null);
   const [clientName, setClientName] = useState<string | null>(null);
   const [revisions, setRevisions] = useState<RevisionSummary[] | null>(null);
+  const [monitoring, setMonitoring] = useState<TaskMonitoring | null>(null);
+  const [monitoringError, setMonitoringError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [resolved, setResolved] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -61,6 +70,21 @@ export default function TaskDetailPage() {
     setAgentName(null);
     setClientName(null);
     setRevisions(null);
+    setMonitoring(null);
+    setMonitoringError(null);
+    // acompanhamento é consulta independente: falha dele NÃO vira
+    // erro da página nem "falha do backup" — aparece só na seção
+    void getMonitoring(wanted as string)
+      .then((m) => {
+        if (gen !== generation.current) return;
+        setMonitoring(m);
+      })
+      .catch((err) => {
+        if (gen !== generation.current) return;
+        setMonitoringError(
+          err instanceof ApiError ? err.message : "Falha inesperada.",
+        );
+      });
     try {
       const [detail, revs] = await Promise.all([
         getTask(wanted as string),
@@ -263,6 +287,97 @@ export default function TaskDetailPage() {
                 Arquivar tarefa
               </button>
             </div>
+          ) : null}
+
+          <h2>Acompanhamento</h2>
+          {monitoringError ? (
+            <p role="alert" className="error">
+              Não foi possível carregar o acompanhamento: {monitoringError}
+            </p>
+          ) : null}
+          {!monitoring && !monitoringError ? (
+            <p className="hint">Calculando…</p>
+          ) : null}
+          {monitoring ? (
+            <>
+              <dl>
+                <dt>Situação operacional</dt>
+                <dd>
+                  {OPERATIONAL_LABELS[monitoring.operational_state] ??
+                    monitoring.operational_state}
+                  {" — "}
+                  <span className="hint">{monitoring.operational_reason}</span>
+                </dd>
+                <dt>Resultado</dt>
+                <dd>
+                  <span
+                    className={`badge ${resultBadge(monitoring.result_state).className}`}
+                  >
+                    {resultBadge(monitoring.result_state).label}
+                  </span>
+                  {" "}
+                  <span className="hint">
+                    {monitoring.detail}
+                    {monitoring.received_late
+                      ? " (recebido após o prazo de tolerância)"
+                      : ""}
+                  </span>
+                </dd>
+                <dt>Última execução recebida</dt>
+                <dd>
+                  {monitoring.last_execution ? (
+                    <>
+                      <code>{monitoring.last_execution.status}</code>
+                      {" — iniciada "}
+                      {formatUtc(monitoring.last_execution.started_at_utc)}
+                      {" · recebida "}
+                      {formatUtc(monitoring.last_execution.received_at)}
+                    </>
+                  ) : (
+                    "nenhuma recebida"
+                  )}
+                </dd>
+                <dt>Último sucesso</dt>
+                <dd>
+                  {monitoring.last_success
+                    ? `iniciado ${formatUtc(monitoring.last_success.started_at_utc)}`
+                    : "nenhum recebido"}
+                </dd>
+                {monitoring.expected_occurrence_utc ? (
+                  <>
+                    <dt>Ocorrência esperada</dt>
+                    <dd>
+                      {formatUtc(monitoring.expected_occurrence_utc)}
+                      {" — prazo de recebimento "}
+                      {formatUtc(monitoring.result_deadline_utc)}
+                    </dd>
+                  </>
+                ) : null}
+                <dt>Próxima ocorrência</dt>
+                <dd>{formatUtc(monitoring.next_occurrence_utc)}</dd>
+                <dt>Último contato do agente</dt>
+                <dd>
+                  {monitoring.agent_last_seen_at
+                    ? formatUtc(monitoring.agent_last_seen_at)
+                    : "nunca registrado"}
+                  {" "}
+                  <span className="hint">
+                    (sinal de comunicação — não prova disponibilidade)
+                  </span>
+                </dd>
+              </dl>
+              <p className="hint">
+                Calculado em {formatUtc(monitoring.computed_at_utc)} —
+                tolerância de recebimento{" "}
+                {Math.round(monitoring.tolerance_seconds / 60)} min
+                {monitoring.basis_revision
+                  ? ` · agenda da revisão ${monitoring.basis_revision} confirmada pelo agente`
+                  : ""}
+                . Ausência de resultado não distingue atraso de início,
+                tempo de execução e envio pendente — e o contrato não
+                identifica disparo manual versus agendado.
+              </p>
+            </>
           ) : null}
 
           <h2>Distribuição gerenciada</h2>

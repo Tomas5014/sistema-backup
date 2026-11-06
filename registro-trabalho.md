@@ -3183,3 +3183,62 @@ depois recusa/parada).
 
 O piloto continua **não iniciado e não aprovado**. Sem push nesta entrega;
 preexistentes preservados.
+
+## Acompanhamento de tarefas — branch `feature/task-monitoring`
+
+Primeira versão de leitura operacional (cálculo + API + portal).
+Sem push/deploy; produto instalado `ea74d5d…` congelado e intocado;
+sem migração — todos os sinais já persistiam.
+
+### Decisões de semântica
+
+- **Duas dimensões separadas:** `operational_state` vem EXCLUSIVAMENTE
+  da distribuição confirmada pelo agente (unpublished → pending_apply →
+  manual/scheduled; pending_suspend → suspended); `result_state` vem do
+  histórico recebido vs. ocorrências esperadas.
+- **Marco inicial:** `last_applied_at` (timestamp do servidor) —
+  ocorrências só existem depois da confirmação de instalação. Mudança
+  de agenda/revisão reancora sem reinterpretar histórico.
+- **Seleção da execução:** `started_at_utc >= ocorrência`; empatada,
+  vence maior `(started, received)` — sucesso posterior corrige falha,
+  fora-de-ordem não regride.
+- **`missing` = não recebido no prazo** — nunca falha de backup, nunca
+  agente offline. Tolerância `MACIP_API_MONITOR_TOLERANCE_SECONDS`
+  (padrão 1800 s, 1..86400, inválido falha explícito) cobre a
+  expectativa de recebimento inteira.
+- **Limitação declarada:** o contrato não distingue disparo manual de
+  agendado; atraso de início, execução e envio também não se separam.
+
+### Implementação
+
+- `api/src/macip_backup_api/monitoring.py` (novo): cálculo puro com
+  relógio injetável; ocorrências hourly/daily/weekly em fuso IANA,
+  gap DST pulado (como systemd), ambíguo fold=0.
+- `api/src/macip_backup_api/app.py`: `GET /api/v1/monitoring/tasks`
+  (filtros/paginação da lista de tarefas) e `GET .../{task_id}` sob
+  `require_viewer`; consultas em lote (janela de 64 execuções/tarefa +
+  janela `status='success'`) — sem N+1, sem varredura ilimitada.
+- `portal/src/monitoring.ts` (novo): rótulos/tons; `api.ts`: tipos +
+  `listMonitoring`/`getMonitoring`; `TasksPage`: selo + temporal por
+  linha; `TaskDetailPage`: seção "Acompanhamento" com caveats.
+
+### Verificações reais
+
+- `pytest tests/test_monitoring.py` → 25/25: 19 unidade (DST gap/
+  ambíguo, bordas de tolerância exatas, âncora, fora-de-ordem,
+  recebido-tarde, suspensão) + 6 integração PostgreSQL descartável
+  (progressão publicar→aplicar, ciclo pending→missing→ok com
+  received_late, suspensão, permissões viewer/agente, N+1 contado ≤10
+  consultas/página, tolerância por env). Relógio viajado por
+  `app.datetime` congelado — zero espera real.
+- Suíte API completa: 215/215, sem regressão.
+- `vitest run` portal: 94/94 (6 novos: selo âmbar-para-ausência, erro
+  de API como erro de carga, resposta atrasada descartada).
+- `tsc -b` e `vite build` limpos.
+
+### Simulado/pendente
+
+E2E navegador real não executado (Vitest com fetch stubado). Sem
+notificações externas e sem veredito de agente offline — por decisão,
+não por lacuna. O piloto em andamento não foi tocado (UUIDs operacionais
+nunca usados; fixtures descartáveis).
