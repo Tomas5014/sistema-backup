@@ -3604,3 +3604,43 @@ Gates: test_lab_helpers 52/52; test_up/backup/restore_mock/
 backup_central/perms compatíveis com `-p`; tsc -b; C15 real 1/1.
 test_restore_real.sh: 9/9 asserções, rc=1 no cleanup do contêiner
 (flake rootless preexistente — fora do escopo).
+
+## Correção dos helpers/roteiros — 3 achados da 3ª revisão
+
+Branch `fix/monitoring-homologation-runbooks-3` sobre `7952609`
+(pacotes `d1da11ba…`, `68057733…`, `d44c1325…` preservados — revisão
+executou test_lab_helpers 52/52 e reproduziu lacunas adicionais).
+
+- **A (contexto aprovado):** `.env` com `PROJECT=foreign` ou
+  `DOCKER_HOST=unix:///tmp/foreign.sock` passava no post-config e o
+  `set -a; source` do up.sh propagava — as chamadas simuladas foram
+  para outro projeto/daemon. Correção estrutural, não nova lista de
+  nomes: `load_env` em `_lib.sh` carrega arquivos de dados de forma
+  RESTRITA — só KEY=VALUE literal (nenhum código/expansão executa),
+  chaves de CONTROLE recusadas por família (PROJECT, CENTRAL_DIR,
+  PATH, HOME, COMPOSE_*, DOCKER_*, LD_*, PYTHONPATH, NODE_OPTIONS...),
+  e redefinição divergente de qualquer chave já estabelecida recusada.
+  Aplicado em up/check/lab-curl/prove/backup/restore/central-backup;
+  post-config valida `.env` + `secrets/*.env` presentes. DOCKER_HOST
+  herdado e aprovado segue sendo o daemon das chamadas (teste registra
+  `DH=` efetivo no log simulado).
+- **B (senha literal):** `MACIP_HOMOLOG_PASSWORD=$` era alterada pelo
+  `source`. Agora `gen-operator-creds.sh` grava `secrets/lab-operator.json`
+  (600, criação exclusiva, senha via `IFS= read -rs`) e a spec lê o
+  JSON direto via `MACIP_HOMOLOG_SECRETS` — a senha nunca é código
+  shell. Sentinelas: espaços/unicode/aspas/`$#;\`/`$(...)` preservadas
+  byte a byte; `$(touch)` NÃO executa. Limite real documentado: a
+  entrada é por linha.
+- **C (bloco §5):** removida a cerca ```` ```bash ```` interna e a
+  criação duplicada; `gen-agent-token.sh` faz UMA criação com UUID em
+  variável explícita (arquivo existente preservado, token nunca
+  impresso). Extração com regra real de fechamento + `bash -n` virou
+  regressão da suíte.
+
+Gates: test_lab_helpers **103/103** (contexto, credenciais, blocos);
+test_up 17 · backup 13 · restore_mock 68 · backup_central 62 ·
+perms 10 · backup_central_real 13 compatíveis com load_env; **C15
+real 1/1** no Chrome com credencial JSON e senha `$#;%` literal
+(stack PG+API+portal descartável, removida). tsc -b limpo.
+test_restore_real.sh: ressalva conhecida mantida — 9/9 asserções,
+rc=1 no cleanup rootless (fora do escopo).

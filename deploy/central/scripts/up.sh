@@ -8,15 +8,10 @@ cd "$CENTRAL_DIR"
 require_file .env
 require_file compose.yaml
 
-# Overrides Compose no .env seriam exportados pelo set -a abaixo e
-# retargetariam a stack para outro projeto/arquivo/daemon — proibido.
-for v in COMPOSE_PROJECT_NAME COMPOSE_FILE DOCKER_CONTEXT; do
-  grep -qE "^[[:space:]]*(export[[:space:]]+)?$v[[:space:]]*=" .env && {
-    echo "ERRO: .env contém $v — override silencioso proibido (projeto fixo: $PROJECT)" >&2
-    exit 1; }
-done
-# Overrides já exportados também são recusados — -p garante o alvo,
-# mas divergência declarada indica configuração incoerente.
+# Overrides já exportados são recusados — -p garante o alvo, mas
+# divergência declarada indica configuração incoerente. DOCKER_HOST/
+# CONTEXT herdados são o daemon APROVADO: seguem valendo e NENHUM
+# arquivo carregado pode trocá-los (load_env).
 [[ -z "${COMPOSE_PROJECT_NAME:-}" || "$COMPOSE_PROJECT_NAME" == "$PROJECT" ]] || {
   echo "ERRO: COMPOSE_PROJECT_NAME=$COMPOSE_PROJECT_NAME diverge de $PROJECT" >&2; exit 1; }
 [[ -z "${COMPOSE_FILE:-}" ]] || {
@@ -24,8 +19,8 @@ done
 [[ -z "${DOCKER_CONTEXT:-}" ]] || {
   echo "ERRO: DOCKER_CONTEXT herdado pode apontar outro daemon" >&2; exit 1; }
 
-set -a; source .env; set +a
-require_var CENTRAL_HTTPS_PORT .env
+load_env .env                     # .env com PROJECT/DOCKER_HOST/COMPOSE_*
+require_var CENTRAL_HTTPS_PORT .env  # → recusado ANTES deste ponto
 
 # arquivos secretos sempre no lugar previsto
 require_file secrets/postgres.env
@@ -40,11 +35,11 @@ require_file "$TLS_CERT"            # certificado público: precisa existir
 require_file "$TLS_KEY"
 check_secret_perms "$TLS_KEY"       # chave privada efetivamente usada
 
-source secrets/postgres.env
-require_var POSTGRES_USER secrets/postgres.env
+load_env secrets/postgres.env     # nenhum arquivo posterior muda o
+require_var POSTGRES_USER secrets/postgres.env  # contexto já aprovado
 require_var POSTGRES_DB secrets/postgres.env
 require_var POSTGRES_PASSWORD secrets/postgres.env
-source secrets/api.env
+load_env secrets/api.env
 require_var MACIP_API_DATABASE_URL api.env
 require_var MACIP_API_ADMIN_TOKEN api.env
 

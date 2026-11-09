@@ -16,7 +16,7 @@ REPO_ROOT="$(cd "$CENTRAL_DIR/../.." && pwd)"
 
 require_file .env
 require_file secrets/api.env
-set -a; source .env; set +a
+load_env .env
 PORT="${CENTRAL_HTTPS_PORT:-8443}"
 HOST="${CENTRAL_HOSTNAME:-localhost}"
 BASE="https://$HOST:$PORT"
@@ -34,7 +34,7 @@ curl --fail -sS --cacert "$CA" "$BASE/readyz" >/dev/null || {
 STAMP="$(date +%s)"
 OP_LOGIN="homolog-$STAMP"
 OP_PASSWORD="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
-set -a; source secrets/api.env; set +a   # MACIP_API_ADMIN_TOKEN (não exibido)
+load_env secrets/api.env   # MACIP_API_ADMIN_TOKEN (não exibido)
 
 echo "== operador $OP_LOGIN via CLI (senha por stdin) =="
 printf '%s\n' "$OP_PASSWORD" | compose exec -T api \

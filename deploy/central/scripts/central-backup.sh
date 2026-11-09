@@ -30,8 +30,8 @@ ENV_CFG="secrets/central-backup.env"
 require_file "$ENV_CFG"
 check_secret_perms "$ENV_CFG"
 
-set -a; source .env; set +a
-source "$ENV_CFG"
+load_env .env
+load_env "$ENV_CFG"
 require_var CENTRAL_BACKUP_REPOSITORY "$ENV_CFG"
 
 # --- pré-requisitos NESTE contexto (systemd ≠ terminal com newgrp) ---

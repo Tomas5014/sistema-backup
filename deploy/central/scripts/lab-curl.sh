@@ -24,7 +24,7 @@ PATH_Q="${3:?falta path}"
 BODY="${4:-}"
 
 require_file .env
-set -a; source .env; set +a
+load_env .env
 PORT="${CENTRAL_HTTPS_PORT:-8443}"
 HOST="${CENTRAL_HOSTNAME:-localhost}"
 CA="$(resolve_path "${CENTRAL_CA:-./tls/lab-ca.pem}")"
@@ -34,13 +34,13 @@ case "$ROLE" in
   admin)
     require_file secrets/api.env
     check_secret_perms secrets/api.env
-    TOKEN="$(set -a; source secrets/api.env; set +a; printf '%s' "${MACIP_API_ADMIN_TOKEN:?api.env sem MACIP_API_ADMIN_TOKEN}")"
+    TOKEN="$(load_env secrets/api.env; printf '%s' "${MACIP_API_ADMIN_TOKEN:?api.env sem MACIP_API_ADMIN_TOKEN}")"
     ;;
   agent)
     F=secrets/agent-token.env
     require_file "$F"
     check_secret_perms "$F"
-    TOKEN="$(set -a; source "$F"; set +a; printf '%s' "${MACIP_AGENT_TOKEN:?agent-token.env sem MACIP_AGENT_TOKEN}")"
+    TOKEN="$(load_env "$F"; printf '%s' "${MACIP_AGENT_TOKEN:?agent-token.env sem MACIP_AGENT_TOKEN}")"
     ;;
   *) echo "ERRO: papel '$ROLE' inválido (admin|agent)" >&2; exit 1 ;;
 esac

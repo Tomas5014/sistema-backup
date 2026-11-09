@@ -12,11 +12,13 @@ SHA_OK="edb5bab0b751b5ccdfcf9f193cbb5787dc199c3e"
 # ---------- stubs específicos desta suíte ------------------------------
 
 # docker: compose ps -q, docker inspect -f, image inspect, info, ps -a,
-# volume ls — tudo dirigido por STUB_* (consulta falhando ≠ 'livre')
+# volume ls — tudo dirigido por STUB_* (consulta falhando ≠ 'livre').
+# O log registra também DOCKER_HOST efetivo — o contexto das chamadas
+# é comprovado, não apenas os argumentos.
 stub_lab_docker() {
   cat > "$1/docker" <<'EOF'
 #!/usr/bin/env bash
-echo "docker $*" >> "$STUB_LOG"
+echo "docker $* [DH=${DOCKER_HOST:-unset}]" >> "$STUB_LOG"
 case "$1" in
   info) exit "${STUB_DOCKER_INFO_RC:-0}" ;;
   compose)
@@ -60,7 +62,10 @@ out=""; prev=""
 for a in "$@"; do
   [[ "$prev" == "-o" ]] && out="$a"; prev="$a"
 done
-[[ -n "$out" ]] && printf '%s' "${STUB_BODY:-{\"ok\":true}}" > "$out"
+if [[ -n "$out" ]]; then
+  if [[ -n "${STUB_BODY+x}" ]]; then printf '%s' "$STUB_BODY" > "$out"
+  else printf '%s' '{"ok":true}' > "$out"; fi
+fi
 printf '%s' "${STUB_HTTP_CODE:-200}"
 exit "${STUB_CURL_RC:-0}"
 EOF
@@ -70,7 +75,7 @@ EOF
 # central de laboratório em staging, com projeto próprio verificável
 stage_lab() { # dir project
   mkdir -p "$1/scripts" "$1/secrets" "$1/tls"
-  for s in _lib.sh verify-identity.sh preflight-lab.sh lab-curl.sh up.sh down.sh check.sh gen-secrets.sh mk-lab-tls.sh bootstrap-operator.sh prove.sh; do
+  for s in _lib.sh verify-identity.sh preflight-lab.sh lab-curl.sh up.sh down.sh check.sh gen-secrets.sh mk-lab-tls.sh bootstrap-operator.sh prove.sh gen-agent-token.sh gen-operator-creds.sh; do
     cp "$CENTRAL_REAL/scripts/$s" "$1/scripts/"
   done
   sed -i 's/^PROJECT="macip-central"$/PROJECT="'"$2"'"/' "$1/scripts/_lib.sh"
@@ -292,6 +297,92 @@ COMPOSE_PROJECT_NAME=foreign bash "$LAB2/scripts/up.sh" >/dev/null 2>&1 \
 COMPOSE_FILE=/tmp/stack.yaml bash "$LAB2/scripts/up.sh" >/dev/null 2>&1 \
   && bad "up.sh aceitou COMPOSE_FILE" || ok "up.sh recusou COMPOSE_FILE herdado"
 
+# ================= contexto de controle (achado A rodada 3) =========
+# PROJECT/DOCKER_HOST (e toda a família de controle) dentro de arquivo
+# de dados NÃO podem deslocar o destino aprovado — recusa por família,
+# antes de build/up; DOCKER_HOST herdado e aprovado segue utilizável.
+
+echo "== contexto de controle =="
+
+# .env com PROJECT=foreign: post-config recusa e up.sh não chama build
+printf 'CENTRAL_HTTPS_PORT=19443\nCENTRAL_BIND=127.0.0.1\nPROJECT=foreign-fixture\n' \
+  > "$LAB2/.env"
+bash "$LAB/scripts/preflight-lab.sh" --post-config "$LAB2" >/dev/null 2>&1 \
+  && bad "post-config aceitou PROJECT no .env" || ok "post-config recusa PROJECT no .env"
+: > "$STUB_LOG"
+bash "$LAB2/scripts/up.sh" >/dev/null 2>&1 \
+  && bad "up.sh aceitou PROJECT no .env" || ok "up.sh recusa PROJECT no .env"
+grep -q "build" "$STUB_LOG" \
+  && bad "build executou com PROJECT estranho" || ok "build não executou (PROJECT)"
+! grep -q "foreign-fixture" "$STUB_LOG" \
+  && ok "nenhuma chamada ao projeto estranho" || bad "compose foi para foreign-fixture"
+
+# .env com DOCKER_HOST: mesma recusa, mesmo ponto — daemon não muda
+printf 'CENTRAL_HTTPS_PORT=19443\nCENTRAL_BIND=127.0.0.1\nDOCKER_HOST=unix:///tmp/foreign-fixture.sock\n' \
+  > "$LAB2/.env"
+bash "$LAB/scripts/preflight-lab.sh" --post-config "$LAB2" >/dev/null 2>&1 \
+  && bad "post-config aceitou DOCKER_HOST no .env" || ok "post-config recusa DOCKER_HOST no .env"
+: > "$STUB_LOG"
+bash "$LAB2/scripts/up.sh" >/dev/null 2>&1 \
+  && bad "up.sh aceitou DOCKER_HOST no .env" || ok "up.sh recusa DOCKER_HOST no .env"
+grep -q "build" "$STUB_LOG" \
+  && bad "build executou com DOCKER_HOST estranho" || ok "build não executou (DOCKER_HOST)"
+grep -q "foreign-fixture.sock" "$STUB_LOG" \
+  && bad "chamada ao daemon estranho" || ok "daemon aprovado preservado nas chamadas"
+
+# .env com linha que não é KEY=VALUE (código embutido) → recusado
+printf 'CENTRAL_HTTPS_PORT=19443\nPROJECT=x\nexport PATH=/evil/bin\n' > "$LAB2/.env"
+bash "$LAB/scripts/preflight-lab.sh" --post-config "$LAB2" >/dev/null 2>&1 \
+  && bad "post-config aceitou PATH no .env" || ok "post-config recusa PATH no .env"
+printf 'CENTRAL_HTTPS_PORT=19443\nCENTRAL_BIND=127.0.0.1\nfoo sem igual\n' > "$LAB2/.env"
+bash "$LAB/scripts/preflight-lab.sh" --post-config "$LAB2" >/dev/null 2>&1 \
+  && bad "post-config aceitou linha não-KEY=VALUE" || ok "post-config recusa linha solta"
+printf 'CENTRAL_HTTPS_PORT=19443\nCENTRAL_BIND=127.0.0.1\n' > "$LAB2/.env"
+
+# secrets/*.env também não podem declarar controle (arquivos carregados
+# DEPOIS do .env): postgres.env com COMPOSE_FILE → post-config e up recusam
+printf 'POSTGRES_USER=u\nPOSTGRES_DB=d\nPOSTGRES_PASSWORD=pw-real\nCOMPOSE_FILE=/tmp/x.yaml\n' \
+  > "$LAB2/secrets/postgres.env"; chmod 600 "$LAB2/secrets/postgres.env"
+bash "$LAB/scripts/preflight-lab.sh" --post-config "$LAB2" >/dev/null 2>&1 \
+  && bad "post-config aceitou COMPOSE_FILE em secrets" || ok "post-config recusa controle em secrets"
+: > "$STUB_LOG"
+bash "$LAB2/scripts/up.sh" >/dev/null 2>&1 \
+  && bad "up.sh aceitou controle em secrets" || ok "up.sh recusa controle em secrets"
+grep -q "build" "$STUB_LOG" \
+  && bad "build executou com secrets contaminado" || ok "build não executou (secrets)"
+
+# secrets redefinindo chave de dados já aprovada → divergência recusada
+printf 'POSTGRES_USER=u\nPOSTGRES_DB=d\nPOSTGRES_PASSWORD=pw-real\nCENTRAL_HTTPS_PORT=9999\n' \
+  > "$LAB2/secrets/postgres.env"; chmod 600 "$LAB2/secrets/postgres.env"
+: > "$STUB_LOG"
+bash "$LAB2/scripts/up.sh" >/dev/null 2>&1 \
+  && bad "up.sh aceitou redefinição divergente" || ok "redefinição divergente recusada"
+grep -q "build" "$STUB_LOG" \
+  && bad "build executou com porta redirecionada" || ok "build não executou (porta)"
+
+# restaura secrets íntegros e prova o caso legítimo com daemon
+# EXPLICITAMENTE aprovado: herdado continua sendo o daemon usado
+write_secrets "$LAB2" "" "" "pw-real" "pw-real"
+: > "$STUB_LOG"
+DOCKER_HOST=unix:///tmp/aprovado.sock bash "$LAB2/scripts/up.sh" >"$WORK/up.out" 2>&1 \
+  && ok "up com daemon herdado aprovado" || bad "up com daemon aprovado falhou: $(cat "$WORK/up.out")"
+grep -q "build" "$STUB_LOG" && grep -q -- "-p labproj" "$STUB_LOG" \
+  && ok "chamadas com projeto explícito" || bad "chamadas sem -p labproj"
+grep -q "DH=unix:///tmp/aprovado.sock" "$STUB_LOG" \
+  && ok "daemon aprovado chegou intacto às chamadas" || bad "daemon mudou nas chamadas"
+
+# e o bloco documental segue interrompendo após recusa (fim a fim)
+printf 'CENTRAL_HTTPS_PORT=19999\n' > "$LAB2/.env"
+: > "$STUB_LOG"
+bash "$LAB/scripts/preflight-lab.sh" --post-config "$LAB2" \
+  && bash "$LAB2/scripts/up.sh" && bash "$LAB2/scripts/check.sh" \
+  >/dev/null 2>&1
+[[ $? -ne 0 ]] && ok "bloco interrompido após recusa (contexto)" \
+  || bad "bloco seguiu após recusa"
+grep -q "build" "$STUB_LOG" \
+  && bad "build após recusa" || ok "nenhuma mutação após recusa"
+printf 'CENTRAL_HTTPS_PORT=19443\nCENTRAL_BIND=127.0.0.1\n' > "$LAB2/.env"
+
 # ================= lab-curl.sh (achado C) =============================
 
 echo "== lab-curl.sh =="
@@ -339,6 +430,134 @@ export STUB_CURL_RC=7                              # falha de rede/TLS
 bash "$LAB2/scripts/lab-curl.sh" admin GET /api/v1/tasks >/dev/null 2>&1 \
   && bad "falha de rede passou" || ok "falha de rede/TLS recusada"
 unset STUB_CURL_RC
+
+# ================= credenciais privadas (achado B rodada 3) =========
+# gen-operator-creds.sh grava JSON 600: senha é DADO com parser —
+# nunca código shell. Sentinelas sintéticas, sem credencial real.
+
+echo "== gen-operator-creds.sh =="
+OPDIR="$WORK/opcreds"; mkdir -p "$OPDIR"
+
+json_pw() { python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["password"],end="")' "$1"; }
+
+# sentinelas: simples, espaços, unicode, aspas, $ # ; \, e texto que
+# parece substituição de comando — todas devem sobreviver LITERALMENTE
+SIMPLES='senha123'
+ESPACOS='  senha com espacos  '
+UNICODE='senhaçãoção'
+ASPAS="a'b\"c"
+META='p$w#s;en\ha'
+CMDLIKE='$(touch '"$WORK"'/pwnd)'
+for i in SIMPLES ESPACOS UNICODE ASPAS META CMDLIKE; do
+  eval "sent=\"\${$i}\""
+  f="$OPDIR/cred-$i.json"
+  printf '%s\n' "$sent" | bash "$LAB2/scripts/gen-operator-creds.sh" "$f" op \
+    >"$OPDIR/out-$i" 2>&1
+  [[ -f "$f" ]] || { bad "credencial $i não gravada"; continue; }
+  got="$(json_pw "$f")"
+  [[ "$got" == "$sent" ]] \
+    && ok "senha $i preservada literalmente" \
+    || bad "senha $i alterada: obtido '$got'"
+  [[ "$(stat -c %a "$f")" == "600" ]] \
+    && ok "credencial $i com 600" || bad "credencial $i sem 600"
+  grep -qF "$sent" "$OPDIR/out-$i" \
+    && bad "senha $i vazou na saída" || ok "senha $i fora da saída"
+done
+[[ ! -e "$WORK/pwnd" ]] \
+  && ok '$(...) na senha não executou' || bad '$(...) executou!'
+
+# arquivo existente NUNCA é sobrescrito silenciosamente
+printf '%s\n' 'outra-senha' | bash "$LAB2/scripts/gen-operator-creds.sh" \
+  "$OPDIR/cred-SIMPLES.json" op >/dev/null 2>&1 \
+  && bad "arquivo existente sobrescrito" || ok "arquivo existente preservado"
+[[ "$(json_pw "$OPDIR/cred-SIMPLES.json")" == "$SIMPLES" ]] \
+  && ok "conteúdo original intacto" || bad "conteúdo original alterado"
+
+# integração com a leitura da spec: mesmo JSON, mesmo par de campos
+python3 -c 'import json,sys;c=json.load(open(sys.argv[1]));assert c["login"]=="op" and isinstance(c["password"],str)' \
+  "$OPDIR/cred-SIMPLES.json" \
+  && ok "JSON compatível com MACIP_HOMOLOG_SECRETS" || bad "JSON incompatível"
+
+# ================= credencial do agente (achado C rodada 3) =========
+echo "== gen-agent-token.sh =="
+printf 'CENTRAL_HTTPS_PORT=19443\nCENTRAL_HOSTNAME=localhost\n' > "$LAB2/.env"
+cat > "$LAB2/secrets/api.env" <<EOF
+MACIP_API_DATABASE_URL=postgresql+psycopg://u:p@db:5432/d
+MACIP_API_ADMIN_TOKEN=$SENT_ADMIN
+EOF
+chmod 600 "$LAB2/secrets/api.env"
+export STUB_BODY='{"token":"token-agente-NOVO"}'
+rm -f "$LAB2/secrets/agent-token.env"
+AGUUID="11111111-2222-3333-4444-555555555555"
+out="$(cd "$LAB2" && bash scripts/gen-agent-token.sh "$AGUUID" 2>&1)" \
+  || bad "gen-agent-token falhou: $out"
+[[ -f "$LAB2/secrets/agent-token.env" ]] \
+  && ok "agent-token.env criado" || bad "agent-token.env ausente"
+[[ "$(stat -c %a "$LAB2/secrets/agent-token.env")" == "600" ]] \
+  && ok "agent-token.env 600" || bad "agent-token.env sem 600"
+grep -q "token-agente-NOVO" <<<"$out" \
+  && bad "token vazou na saída" || ok "token fora da saída"
+grep -q "$AGUUID" "$STUB_CURL_ARGV" \
+  && ok "POST usou o UUID real do agente" || bad "UUID do agente não usado"
+grep -q "/credentials" "$STUB_CURL_ARGV" \
+  && ok "rota de credencial correta" || bad "rota de credencial errada"
+
+# UMA ÚNICA criação: segunda execução recusa e preserva o arquivo
+printf 'TOKEN-ORIGINAL-PRESERVADO\n' > /dev/null
+echo "MACIP_AGENT_TOKEN=token-original" > "$LAB2/secrets/agent-token.env"
+chmod 600 "$LAB2/secrets/agent-token.env"
+(cd "$LAB2" && bash scripts/gen-agent-token.sh "$AGUUID") >/dev/null 2>&1 \
+  && bad "segunda criação passou" || ok "segunda criação recusada"
+grep -q "token-original" "$LAB2/secrets/agent-token.env" \
+  && ok "credencial existente preservada" || bad "credencial sobrescrita"
+unset STUB_BODY
+
+# ================= cercas Markdown dos roteiros (achado C) ==========
+# Extrator com regra real de fechamento: só ``` puro fecha um bloco —
+# ```bash DENTRO de bloco aberto permanece conteúdo. Cada bloco bash
+# extraído precisa passar em bash -n.
+
+echo "== blocos bash dos roteiros =="
+DOCS_DIR="$(cd "$CENTRAL_REAL/../.." && pwd)/docs"
+python3 - "$DOCS_DIR/instalacao-monitoramento.md" \
+          "$DOCS_DIR/homologacao-monitoramento.md" <<'PY'
+import re, subprocess, sys
+bad = 0
+for path in sys.argv[1:]:
+    lines = open(path, encoding="utf-8").read().splitlines()
+    blocks, cur, start = [], None, 0
+    for i, ln in enumerate(lines, 1):
+        if cur is None:
+            m = re.match(r"^```(\w*)\s*$", ln)
+            if m and m.group(1) == "bash":
+                cur, start = [], i
+        elif re.match(r"^```+\s*$", ln):
+            blocks.append((start, cur)); cur = None
+        else:
+            cur.append(ln)
+    if cur is not None:
+        print(f"FALHA {path}: bloco aberto na linha {start} sem fechamento")
+        bad += 1
+    for start, blk in blocks:
+        src = "\n".join(blk) + "\n"
+        r = subprocess.run(["bash", "-n"], input=src, text=True,
+                           capture_output=True)
+        if r.returncode != 0:
+            print(f"FALHA {path}:{start}: bash -n — {r.stderr.strip()[:120]}")
+            bad += 1
+    print(f"{path}: {len(blocks)} bloco(s) bash conferido(s)")
+sys.exit(1 if bad else 0)
+PY
+[[ $? -eq 0 ]] && ok "blocos bash válidos nos roteiros" \
+  || bad "bloco bash inválido nos roteiros"
+
+# a credencial do agente é criada UMA única vez no roteiro (sem o bloco
+# duplicado/cerca quebrada do achado C) — conta a INVOCAÇÃO, não menções
+n_create="$(grep -c 'scripts/gen-agent-token.sh' \
+  "$DOCS_DIR/instalacao-monitoramento.md" || true)"
+[[ "$n_create" == "1" ]] \
+  && ok "uma única criação de credencial no roteiro" \
+  || bad "criação de credencial aparece $n_create vezes"
 
 echo "== resultado: $PASS ok, $FAIL falhas =="
 exit "$([ "$FAIL" = 0 ] && echo 0 || echo 1)"

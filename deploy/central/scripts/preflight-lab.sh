@@ -64,12 +64,29 @@ if [[ "${1:-}" == "--post-config" ]]; then
   DIR="${2:?uso: preflight-lab.sh --post-config <caminho>/deploy/central}"
   [[ -f "$DIR/.env" ]] || fail "falta $DIR/.env"
 
-  # overrides DENTRO do .env: set -a; source .env os exportaria e
-  # retargetariam a stack para outro projeto/arquivo/daemon
-  for v in COMPOSE_PROJECT_NAME COMPOSE_FILE DOCKER_CONTEXT; do
-    grep -qE "^[[:space:]]*(export[[:space:]]+)?$v[[:space:]]*=" "$DIR/.env" \
-      && fail ".env contém $v — override silencioso proibido"
-  done
+  # Arquivos de DADOS que o fluxo carrega depois: só KEY=VALUE e nunca
+  # chaves de controle — por FAMÍLIA (COMPOSE_*, DOCKER_*, LD_* e as
+  # demais que escolhem projeto/arquivo/daemon/binário), não por lista
+  # fechada. Mantenha em sincronia com _CTX_FORBIDDEN de _lib.sh.
+  forbidden_re='^[[:space:]]*(export[[:space:]]+)?(PROJECT|CENTRAL_DIR|PATH|HOME|IFS|CDPATH|ENV|BASH_ENV|PYTHONPATH|PYTHONHOME|NODE_OPTIONS|NODE_PATH|COMPOSE_[A-Za-z0-9_]*|DOCKER_[A-Za-z0-9_]*|LD_[A-Za-z0-9_]*)[[:space:]]*='
+  check_data_file() {
+    local f="$1" line n=0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      n=$((n+1)); line="${line%$'\r'}"
+      line="${line#"${line%%[![:space:]]*}"}"
+      [[ -z "$line" || "$line" == '#'* ]] && continue
+      [[ "$line" =~ ^(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*= ]] \
+        || fail "$f:$n não é KEY=VALUE — arquivo de dados não executa código"
+      if [[ "$line" =~ $forbidden_re ]]; then
+        fail "$f:$n declara chave de controle — não pode redirecionar o contexto aprovado"
+      fi
+    done < "$f"
+    return 0
+  }
+  check_data_file "$DIR/.env"
+  shopt -s nullglob
+  for f in "$DIR"/secrets/*.env; do check_data_file "$f"; done
+  shopt -u nullglob
 
   configured="$(grep -E '^CENTRAL_HTTPS_PORT=' "$DIR/.env" | tail -1 | cut -d= -f2)" \
     || fail ".env sem CENTRAL_HTTPS_PORT"

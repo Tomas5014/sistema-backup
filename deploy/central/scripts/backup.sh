@@ -9,7 +9,7 @@
 set -euo pipefail
 source "$(dirname "$0")/_lib.sh"
 cd "$CENTRAL_DIR"
-source secrets/postgres.env
+load_env secrets/postgres.env
 
 OUT="${1:-$CENTRAL_DIR/backups/macip-central-$(date +%Y%m%d-%H%M%S).pgdump}"
 DEST_DIR="$(dirname "$OUT")"

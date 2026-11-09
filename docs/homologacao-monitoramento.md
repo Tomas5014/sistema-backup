@@ -265,21 +265,24 @@ falha de rede, NÃO indisponibilidade real da API.
   entra num nssdb de HOME descartável (mesmo mecanismo de
   `prove.sh`: `certutil -A ... -i tls/lab-ca.pem` no HOME do teste,
   exportado como `MACIP_HOMOLOG_HOME`).
-- **Variáveis privadas:** login/senha do operador saem de arquivo
-  0600 (`secrets/lab-operator.env`, ex.: `MACIP_HOMOLOG_LOGIN=…`,
-  `MACIP_HOMOLOG_PASSWORD=…`) carregado dentro de um subshell —
-  nunca em argv nem no histórico. `MACIP_HOMOLOG_TASK` = UUID real
-  (`$TASK_C7`, por exemplo).
+- **Credencial privada:** `MACIP_HOMOLOG_SECRETS` aponta o JSON 600
+  `secrets/lab-operator.json` — escrito por
+  `scripts/gen-operator-creds.sh` (senha digitada em prompt oculto) e
+  lido DIRETAMENTE pela spec via parser JSON: a senha nunca passa por
+  `source`/argv/histórico — `$`, aspas, `#`, `;`, `\`, `$(...)`
+  chegam literalmente (limite do formato: sem quebra de linha).
+  `MACIP_HOMOLOG_TASK` = UUID real (`$TASK_C7`, por exemplo).
 - **Execução:** em subshell, sem variáveis herdadas que possam
   acionar outra stack:
   ```bash
   cd ~/macip-lab-monitoramento/macip-backup-linux-0.4.0dev2/source/portal
   (
-    unset MACIP_API_TEST_DATABASE_URL MACIP_API_ORIGIN
-    set -a; source ../deploy/central/secrets/lab-operator.env; set +a
+    unset MACIP_API_TEST_DATABASE_URL MACIP_API_ORIGIN \
+          MACIP_HOMOLOG_LOGIN MACIP_HOMOLOG_PASSWORD
     export MACIP_HOMOLOG_URL=https://localhost:19443 \
            MACIP_HOMOLOG_TASK="$TASK_C7" \
-           MACIP_HOMOLOG_HOME=/tmp/nssdb-c15   # com a CA já inserida
+           MACIP_HOMOLOG_HOME=/tmp/nssdb-c15 \
+           MACIP_HOMOLOG_SECRETS="$PWD/../deploy/central/secrets/lab-operator.json"
     npm run build && npx playwright test e2e/monitoring-fault.spec.ts
   )
   ```

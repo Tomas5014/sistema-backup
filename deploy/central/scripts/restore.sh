@@ -22,7 +22,7 @@ cd "$CENTRAL_DIR"
 DUMP="${1:?uso: restore.sh <arquivo.pgdump>}"
 require_file "$DUMP"
 [[ -s "$DUMP" ]] || { echo "ERRO: $DUMP está vazio" >&2; exit 1; }
-source secrets/postgres.env
+load_env secrets/postgres.env
 
 STAGE="preparação"          # etapa atual, para diagnóstico de sinal
 DUMP_APPLIED=0              # 1 só quando pg_restore termina com sucesso

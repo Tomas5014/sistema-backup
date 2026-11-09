@@ -4,7 +4,7 @@
 set -euo pipefail
 source "$(dirname "$0")/_lib.sh"
 cd "$CENTRAL_DIR"
-set -a; source .env 2>/dev/null || true; set +a
+if [[ -f .env ]]; then load_env .env; fi  # .env opcional aqui; se existe, é restrito
 PORT="${CENTRAL_HTTPS_PORT:-8443}"
 BIND="${CENTRAL_BIND:-127.0.0.1}"
 HOST="${CENTRAL_HOSTNAME:-localhost}"

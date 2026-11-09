@@ -9,20 +9,35 @@
  * recuperação somente após resposta 200 real da tarefa esperada.
  *
  * Roteiro e variáveis: docs/homologacao-monitoramento.md (C15).
- * Sem MACIP_HOMOLOG_{URL,LOGIN,PASSWORD,TASK} o arquivo inteiro skipa
- * — coleta skipada NÃO conta como aprovação.
+ * Credencial lida do JSON privado apontado por MACIP_HOMOLOG_SECRETS
+ * (escrito por scripts/gen-operator-creds.sh): a senha é dado com
+ * parser dedicado — nunca passa por argv, histórico ou 'source'.
+ * Sem MACIP_HOMOLOG_{URL,SECRETS,TASK} o arquivo inteiro skipa —
+ * coleta skipada NÃO conta como aprovação.
  */
 
+import { readFileSync } from "node:fs";
 import { expect, test } from "@playwright/test";
 
 const BASE_URL = process.env.MACIP_HOMOLOG_URL;
-const OP_LOGIN = process.env.MACIP_HOMOLOG_LOGIN;
-const OP_PASSWORD = process.env.MACIP_HOMOLOG_PASSWORD;
+const SECRETS = process.env.MACIP_HOMOLOG_SECRETS;
 const TASK_ID = process.env.MACIP_HOMOLOG_TASK;
+
+let OP_LOGIN: string | undefined;
+let OP_PASSWORD: string | undefined;
+if (SECRETS) {
+  try {
+    const c = JSON.parse(readFileSync(SECRETS, "utf8"));
+    OP_LOGIN = c?.login;
+    OP_PASSWORD = c?.password;
+  } catch {
+    /* arquivo ausente/ilegível → skip abaixo */
+  }
+}
 
 test.skip(
   !BASE_URL || !OP_LOGIN || !OP_PASSWORD || !TASK_ID,
-  "C15 requer MACIP_HOMOLOG_{URL,LOGIN,PASSWORD,TASK} — ver docs/homologacao-monitoramento.md",
+  "C15 requer MACIP_HOMOLOG_{URL,SECRETS,TASK} — ver docs/homologacao-monitoramento.md",
 );
 
 const MON_PATH = "/api/v1/monitoring/**";

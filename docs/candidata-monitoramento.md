@@ -79,9 +79,19 @@ Windows, novos destinos, alterações no piloto.
   - `lab-curl.sh` — chamadas autenticadas com Bearer por stdin
     (`curl -H @-`), TLS verificado, redirects desativados, HTTP≠2xx
     com diagnóstico sem segredos;
-  - `up.sh` — além do SHA em VERSION, recusa overrides Compose
-    (`COMPOSE_PROJECT_NAME`/`COMPOSE_FILE`/`DOCKER_CONTEXT` no `.env`
-    ou herdados divergentes) e sempre compõe com `-p "$PROJECT"`;
+  - `up.sh` — além do SHA em VERSION, carrega `.env`/`secrets/*.env`
+    por `load_env` (carregamento RESTRITO: só KEY=VALUE literal, chaves
+    de controle por família recusadas, redefinição divergente recusada)
+    e sempre compõe com `-p "$PROJECT"`;
+  - `load_env` (`_lib.sh`) — .env e secrets/*.env são DADOS: nenhum
+    executa código, nenhum redireciona projeto/arquivo/daemon/porta;
+    DOCKER_* herdado e aprovado segue sendo o daemon usado;
+  - `gen-agent-token.sh` — cria a credencial do agente UMA vez e grava
+    `secrets/agent-token.env` (600) sem ecoar o token;
+  - `gen-operator-creds.sh` — grava `secrets/lab-operator.json` (JSON
+    600) para o C15: senha por prompt oculto, literal (`$`, aspas,
+    `#`, `;`, `\`, `$(...)`), lida pela spec via
+    `MACIP_HOMOLOG_SECRETS` — nunca vira código shell;
   - `portal/e2e/monitoring-fault.spec.ts` — prova C15: aborto
     seletivo SIMULADO só em `/api/v1/monitoring/*`, controle de
     recuperação por resposta 200 real.

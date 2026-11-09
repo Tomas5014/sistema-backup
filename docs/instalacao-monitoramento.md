@@ -96,9 +96,11 @@ LAB_DIR="$LAB_DIR" LAB_PROJECT="$LAB_PROJECT" LAB_PORT="$LAB_PORT" \
   bash scripts/preflight-lab.sh --post-config "$PWD" \
   && bash scripts/up.sh \
   && bash scripts/check.sh
-# up.sh: exige VERSION com SHA; recusa COMPOSE_PROJECT_NAME/COMPOSE_FILE/
-# DOCKER_CONTEXT no .env ou herdados divergentes; compõe sempre com
-# -p "$PROJECT" — o destino aprovado não depende do ambiente
+# up.sh: exige VERSION com SHA; .env e secrets/*.env são carregados de
+# forma RESTRITA (load_env): só KEY=VALUE literal, chaves de controle
+# (PROJECT, COMPOSE_*, DOCKER_*, PATH, LD_*, CENTRAL_DIR...) recusadas,
+# redefinição divergente de chave já aprovada recusada; compõe sempre
+# com -p "$PROJECT" — o destino aprovado não depende de arquivo algum
 # check.sh: TLS real (cadeia+hostname) + /readyz + estático
 ```
 
@@ -142,27 +144,22 @@ Credenciais de API em arquivos 0600 (permissão conferida a cada uso):
 
 - **admin** → `secrets/api.env` já traz `MACIP_API_ADMIN_TOKEN`
   (gerado por `gen-secrets.sh` — nunca exibido).
-- **agente** → `secrets/agent-token.env`, criado a partir da resposta
-  da criação de credencial — gravado em arquivo, jamais impresso:
-- **operadores (portal)** → `secrets/lab-operator.env` com
-  `MACIP_HOMOLOG_LOGIN=`/`MACIP_HOMOLOG_PASSWORD=` — usado pelo C15
-  dentro de subshell (ver homologacao-monitoramento.md).
+- **agente** → `secrets/agent-token.env`, gravado por
+  `gen-agent-token.sh` a partir da resposta da criação de credencial —
+  UMA única criação (arquivo existente é preservado) e o token jamais
+  é impresso. `AGENT_ID` é o **UUID** do agente `lab-*` cadastrado no
+  portal — nome de apresentação não serve:
+- **operadores (portal)** → `secrets/lab-operator.json`, gravado por
+  `gen-operator-creds.sh` — JSON 600 com parser dedicado: a senha é
+  dado, nunca código shell (`$`, aspas, `#`, `;`, `\`, `$(...)` ficam
+  literais; limite: a entrada é por linha, sem quebras). A spec do C15
+  lê o arquivo diretamente via `MACIP_HOMOLOG_SECRETS`.
 
 ```bash
-bash scripts/lab-curl.sh admin POST \
-  /api/v1/agents/<agent_id>/credentials '{"label":"lab"}' \
-  | python3 -c 'import json,sys;print("MACIP_AGENT_TOKEN="+json.load(sys.stdin)["token"])' \
-  > secrets/agent-token.env    # umask 077 já garante 600; NUNCA ecoar
-```bash
-bash scripts/lab-curl.sh admin POST \
-  /api/v1/agents/<agent_id>/credentials '{"label":"lab"}' \
-  | python3 -c 'import json,sys;print("MACIP_AGENT_TOKEN="+json.load(sys.stdin)["token"])' \
-  > secrets/agent-token.env    # umask 077 já garante 600; NUNCA ecoar
-umask 077
-printf 'MACIP_HOMOLOG_LOGIN=lab-operador\n' > secrets/lab-operator.env
-read -rs -p 'senha do lab-operador: ' PW \
-  && printf 'MACIP_HOMOLOG_PASSWORD=%s\n' "$PW" >> secrets/lab-operator.env \
-  && unset PW                 # digitada em prompt — fora de argv/histórico
+AGENT_ID='<uuid do agente lab-* cadastrado>'
+bash scripts/gen-agent-token.sh "$AGENT_ID"          # uma única criação
+bash scripts/gen-operator-creds.sh secrets/lab-operator.json lab-operador
+# senha digitada em prompt oculto — fora de argv, histórico e saída
 ```
 
 Chamadas de API nos roteiros usam o helper — token por **stdin**
