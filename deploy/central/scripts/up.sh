@@ -66,6 +66,11 @@ SOURCE_COMMIT="$(awk 'NR==1{print $1}' VERSION)"
   exit 1; }
 export SOURCE_COMMIT
 
+# último portão antes de mutar: o bind:porta EFETIVOS (env + .env +
+# secrets, mesma resolução do Compose) precisam ser os aprovados;
+# aprovado ≠ configurado OU não verificável → aborta antes do build
+verify_lab_endpoint
+
 compose build
 compose up -d
 echo "stack $PROJECT iniciada — verifique com scripts/check.sh"

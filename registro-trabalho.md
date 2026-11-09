@@ -3644,3 +3644,37 @@ real 1/1** no Chrome com credencial JSON e senha `$#;%` literal
 (stack PG+API+portal descartável, removida). tsc -b limpo.
 test_restore_real.sh: ressalva conhecida mantida — 9/9 asserções,
 rc=1 no cleanup rootless (fora do escopo).
+
+## Correção — isolamento do laboratório: bind:porta EFETIVOS
+
+Mesma branch `fix/monitoring-homologation-runbooks-3` sobre `79116b9`.
+A 4ª reprodução mostrou: `.env` sem `CENTRAL_BIND` + `0.0.0.0` herdado
+do ambiente (ou declarado em `secrets/api.env`) passava no
+post-config — aprovado 127.0.0.1 mas o Compose receberia 0.0.0.0.
+
+- **Causa:** o post-config conferia o TEXTO do `.env` (grep de
+  `CENTRAL_BIND`/`CENTRAL_HTTPS_PORT`), não o destino efetivo que a
+  resolução de load_env entrega ao Compose.
+- **Solução:** `effective_bind`/`effective_port` em `_lib.sh`
+  respeitam a precedência real (env + arquivos + padrão
+  `${CENTRAL_BIND:-127.0.0.1}:${CENTRAL_HTTPS_PORT:-8443}` — os mesmos
+  defaults do compose.yaml). `--post-config` resolve o par dentro de
+  subshell com o `load_env` da própria cópia do laboratório (.env +
+  todos os secrets/*.env) — a mesma resolução que up.sh usa.
+  `verify_lab_endpoint` em `up.sh` reconfere o efetivo DEPOIS de todos
+  os carregamentos e ANTES do build quando `LAB_BIND`+`LAB_PORT`
+  aprovados estão presentes; divergência ou não-verificável aborta;
+  aprovado, os valores são fixados no ambiente (nenhum carregamento
+  posterior desvia). Fora do roteiro (sem LAB_*) o comportamento é
+  inalterado.
+- **Regressões:** `.env` sem BIND + herdado 0.0.0.0 → recusa; +
+  0.0.0.0 em api.env → recusa no post-config E no portão do up.sh
+  (sem build); sem fonte → 127.0.0.1 aprovado e recebido; explícito
+  coerente 127.0.0.2 → recebido; porta divergente → recusa; config
+  alterada após preflight → recusa antes da subida; stub registra
+  BIND/PORT/DH efetivos recebidos pelo docker — prova do contexto,
+  não de mensagem.
+
+Gates: test_lab_helpers **119/119**; test_up 17 · backup 13 ·
+restore_mock 68 · backup_central 62 · perms 10 ·
+backup_central_real 13 inalterados; tsc -b limpo.

@@ -87,6 +87,35 @@ load_env() {
   done < "$f"
 }
 
+# ---- bind:porta efetivos ---------------------------------------------
+# O Compose resolve ${CENTRAL_BIND}/${CENTRAL_HTTPS_PORT} a partir do
+# ambiente de processo + arquivos carregados; quem aprova precisa
+# conferir o MESMO resultado, não o texto de um arquivo. Estes são os
+# valores efetivos DEPOIS de todos os load_env: env herdado, .env e
+# secrets — com os mesmos padrões do Compose.
+effective_bind() { printf '%s' "${CENTRAL_BIND:-127.0.0.1}"; }
+effective_port() { printf '%s' "${CENTRAL_HTTPS_PORT:-8443}"; }
+
+# Modo laboratório: LAB_BIND/LAB_PORT são a aprovação do preflight e
+# chegam por ambiente ao fluxo de subida. Conferidos DEPOIS de todos
+# os carregamentos e ANTES de build/up — divergência ou valor não
+# verificável aborta; a aprovação nunca é sobrescrita em silêncio.
+verify_lab_endpoint() {
+  [[ -n "${LAB_BIND:-}${LAB_PORT:-}" ]] || return 0   # uso fora do roteiro
+  [[ -n "${LAB_BIND:-}" && -n "${LAB_PORT:-}" ]] || {
+    echo "ERRO: LAB_BIND e LAB_PORT devem vir juntos (aprovação do preflight)" >&2
+    exit 1; }
+  local b p
+  b="$(effective_bind)"; p="$(effective_port)"
+  [[ "$b" == "$LAB_BIND" ]] || {
+    echo "ERRO: bind efetivo $b diverge do aprovado $LAB_BIND" >&2; exit 1; }
+  [[ "$p" == "$LAB_PORT" ]] || {
+    echo "ERRO: porta efetiva $p diverge da aprovada $LAB_PORT" >&2; exit 1; }
+  # fixa o destino aprovado no ambiente: nenhuma resolução posterior
+  # (compose/.env) pode desviá-lo
+  export CENTRAL_BIND="$LAB_BIND" CENTRAL_HTTPS_PORT="$LAB_PORT"
+}
+
 # Resolve caminho configurado: absoluto vence; relativo é ao projeto.
 resolve_path() {
   case "$1" in

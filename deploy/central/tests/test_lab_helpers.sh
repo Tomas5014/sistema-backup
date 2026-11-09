@@ -18,7 +18,7 @@ SHA_OK="edb5bab0b751b5ccdfcf9f193cbb5787dc199c3e"
 stub_lab_docker() {
   cat > "$1/docker" <<'EOF'
 #!/usr/bin/env bash
-echo "docker $* [DH=${DOCKER_HOST:-unset}]" >> "$STUB_LOG"
+echo "docker $* [DH=${DOCKER_HOST:-unset} BIND=${CENTRAL_BIND:-unset} PORT=${CENTRAL_HTTPS_PORT:-unset}]" >> "$STUB_LOG"
 case "$1" in
   info) exit "${STUB_DOCKER_INFO_RC:-0}" ;;
   compose)
@@ -178,7 +178,8 @@ STUB_IMGREF_db="docker.io/library/postgres:17-alpine"
 # ================= preflight-lab.sh (achado B) ========================
 
 echo "== preflight-lab.sh =="
-export LAB_DIR="$WORK/labdir-novo" LAB_PROJECT=labproj LAB_PORT=19443
+export LAB_DIR="$WORK/labdir-novo" LAB_PROJECT=labproj LAB_PORT=19443 \
+       LAB_BIND=127.0.0.1
 for v in STUB_PROJECT_CONTAINERS STUB_PROJECT_VOLUMES STUB_DOCKER_PS_RC \
          STUB_DOCKER_VOL_RC STUB_DOCKER_INFO_RC COMPOSE_PROJECT_NAME COMPOSE_FILE DOCKER_CONTEXT; do
   unset "$v" 2>/dev/null || true
@@ -382,6 +383,91 @@ bash "$LAB/scripts/preflight-lab.sh" --post-config "$LAB2" \
 grep -q "build" "$STUB_LOG" \
   && bad "build após recusa" || ok "nenhuma mutação após recusa"
 printf 'CENTRAL_HTTPS_PORT=19443\nCENTRAL_BIND=127.0.0.1\n' > "$LAB2/.env"
+
+# ================= bind:porta EFETIVOS (achado isolamento r4) =======
+# O preflight confere o MESMO endereço/porta que o Compose usará:
+# ambiente herdado + .env + TODOS os secrets + padrão, na precedência
+# real. A versão anterior aprovava olhando só o texto do .env.
+
+echo "== bind:porta efetivos =="
+
+# .env SEM CENTRAL_BIND + BIND=0.0.0.0 herdado do ambiente → recusa
+printf 'CENTRAL_HTTPS_PORT=19443\n' > "$LAB2/.env"
+CENTRAL_BIND=0.0.0.0 bash "$LAB/scripts/preflight-lab.sh" --post-config "$LAB2" \
+  >/dev/null 2>&1 \
+  && bad "post-config aprovou com bind herdado 0.0.0.0" \
+  || ok "bind herdado divergente recusado"
+
+# .env SEM CENTRAL_BIND + CENTRAL_BIND=0.0.0.0 em secrets/api.env →
+# absorvido pelo load_env, efetivo 0.0.0.0 ≠ aprovado → recusa
+printf 'CENTRAL_HTTPS_PORT=19443\n' > "$LAB2/.env"
+printf 'MACIP_API_DATABASE_URL=postgresql+psycopg://u:p@db:5432/d\nMACIP_API_ADMIN_TOKEN=t\nCENTRAL_BIND=0.0.0.0\n' \
+  > "$LAB2/secrets/api.env"; chmod 600 "$LAB2/secrets/api.env"
+bash "$LAB/scripts/preflight-lab.sh" --post-config "$LAB2" >/dev/null 2>&1 \
+  && bad "post-config aprovou com bind 0.0.0.0 em secrets" \
+  || ok "bind em secrets divergente recusado"
+# e o mesmo estado recusa TAMBÉM no portão do up.sh (antes do build)
+: > "$STUB_LOG"
+bash "$LAB2/scripts/up.sh" >/dev/null 2>&1 \
+  && bad "up aceitou bind 0.0.0.0 absorvido de secrets" \
+  || ok "up recusa bind divergente absorvido"
+grep -q "build" "$STUB_LOG" \
+  && bad "build executou com bind divergente" || ok "build não executou"
+
+# .env SEM BIND e nenhuma fonte: padrão 127.0.0.1 aprovado E usado
+printf 'MACIP_API_DATABASE_URL=postgresql+psycopg://macip_central:pw-real@db:5432/macip_central\nMACIP_API_ADMIN_TOKEN=t\n' \
+  > "$LAB2/secrets/api.env"; chmod 600 "$LAB2/secrets/api.env"
+printf 'CENTRAL_HTTPS_PORT=19443\n' > "$LAB2/.env"
+bash "$LAB/scripts/preflight-lab.sh" --post-config "$LAB2" >/dev/null 2>&1 \
+  && ok "padrão 127.0.0.1 aprovado" || bad "padrão 127.0.0.1 recusado"
+: > "$STUB_LOG"
+bash "$LAB2/scripts/up.sh" >/dev/null 2>&1 \
+  && ok "up aprovado com padrão" || bad "up falhou com padrão"
+grep -q "BIND=127.0.0.1" "$STUB_LOG" && grep -q "PORT=19443" "$STUB_LOG" \
+  && ok "bind:porta aprovados chegaram ao docker" \
+  || bad "bind:porta efetivos divergem do aprovado"
+
+# explícito coerente: .env e aprovação em 127.0.0.2 → sucesso e valor
+# efetivamente recebido pelo docker simulado
+printf 'CENTRAL_HTTPS_PORT=19443\nCENTRAL_BIND=127.0.0.2\n' > "$LAB2/.env"
+LAB_BIND=127.0.0.2 bash "$LAB/scripts/preflight-lab.sh" --post-config "$LAB2" \
+  >/dev/null 2>&1 \
+  && ok "bind explícito coerente aprovado" || bad "bind coerente recusado"
+: > "$STUB_LOG"
+LAB_BIND=127.0.0.2 bash "$LAB2/scripts/up.sh" >/dev/null 2>&1 \
+  && ok "up aprovado com bind explícito" || bad "up falhou com bind explícito"
+grep -q "BIND=127.0.0.2" "$STUB_LOG" \
+  && ok "bind explícito chegou ao docker" || bad "bind explícito não chegou"
+printf 'CENTRAL_HTTPS_PORT=19443\nCENTRAL_BIND=127.0.0.1\n' > "$LAB2/.env"
+
+# porta divergente: .env 19999 ≠ aprovada 19443 → recusa (já textual,
+# agora também na resolução efetiva)
+printf 'CENTRAL_HTTPS_PORT=19999\n' > "$LAB2/.env"
+bash "$LAB/scripts/preflight-lab.sh" --post-config "$LAB2" >/dev/null 2>&1 \
+  && bad "porta divergente aprovada" || ok "porta divergente recusada"
+printf 'CENTRAL_HTTPS_PORT=19443\nCENTRAL_BIND=127.0.0.1\n' > "$LAB2/.env"
+
+# configuração alterada DEPOIS do preflight: api.env passa a declarar
+# outro bind → up.sh aborta antes de qualquer build/up
+bash "$LAB/scripts/preflight-lab.sh" --post-config "$LAB2" >/dev/null 2>&1 \
+  && ok "post-config aprovado (base p/ alteração)" || bad "base p/ alteração falhou"
+printf 'MACIP_API_DATABASE_URL=postgresql+psycopg://macip_central:pw-real@db:5432/macip_central\nMACIP_API_ADMIN_TOKEN=t\nCENTRAL_BIND=0.0.0.0\n' \
+  > "$LAB2/secrets/api.env"; chmod 600 "$LAB2/secrets/api.env"
+: > "$STUB_LOG"
+bash "$LAB2/scripts/up.sh" >/dev/null 2>&1 \
+  && bad "up seguiu com config alterada após preflight" \
+  || ok "config alterada após preflight recusada"
+grep -q "build" "$STUB_LOG" \
+  && bad "build após alteração de config" || ok "nenhum build após alteração"
+printf 'MACIP_API_DATABASE_URL=postgresql+psycopg://macip_central:pw-real@db:5432/macip_central\nMACIP_API_ADMIN_TOKEN=t\n' \
+  > "$LAB2/secrets/api.env"; chmod 600 "$LAB2/secrets/api.env"
+
+# daemon e projeto aprovados intactos após toda a cadeia (revalida)
+: > "$STUB_LOG"
+DOCKER_HOST=unix:///tmp/aprovado.sock bash "$LAB2/scripts/up.sh" >/dev/null 2>&1 \
+  && ok "up final com daemon aprovado" || bad "up final falhou"
+grep -q -- "-p labproj" "$STUB_LOG" && grep -q "DH=unix:///tmp/aprovado.sock" "$STUB_LOG" \
+  && ok "projeto+daemon efetivos intactos" || bad "projeto/daemon desviados"
 
 # ================= lab-curl.sh (achado C) =============================
 

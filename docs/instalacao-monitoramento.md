@@ -84,23 +84,32 @@ bash scripts/mk-lab-tls.sh localhost # tls/lab-ca.pem + cert.pem/key.pem
 ```
 
 `preflight-lab.sh --post-config` CONFERE a cópia antes de subir —
-porta configurada igual à aprovada, bind efetivo igual a `LAB_BIND`,
-`name:` e `PROJECT=` iguais a `LAB_PROJECT`, `.env` SEM overrides
-Compose, projeto/volumes ainda inexistentes e a porta ainda livre.
+`name:` e `PROJECT=` iguais a `LAB_PROJECT`, `.env`/`secrets/*.env`
+sem chaves de controle, projeto/volumes ainda inexistentes, a porta
+ainda livre e o par bind:porta **EFETIVO** — resolvido pelo mesmo
+`load_env` de `up.sh` (ambiente herdado + `.env` + todos os
+`secrets/*.env` + padrão), nunca pelo texto de um arquivo só.
+
+`LAB_*` exportados são a aprovação que chega ao `up.sh`: com eles
+presentes, o `up.sh` revalida o bind:porta efetivo DEPOIS de todos os
+carregamentos e ANTES de qualquer build — divergência ou valor não
+verificável aborta; aprovado, os valores são fixados no ambiente.
 
 Execute a sequência encadeada — a recusa do preflight precisa
 INTERROMPER o fluxo; comandos soltos continuariam após a recusa:
 
 ```bash
-LAB_DIR="$LAB_DIR" LAB_PROJECT="$LAB_PROJECT" LAB_PORT="$LAB_PORT" \
+LAB_DIR="$LAB_DIR" LAB_PROJECT="$LAB_PROJECT" \
+  LAB_BIND="$LAB_BIND" LAB_PORT="$LAB_PORT" \
   bash scripts/preflight-lab.sh --post-config "$PWD" \
   && bash scripts/up.sh \
   && bash scripts/check.sh
 # up.sh: exige VERSION com SHA; .env e secrets/*.env são carregados de
 # forma RESTRITA (load_env): só KEY=VALUE literal, chaves de controle
 # (PROJECT, COMPOSE_*, DOCKER_*, PATH, LD_*, CENTRAL_DIR...) recusadas,
-# redefinição divergente de chave já aprovada recusada; compõe sempre
-# com -p "$PROJECT" — o destino aprovado não depende de arquivo algum
+# redefinição divergente de chave já aprovada recusada; bind:porta
+# efetivos revalidados contra LAB_* e fixados; compõe sempre com
+# -p "$PROJECT" — o destino aprovado não depende de arquivo algum
 # check.sh: TLS real (cadeia+hostname) + /readyz + estático
 ```
 

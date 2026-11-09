@@ -88,16 +88,21 @@ if [[ "${1:-}" == "--post-config" ]]; then
   for f in "$DIR"/secrets/*.env; do check_data_file "$f"; done
   shopt -u nullglob
 
-  configured="$(grep -E '^CENTRAL_HTTPS_PORT=' "$DIR/.env" | tail -1 | cut -d= -f2)" \
-    || fail ".env sem CENTRAL_HTTPS_PORT"
-  [[ "$configured" == "$LAB_PORT" ]] \
-    || fail "CENTRAL_HTTPS_PORT=$configured diverge da porta aprovada $LAB_PORT"
-
-  # CENTRAL_BIND é opcional: ausente = default do compose (127.0.0.1)
-  bind_line="$(grep -E '^CENTRAL_BIND=' "$DIR/.env" | tail -1 | cut -d= -f2 || true)"
-  bind_eff="${bind_line:-127.0.0.1}"
-  [[ "$bind_eff" == "$LAB_BIND" ]] \
-    || fail "CENTRAL_BIND=$bind_eff diverge do bind aprovado $LAB_BIND"
+  # bind:porta EFETIVOS — resolvidos pelo MESMO código de carregamento
+  # de up.sh (load_env + effective_* do _lib.sh da própria cópia):
+  # ambiente herdado, .env, TODOS os secrets/*.env e os padrões, na
+  # mesma precedência que o Compose verá. Divergência ou resolução
+  # impossível = recusa — nunca se assume 127.0.0.1 para passar.
+  resolved="$(
+    cd "$DIR" || exit 1
+    source scripts/_lib.sh
+    command -v load_env >/dev/null || exit 1
+    shopt -s nullglob
+    for f in .env secrets/*.env; do load_env "$f"; done
+    printf '%s:%s' "$(effective_bind)" "$(effective_port)"
+  )" || fail "configuração não resolvível — recusado antes da subida"
+  [[ "$resolved" == "$LAB_BIND:$LAB_PORT" ]] \
+    || fail "bind:porta efetivos '$resolved' divergem do aprovado $LAB_BIND:$LAB_PORT"
 
   name_line="$(grep -E '^name:' "$DIR/compose.yaml")" \
     || fail "compose.yaml sem campo 'name:' explícito"
