@@ -1132,3 +1132,35 @@ de contexto. Ponte unittest: `tests/test_windows_agent_ps1.py`
 é simulada — DPAPI real + Agendador com sessão encerrada + SFTP ficam
 para a VM Windows descartável (pendente). `restic.exe`, chaves, senhas
 e `backup.json` real ficam fora do versionamento (.gitignore próprio).
+
+## Agente Windows — correções de endereço, preparo e vínculo (review 2)
+
+Sobre `d9e6968`, mesma branch. Achados corrigidos:
+
+- **SFTP:** regex rejeitava a forma canônica `sftp:u@h:/caminho` (até o
+  exemplo). Agora aceita `sftp:usuario@host:/caminho` (porta 22) e
+  `sftp://usuario@host:porta//caminho`; a ambígua `:porta/caminho` é
+  recusada (Restic lê como caminho). `ssh_config` ganhou `User` e
+  `Port` — usuário SFTP explícito no comando. Prova com **Restic
+  0.18.1 real** + ssh registrador: host e `-s sftp` chegam na invocação
+  nas duas formas.
+- **PS 5.1:** script agora 100% ASCII (travessão removido de string);
+  `GetDirectoryName` no lugar de `Split-Path -Parent`; suíte salva em
+  UTF-8 com BOM.
+- **Preparo:** recusa pasta de estado existente (byte a byte
+  preservada), só marca concluído após conferir o ID, e em erro remove
+  apenas os artefatos da tentativa atual. `Backup` reconfere
+  repositório, ID e SHA-256 de chave/known_hosts contra o
+  `preparo.json`; divergência recusa antes do backup e orienta preparo
+  em outra pasta — sem reuso silencioso de ssh_config.
+- **Validação:** `origem` exige unidade local no Windows (UNC e volume
+  de rede recusados); `exclusoes` exige lista no JSON bruto (texto
+  isolado e null recusados; `[]` e `[x]` válidos). JSON inválido após
+  sucesso grava falha nova apenas se houver preparo verificável; sem
+  ele, erro ao Agendador sem criar pasta.
+- **Roteiro:** README sem `-ExecutionPolicy Bypass`, `schtasks` sem
+  `/F`, troca de horário/destino documentada (destino novo = pasta de
+  estado nova, validada antes de apontar a tarefa).
+
+Suíte: **118/118** em pwsh (com `MACIP_RESTIC_REAL`). Prova real de
+DPAPI/Agendador/SFTP continua pendente de VM Windows descartável.

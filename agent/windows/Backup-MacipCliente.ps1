@@ -1,5 +1,5 @@
 #requires -Version 5.1
-# Backup-MacipCliente.ps1 — agente de backup Windows da MAC IP (piloto).
+# Backup-MacipCliente.ps1 - agente de backup Windows da MAC IP (piloto).
 # Um mesmo script serve a qualquer cliente: tudo que muda vem do backup.json.
 # Modos: Preparar (interativo, na sessao da conta da tarefa) e Backup
 # (sem prompts, disparado pelo Agendador). Nunca executa "restic init".
@@ -18,6 +18,7 @@ $ErrorActionPreference = 'Stop'
 if (-not $script:ResticExeNome) {
     $script:ResticExeNome = $(if ($env:OS -eq 'Windows_NT') { 'restic.exe' } else { 'restic' })
 }
+if (-not $script:SshExe) { $script:SshExe = $null }   # so para testes
 
 $script:CamposConhecidos = @(
     'origem', 'exclusoes', 'repositorio', 'horario',
@@ -38,7 +39,7 @@ function Get-IdentidadeAtual {
 
 function Get-CaminhoEstado {
     param([string]$ConfigAbs)
-    $dir = Split-Path -LiteralPath $ConfigAbs -Parent
+    $dir = [IO.Path]::GetDirectoryName($ConfigAbs)
     return (Join-Path $dir 'macip-estado')
 }
 
@@ -49,7 +50,8 @@ function Read-AgenteConfig {
         throw "backup.json nao encontrado: $Caminho"
     }
     $abs = (Resolve-Path -LiteralPath $Caminho).ProviderPath
-    try { $cfg = Get-Content -LiteralPath $abs -Raw -Encoding UTF8 | ConvertFrom-Json }
+    $bruto = Get-Content -LiteralPath $abs -Raw -Encoding UTF8
+    try { $cfg = $bruto | ConvertFrom-Json }
     catch { throw "backup.json invalido ($abs): $($_.Exception.Message)" }
     if ($null -eq $cfg -or $cfg -isnot [pscustomobject]) {
         throw "backup.json deve ser um objeto JSON: $abs"
@@ -71,7 +73,23 @@ function Read-AgenteConfig {
     $r = [ordered]@{ caminho_config = $abs }
 
     $origem = [string]$cfg.origem
-    if (-not [IO.Path]::IsPathRooted($origem)) {
+    if (Test-IsWindows) {
+        if ($origem -match '^\\\\' -or $origem -match '^//') {
+            throw "origem deve ser volume local, nao caminho de rede: '$origem'"
+        }
+        if ($origem -cnotmatch '^[A-Za-z]:[\\/]') {
+            throw "origem deve ser caminho absoluto com unidade (ex.: D:\\Dados): '$origem'"
+        }
+        try {
+            $drv = [IO.DriveInfo]::new($origem.Substring(0, 1))
+            if ($drv.DriveType -in @('Network', 'CDRom', 'NoRootDirectory')) {
+                throw "origem deve ser volume local: '$origem'"
+            }
+        } catch [System.ArgumentException] {
+            throw "unidade da origem invalida: '$origem'"
+        }
+    }
+    elseif (-not [IO.Path]::IsPathRooted($origem)) {
         throw "origem deve ser um caminho local absoluto: '$origem'"
     }
     if (-not (Test-Path -LiteralPath $origem -PathType Container)) {
@@ -81,29 +99,47 @@ function Read-AgenteConfig {
     catch { throw "origem sem leitura para esta conta: '$origem'" }
     $r.origem = $origem
 
-    # PS 5.1 desempacota lista JSON de um item; normaliza escalar ou lista.
-    $padroes = @()
-    if ($null -ne $cfg.exclusoes) {
-        $padroes = @($cfg.exclusoes | ForEach-Object {
-            if ($_ -isnot [string] -or $_.Trim() -eq '') {
-                throw 'exclusoes: padrao vazio ou nao textual recusado'
-            }
-            $_
-        })
+    # exclusoes precisa ser LISTA no JSON ("[]" aceito; texto isolado e
+    # null recusados). O PS 5.1 desempacota lista de um item para escalar,
+    # por isso a forma e conferida no JSON bruto e o valor normalizado.
+    if ($bruto -cnotmatch '"exclusoes"\s*:\s*\[') {
+        throw 'exclusoes deve ser uma lista JSON (use [] para nenhuma exclusao)'
     }
+    $padroes = @($cfg.exclusoes | ForEach-Object {
+        if ($_ -isnot [string] -or $_.Trim() -eq '') {
+            throw 'exclusoes: padrao vazio ou nao textual recusado'
+        }
+        $_
+    })
     $r.exclusoes = $padroes
 
+    # Formas aceitas pelo Restic:
+    #   sftp:usuario@host:/caminho            (canonica, porta 22)
+    #   sftp://usuario@host:porta//caminho    (porta propria, // = caminho absoluto)
     $repo = [string]$cfg.repositorio
-    $m = [regex]::Match($repo, '^sftp:([^@\s]+)@([^:/\s]+)(?::(\d{1,5}))?(/\S*)$')
-    if (-not $m.Success -or $m.Groups[1].Value -eq '' -or $m.Groups[4].Value.Length -lt 2) {
-        throw "repositorio deve ser sftp:usuario@servidor[:porta]/caminho: '$repo'"
+    $m1 = [regex]::Match($repo, '^sftp:([^@\s/]+)@([^:/\s]+):(/{1,2}\S+)$')
+    $m2 = [regex]::Match($repo, '^sftp://([^@\s/]+)@([^:/\s]+)(?::(\d{1,5}))?//(\S+)$')
+    if ($m1.Success) {
+        $r.sftp_user = $m1.Groups[1].Value
+        $r.sftp_host = $m1.Groups[2].Value
+        $r.sftp_porta = '22'
+        $r.sftp_caminho = $m1.Groups[3].Value
     }
-    if ($m.Groups[3].Success -and [int]$m.Groups[3].Value -gt 65535) {
-        throw "repositorio com porta invalida: '$repo'"
+    elseif ($m2.Success -and $m2.Groups[4].Success) {
+        $r.sftp_user = $m2.Groups[1].Value
+        $r.sftp_host = $m2.Groups[2].Value
+        $r.sftp_porta = $(if ($m2.Groups[3].Success) { $m2.Groups[3].Value } else { '22' })
+        $r.sftp_caminho = '/' + $m2.Groups[4].Value
+    }
+    else {
+        throw ("repositorio deve ser 'sftp:usuario@host:/caminho' " +
+            "ou 'sftp://usuario@host:porta//caminho': '$repo'")
+    }
+    if ([int]$r.sftp_porta -gt 65535) { throw "repositorio com porta invalida: '$repo'" }
+    if ($r.sftp_caminho -notmatch '^/\S' -or $r.sftp_caminho -match '\s') {
+        throw "repositorio sem caminho absoluto valido: '$repo'"
     }
     $r.repositorio = $repo
-    $r.sftp_host = $m.Groups[2].Value
-    $r.sftp_porta = $(if ($m.Groups[3].Success) { $m.Groups[3].Value } else { '22' })
 
     if ([string]$cfg.horario -cnotmatch '^([01][0-9]|2[0-3]):[0-5][0-9]$') {
         throw "horario deve ser HH:mm (00:00-23:59): '$($cfg.horario)'"
@@ -126,6 +162,7 @@ function Read-AgenteConfig {
 }
 
 function Get-SshExe {
+    if ($script:SshExe) { return $script:SshExe }
     if (Test-IsWindows) {
         $p = Join-Path $env:WINDIR 'System32\OpenSSH\ssh.exe'
         if (-not (Test-Path -LiteralPath $p -PathType Leaf)) {
@@ -150,6 +187,7 @@ function Write-SshConfig {
     $cfgSsh = $alvo.Replace('\', '/')
     @"
 Host $($Cfg.sftp_host)
+    User $($Cfg.sftp_user)
     Port $($Cfg.sftp_porta)
     BatchMode yes
     IdentityAgent none
@@ -231,10 +269,12 @@ function Read-SnapshotId {
 
 function Write-Resultado {
     param([string]$Estado, [hashtable]$Dados)
-    if (-not (Test-Path -LiteralPath $Estado -PathType Container)) {
-        New-Item -ItemType Directory -Path $Estado -Force | Out-Null
-    }
     $Dados | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $Estado 'ultimo-resultado.json') -Encoding UTF8
+}
+
+function Get-HashArquivo {
+    param([string]$Caminho)
+    return (Get-FileHash -LiteralPath $Caminho -Algorithm SHA256).Hash.ToLower()
 }
 
 function Protect-PastaEstado {
@@ -249,13 +289,23 @@ function Protect-PastaEstado {
     [IO.Directory]::SetAccessControl($Estado, $acl)
 }
 
+function Get-EstadoCandidato {
+    param([string]$Config, [string]$DiretorioEstado)
+    if ($DiretorioEstado) { return [IO.Path]::GetFullPath($DiretorioEstado) }
+    if ($Config -and (Test-Path -LiteralPath $Config -PathType Leaf)) {
+        $abs = (Resolve-Path -LiteralPath $Config).ProviderPath
+        return (Get-CaminhoEstado $abs)
+    }
+    return $null
+}
+
 function Resolve-Contexto {
     param([string]$Config, [string]$DiretorioEstado)
-    $cfg = Read-AgenteConfig -Caminho $Config
-    $estado = if ($DiretorioEstado) { [IO.Path]::GetFullPath($DiretorioEstado) } else { Get-CaminhoEstado $cfg.caminho_config }
+    $estado = Get-EstadoCandidato -Config $Config -DiretorioEstado $DiretorioEstado
     if ($estado -match '\s') {
         throw "DiretorioEstado nao pode conter espacos (limite do sftp.command do Restic): '$estado'"
     }
+    $cfg = Read-AgenteConfig -Caminho $Config
     return [pscustomobject]@{ Cfg = $cfg; Estado = $estado }
 }
 
@@ -265,12 +315,17 @@ function Invoke-AgentePreparar {
     $cfg = $ctx.Cfg; $estado = $ctx.Estado
     $ident = Get-IdentidadeAtual
 
+    if (Test-Path -LiteralPath $estado) {
+        throw ("Pasta de estado ja existe e nao sera sobrescrita: $estado. " +
+            'Para novo preparo use outra -DiretorioEstado; o estado anterior fica preservado.')
+    }
+
     if (-not $ResticExe -or -not (Test-Path -LiteralPath $ResticExe -PathType Leaf)) {
         throw 'Informe -ResticExe com o restic.exe fornecido pela MAC IP.'
     }
     $ResticExe = (Resolve-Path -LiteralPath $ResticExe).ProviderPath
     $ver = & $ResticExe version 2>&1
-    if ($LASTEXITCODE -ne 0 -or ($ver -join ' ') -cnotmatch '^restic \d+\.\d+\.\d+') {
+    if (($ver -join ' ') -cnotmatch '^restic \d+\.\d+\.\d+') {
         throw "Restic nao respondeu a 'version': $ResticExe"
     }
     $ssh = Get-SshExe
@@ -280,35 +335,46 @@ function Invoke-AgentePreparar {
     }
     if ($SenhaRestic.Length -lt 1) { $SenhaRestic.Dispose(); throw 'Senha vazia recusada.' }
 
-    $jaExiste = Test-Path -LiteralPath $estado -PathType Container
-    New-Item -ItemType Directory -Path $estado -Force | Out-Null
-    if (-not $jaExiste) { Protect-PastaEstado -Estado $estado }
-
-    $exeDestino = Join-Path $estado $script:ResticExeNome
-    Copy-Item -LiteralPath $ResticExe -Destination $exeDestino -Force
-    if (-not (Test-IsWindows)) { & chmod +x $exeDestino 2>$null | Out-Null }
-
+    # Tudo abaixo pertence a esta tentativa: a pasta nao existia antes.
+    # Em erro, remove apenas o que esta tentativa criou.
+    New-Item -ItemType Directory -Path $estado | Out-Null
     try {
-        Protect-ResticPassword -Senha $SenhaRestic -Destino (Join-Path $estado 'restic.dpapi')
+        Protect-PastaEstado -Estado $estado
+
+        $exeDestino = Join-Path $estado $script:ResticExeNome
+        Copy-Item -LiteralPath $ResticExe -Destination $exeDestino
+        if (-not (Test-IsWindows)) { & chmod +x $exeDestino 2>$null | Out-Null }
+
+        try {
+            Protect-ResticPassword -Senha $SenhaRestic -Destino (Join-Path $estado 'restic.dpapi')
+        }
+        finally { $SenhaRestic.Dispose() }
+
+        $cfg | Add-Member -NotePropertyName ssh_exe -NotePropertyValue $ssh -Force
+        $cfg | Add-Member -NotePropertyName ssh_config -NotePropertyValue (Write-SshConfig -Cfg $cfg -Estado $estado) -Force
+
+        $repoId = Confirm-Destino -Cfg $cfg -Estado $estado
+
+        $scriptAbs = $PSCommandPath
+        [ordered]@{
+            preparado_utc       = [DateTime]::UtcNow.ToString('o')
+            conta               = $ident.Nome
+            sid                 = $ident.Sid
+            config              = $cfg.caminho_config
+            script              = $scriptAbs
+            repositorio         = $cfg.repositorio
+            repositorio_id      = $repoId
+            identidade_ssh      = $cfg.identidade_ssh
+            identidade_sha256   = (Get-HashArquivo $cfg.identidade_ssh)
+            known_hosts         = $cfg.known_hosts
+            known_hosts_sha256  = (Get-HashArquivo $cfg.known_hosts)
+            restic_versao       = ($ver -join ' ').Trim()
+        } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $estado 'preparo.json') -Encoding UTF8
     }
-    finally { $SenhaRestic.Dispose() }
-
-    $cfg | Add-Member -NotePropertyName ssh_exe -NotePropertyValue $ssh -Force
-    $cfg | Add-Member -NotePropertyName ssh_config -NotePropertyValue (Write-SshConfig -Cfg $cfg -Estado $estado) -Force
-
-    $repoId = Confirm-Destino -Cfg $cfg -Estado $estado
-
-    $scriptAbs = $PSCommandPath
-    [ordered]@{
-        preparado_utc  = [DateTime]::UtcNow.ToString('o')
-        conta          = $ident.Nome
-        sid            = $ident.Sid
-        config         = $cfg.caminho_config
-        script         = $scriptAbs
-        repositorio    = $cfg.repositorio
-        repositorio_id = $repoId
-        restic_versao  = ($ver -join ' ').Trim()
-    } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $estado 'preparo.json') -Encoding UTF8
+    catch {
+        Remove-Item -LiteralPath $estado -Recurse -Force -ErrorAction SilentlyContinue
+        throw
+    }
 
     if (Test-IsWindows) {
         $ps = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
@@ -316,8 +382,8 @@ function Invoke-AgentePreparar {
     Write-Host 'PREPARACAO OK'
     Write-Host '=== Campos para o Agendador de Tarefas ==='
     Write-Host "Programa........: $ps"
-    Write-Host ('Argumentos......: -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -Modo Backup -Config "{1}" -DiretorioEstado "{2}"' -f $scriptAbs, $cfg.caminho_config, $estado)
-    Write-Host "Conta da tarefa.: $($ident.Nome) (mesma conta desta sessao — a senha DPAPI so abre nela)"
+    Write-Host ('Argumentos......: -NoProfile -NonInteractive -File "{0}" -Modo Backup -Config "{1}" -DiretorioEstado "{2}"' -f $scriptAbs, $cfg.caminho_config, $estado)
+    Write-Host "Conta da tarefa.: $($ident.Nome) (mesma conta desta sessao - a senha DPAPI so abre nela)"
     Write-Host "Disparador......: Diario as $($cfg.horario) (de backup.json)"
     Write-Host 'Opcoes..........: executar com a sessao encerrada; nao iniciar nova instancia se ja estiver em execucao'
     Write-Host "Resultado.......: $(Join-Path $estado 'ultimo-resultado.json')"
@@ -334,16 +400,38 @@ function Invoke-AgenteBackup {
         codigo_restic = $null
         snapshot      = $null
     }
+    $estado = Get-EstadoCandidato -Config $Config -DiretorioEstado $DiretorioEstado
+    $gravar = $false
     try {
-        $ctx = Resolve-Contexto -Config $Config -DiretorioEstado $DiretorioEstado
-        $cfg = $ctx.Cfg; $estado = $ctx.Estado
-        $preparo = Join-Path $estado 'preparo.json'
-        if (-not (Test-Path -LiteralPath $preparo -PathType Leaf)) {
+        $prep = $null
+        if ($estado) {
+            $preparoFile = Join-Path $estado 'preparo.json'
+            if (Test-Path -LiteralPath $preparoFile -PathType Leaf) {
+                $prep = Get-Content -LiteralPath $preparoFile -Raw | ConvertFrom-Json
+                if ($prep.sid -cne (Get-IdentidadeAtual).Sid) {
+                    throw 'Conta diferente da usada no preparo (a senha DPAPI so abre na conta original).'
+                }
+            }
+        }
+        # So escreve resultado quando ha preparo verificavel desta conta;
+        # nunca cria pasta operacional so para registrar falha.
+        $gravar = ($null -ne $prep)
+
+        $cfg = Read-AgenteConfig -Caminho $Config
+        if (-not $estado -or -not $prep) {
             throw 'Preparacao nao concluida (execute -Modo Preparar na conta da tarefa).'
         }
-        $prep = Get-Content -LiteralPath $preparo -Raw | ConvertFrom-Json
-        if ($prep.sid -cne (Get-IdentidadeAtual).Sid) {
-            throw 'Conta diferente da usada no preparo (a senha DPAPI so abre na conta original).'
+        if ($estado -match '\s') {
+            throw "DiretorioEstado com espacos nao suportado (limite do sftp.command): '$estado'"
+        }
+        # Vinculo com o destino aprovado no preparo: sem reuso silencioso.
+        if ($cfg.repositorio -cne $prep.repositorio -or
+            $cfg.repositorio_id -cne $prep.repositorio_id -or
+            (Get-HashArquivo $cfg.identidade_ssh) -cne $prep.identidade_sha256 -or
+            (Get-HashArquivo $cfg.known_hosts) -cne $prep.known_hosts_sha256) {
+            throw ('Destino, repositorio_id, identidade ou known_hosts divergem do preparo ' +
+                'aprovado. Para novo destino, execute -Modo Preparar em OUTRA pasta de ' +
+                'estado e so depois de validar atualize a tarefa.')
         }
         foreach ($f in 'restic.dpapi', 'ssh_config') {
             if (-not (Test-Path -LiteralPath (Join-Path $estado $f) -PathType Leaf)) {
@@ -355,7 +443,7 @@ function Invoke-AgenteBackup {
         $cfg | Add-Member -NotePropertyName ssh_exe -NotePropertyValue (Get-SshExe) -Force
         $cfg | Add-Member -NotePropertyName ssh_config -NotePropertyValue ((Join-Path $estado 'ssh_config').Replace('\', '/')) -Force
 
-        Write-Resultado -Estado $estado -Dados $res
+        if ($gravar) { Write-Resultado -Estado $estado -Dados $res }
 
         [void](Confirm-Destino -Cfg $cfg -Estado $estado)
 
@@ -379,7 +467,7 @@ function Invoke-AgenteBackup {
     }
     finally {
         $res.fim_utc = [DateTime]::UtcNow.ToString('o')
-        if ($estado) { Write-Resultado -Estado $estado -Dados $res }
+        if ($gravar -and $estado) { Write-Resultado -Estado $estado -Dados $res }
     }
     return [pscustomobject]$res
 }
