@@ -50,8 +50,7 @@ function Read-AgenteConfig {
         throw "backup.json nao encontrado: $Caminho"
     }
     $abs = (Resolve-Path -LiteralPath $Caminho).ProviderPath
-    $bruto = Get-Content -LiteralPath $abs -Raw -Encoding UTF8
-    try { $cfg = $bruto | ConvertFrom-Json }
+    try { $cfg = Get-Content -LiteralPath $abs -Raw -Encoding UTF8 | ConvertFrom-Json }
     catch { throw "backup.json invalido ($abs): $($_.Exception.Message)" }
     if ($null -eq $cfg -or $cfg -isnot [pscustomobject]) {
         throw "backup.json deve ser um objeto JSON: $abs"
@@ -99,10 +98,11 @@ function Read-AgenteConfig {
     catch { throw "origem sem leitura para esta conta: '$origem'" }
     $r.origem = $origem
 
-    # exclusoes precisa ser LISTA no JSON ("[]" aceito; texto isolado e
-    # null recusados). O PS 5.1 desempacota lista de um item para escalar,
-    # por isso a forma e conferida no JSON bruto e o valor normalizado.
-    if ($bruto -cnotmatch '"exclusoes"\s*:\s*\[') {
+    # Validacao sobre o objeto interpretado: em chave duplicada o
+    # ConvertFrom-Json usa o ULTIMO valor, que e o que o agente respeita.
+    # Lista JSON vira [object[]] em qualquer PowerShell (inclusive item
+    # unico); texto isolado, null e outros tipos sao recusados.
+    if ($cfg.exclusoes -isnot [object[]]) {
         throw 'exclusoes deve ser uma lista JSON (use [] para nenhuma exclusao)'
     }
     $padroes = @($cfg.exclusoes | ForEach-Object {
@@ -368,6 +368,7 @@ function Invoke-AgentePreparar {
             identidade_sha256   = (Get-HashArquivo $cfg.identidade_ssh)
             known_hosts         = $cfg.known_hosts
             known_hosts_sha256  = (Get-HashArquivo $cfg.known_hosts)
+            ssh_config_sha256   = (Get-HashArquivo (Join-Path $estado 'ssh_config'))
             restic_versao       = ($ver -join ' ').Trim()
         } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $estado 'preparo.json') -Encoding UTF8
     }
@@ -424,16 +425,34 @@ function Invoke-AgenteBackup {
         if ($estado -match '\s') {
             throw "DiretorioEstado com espacos nao suportado (limite do sftp.command): '$estado'"
         }
-        # Vinculo com o destino aprovado no preparo: sem reuso silencioso.
-        if ($cfg.repositorio -cne $prep.repositorio -or
-            $cfg.repositorio_id -cne $prep.repositorio_id -or
-            (Get-HashArquivo $cfg.identidade_ssh) -cne $prep.identidade_sha256 -or
-            (Get-HashArquivo $cfg.known_hosts) -cne $prep.known_hosts_sha256) {
-            throw ('Destino, repositorio_id, identidade ou known_hosts divergem do preparo ' +
-                'aprovado. Para novo destino, execute -Modo Preparar em OUTRA pasta de ' +
-                'estado e so depois de validar atualize a tarefa.')
+        # O ssh efetivo le o ssh_config do ESTADO: confere caminhos,
+        # hashes dos arquivos apontados e o hash do proprio ssh_config
+        # que sera passado ao SSH. Copia identica em outro caminho nao
+        # basta — o caminho registrado e o efetivo precisam coincidir.
+        foreach ($f in 'repositorio', 'repositorio_id', 'identidade_ssh', 'identidade_sha256',
+                 'known_hosts', 'known_hosts_sha256', 'ssh_config_sha256') {
+            if (-not ($prep.PSObject.Properties.Name -contains $f) -or -not $prep.$f) {
+                throw ('Preparo anterior ao vinculo SSH completo; execute -Modo Preparar ' +
+                    'em outra pasta de estado e so depois de validar atualize a tarefa.')
+            }
         }
-        foreach ($f in 'restic.dpapi', 'ssh_config') {
+        $sshCfgFile = Join-Path $estado 'ssh_config'
+        $vinculoFalhou = (
+            $cfg.repositorio -cne $prep.repositorio -or
+            $cfg.repositorio_id -cne $prep.repositorio_id -or
+            $cfg.identidade_ssh -cne $prep.identidade_ssh -or
+            $cfg.known_hosts -cne $prep.known_hosts -or
+            -not (Test-Path -LiteralPath $sshCfgFile -PathType Leaf) -or
+            (Get-HashArquivo $cfg.identidade_ssh) -cne $prep.identidade_sha256 -or
+            (Get-HashArquivo $cfg.known_hosts) -cne $prep.known_hosts_sha256 -or
+            (Get-HashArquivo $sshCfgFile) -cne $prep.ssh_config_sha256
+        )
+        if ($vinculoFalhou) {
+            throw ('Destino, repositorio_id, identidade, known_hosts ou ssh_config divergem ' +
+                'do preparo aprovado. Para novo destino, execute -Modo Preparar em OUTRA ' +
+                'pasta de estado e so depois de validar atualize a tarefa.')
+        }
+        foreach ($f in 'restic.dpapi') {
             if (-not (Test-Path -LiteralPath (Join-Path $estado $f) -PathType Leaf)) {
                 throw "Arquivo do preparo ausente: $f"
             }

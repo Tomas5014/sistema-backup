@@ -1164,3 +1164,25 @@ Sobre `d9e6968`, mesma branch. Achados corrigidos:
 
 Suíte: **118/118** em pwsh (com `MACIP_RESTIC_REAL`). Prova real de
 DPAPI/Agendador/SFTP continua pendente de VM Windows descartável.
+
+## Agente Windows — vínculo SSH efetivo e exclusoes no objeto (review 3)
+
+Sobre `5136b5b`, mesma branch.
+
+- **Vínculo SSH efetivo:** `preparo.json` agora registra caminhos
+  resolvidos + SHA-256 de identidade e known_hosts **e** o SHA-256 do
+  `ssh_config` gerado. `Backup` confere tudo antes de chamar o Restic:
+  cópia com bytes idênticos em outro caminho é recusada (o SSH lê o
+  caminho do preparo), `ssh_config` adulterado/ausente é recusado e
+  preparo legado sem os novos campos é recusado — nada de regravar
+  ssh_config fora do preparo.
+- **exclusoes:** validação sobre o objeto interpretado
+  (`-is [object[]]`), sem regex no JSON bruto; chave duplicada usa o
+  último valor como o ConvertFrom-Json — documentado no código e no
+  README. `[]`, `[x]`, espaços e acentos preservados.
+
+Suíte: **129/129** em pwsh, incluindo duplicata, cópia idêntica,
+ssh_config adulterado/ausente, preparo legado e mutação válida de
+exclusões/horário — todos com prova de que o Restic não foi chamado.
+Prova com Restic 0.18.1 real + ssh registrador mantida verde nas duas
+formas de endereço. VM Windows continua pendente.

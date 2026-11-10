@@ -19,7 +19,7 @@ Campos ajustados por cliente (exemplo em `backup.example.json`):
 | Campo | Dono | Regra |
 |---|---|---|
 | `origem` | operador | pasta em **volume local** do Windows, caminho absoluto com unidade (`D:\Dados`), existente e legível; caminho de rede recusado |
-| `exclusoes` | operador | **lista** de padrões; `[]` = nenhuma exclusão implícita; cada padrão vira um `--exclude` separado. Texto isolado e `null` são recusados |
+| `exclusoes` | operador | **lista** de padrões; `[]` = nenhuma exclusão implícita; cada padrão vira um `--exclude` separado. Texto isolado e `null` são recusados; em chave duplicada vale o **último** valor (comportamento do `ConvertFrom-Json`) |
 | `repositorio` | operador | `sftp:usuario@host:/caminho` (porta 22) ou `sftp://usuario@host:porta//caminho` (porta própria; `//` = caminho absoluto) |
 | `horario` | operador | `HH:mm`; mudar exige atualizar o disparador no Agendador |
 | `repositorio_id` | MAC IP | ID Restic do repositório (64 hex); backup **recusado** se o destino divergir do preparo |
@@ -99,12 +99,16 @@ preenchido (host/usuário/caminho, `repositorio_id`, horário).
 - **Origem ou exclusões:** edite o `backup.json`; o próximo backup já
   usa os novos valores (o vínculo é com destino e identidade, não com a
   origem).
-- **Destino, usuário, porta, chave ou known_hosts:** o backup é
-  **recusado** — divergência do preparo aprovado. Rode `-Modo Preparar`
-  em **outra** pasta de estado (`-DiretorioEstado C:\MACIP\estado-novo`),
-  confirme que o preparo concluiu com o ID novo e **só depois** aponte a
-  tarefa para a pasta nova. O estado antigo permanece intacto para
-  restaurações.
+- **Destino, usuário, porta, chave, known_hosts ou `ssh_config`:** o
+  backup é **recusado** — o preparo registra caminho **e** SHA-256 da
+  identidade e do `known_hosts`, além do SHA-256 do `ssh_config` gerado.
+  Uma cópia com bytes idênticos **em outro caminho** também é recusada,
+  pois o SSH continua lendo o caminho aprovado no preparo. Rode `-Modo
+  Preparar` em **outra** pasta de estado (`-DiretorioEstado
+  C:\MACIP\estado-novo`), confirme que o preparo concluiu com o ID novo
+  e **só depois** aponte a tarefa para a pasta nova. O estado antigo
+  permanece intacto para restaurações; o `ssh_config` nunca é regravado
+  fora do preparo.
 
 ## Verificar
 

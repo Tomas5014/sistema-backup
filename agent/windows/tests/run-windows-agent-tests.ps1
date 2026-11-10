@@ -112,6 +112,8 @@ $lTxt = New-Lab; Set-Content $lTxt.Config ('{"origem":"' + ($lTxt.Origem -replac
 lanca { Read-AgenteConfig $lTxt.Config } 'lista' 'exclusões como texto isolado recusadas'
 $lNull = New-Lab; Set-Content $lNull.Config ('{"origem":"' + ($lNull.Origem -replace '\\','\\') + '","exclusoes":null,"repositorio":"sftp:a@b:/c","horario":"02:30","repositorio_id":"' + ('b'*64) + '","identidade_ssh":"' + ($lNull.Chave -replace '\\','\\') + '","known_hosts":"' + ($lNull.Known -replace '\\','\\') + '"}') -Encoding UTF8
 lanca { Read-AgenteConfig $lNull.Config } 'lista' 'exclusões null recusadas'
+$lDup = New-Lab; Set-Content $lDup.Config ('{"origem":"' + ($lDup.Origem -replace '\\','\\') + '","exclusoes":[],"exclusoes":"*.tmp","repositorio":"sftp:a@b:/c","horario":"02:30","repositorio_id":"' + ('b'*64) + '","identidade_ssh":"' + ($lDup.Chave -replace '\\','\\') + '","known_hosts":"' + ($lDup.Known -replace '\\','\\') + '"}') -Encoding UTF8
+lanca { Read-AgenteConfig $lDup.Config } 'lista' 'chave duplicada com último valor textual recusada'
 lanca { $l = New-Lab; Write-Config $l @{ repositorio = 'local:/tmp/repo' }; Read-AgenteConfig $l.Config } 'sftp:' 'repositório não-SFTP recusado'
 lanca { $l = New-Lab; Write-Config $l @{ repositorio = 'sftp:u@host' }; Read-AgenteConfig $l.Config } 'sftp:' 'repositório sem caminho recusado'
 lanca { $l = New-Lab; Write-Config $l @{ repositorio = 'sftp:u@host:2222/caminho' }; Read-AgenteConfig $l.Config } 'sftp:' 'forma ambíguo :porta/caminho recusada'
@@ -293,10 +295,51 @@ Write-Config $lab   # restaura config íntegra
 'CONTEUDO-ADULTERADO' | Set-Content $lab.Known -Encoding Ascii
 $r = Invoke-Backup $lab
 eq ($r.erro -match 'divergem do preparo') $true 'known_hosts alterado recusado'
-'host ssh-ed25519 AAAAORIGINAL' | Set-Content $lab.Known -Encoding Ascii
+Set-Content $lab.Known '127.0.0.1 ssh-ed25519 AAAAFAKETESTE' -Encoding Ascii
 'CHAVE-ADULTERADA' | Set-Content $lab.Chave -Encoding Ascii
 $r = Invoke-Backup $lab
 eq ($r.erro -match 'divergem do preparo') $true 'identidade alterada recusada'
+
+Write-Host '== vínculo ssh efetivo: caminho, ssh_config e preparo legado =='
+$lab = New-Lab; Write-Config $lab
+Invoke-Preparar $lab | Out-Null
+$outraChave = Join-Path $lab.Raiz 'outra\copia_ed25519'
+New-Item -ItemType Directory (Split-Path $outraChave) -Force | Out-Null
+Copy-Item $lab.Chave $outraChave   # bytes idênticos, caminho diferente
+Write-Config $lab @{ identidade_ssh = $outraChave }
+Remove-Item (Join-Path $lab.StubDir 'args.log') -ErrorAction SilentlyContinue
+$r = Invoke-Backup $lab
+eq $r.status 'falha' 'cópia idêntica em outro caminho recusada'
+eq ($r.erro -match 'divergem do preparo') $true 'caminho registrado é o efetivo'
+eq @((Get-Content (Join-Path $lab.StubDir 'args.log') -ErrorAction SilentlyContinue) | Where-Object { $_ -ceq 'backup' }).Count 0 'restic não chamado (caminho chave)'
+$outraKh = Join-Path $lab.Raiz 'outra\known_hosts'
+Copy-Item $lab.Known $outraKh
+Write-Config $lab @{ known_hosts = $outraKh }
+$r = Invoke-Backup $lab
+eq ($r.erro -match 'divergem do preparo') $true 'known_hosts em outro caminho recusado'
+Write-Config $lab   # config íntegra de novo
+'    Compression yes' | Add-Content (Join-Path $lab.Estado 'ssh_config') -Encoding Ascii
+$r = Invoke-Backup $lab
+eq ($r.erro -match 'divergem do preparo') $true 'ssh_config adulterado recusado'
+eq @((Get-Content (Join-Path $lab.StubDir 'args.log') -ErrorAction SilentlyContinue) | Where-Object { $_ -ceq 'backup' }).Count 0 'restic não chamado (ssh_config)'
+Remove-Item (Join-Path $lab.Estado 'ssh_config')
+$r = Invoke-Backup $lab
+eq ($r.erro -match 'divergem do preparo') $true 'ssh_config ausente recusado'
+$prep = Get-Content (Join-Path $lab.Estado 'preparo.json') -Raw | ConvertFrom-Json
+foreach ($f in 'identidade_sha256', 'known_hosts_sha256', 'ssh_config_sha256') {
+    $prep.PSObject.Properties.Remove($f)
+}
+$prep | ConvertTo-Json | Set-Content (Join-Path $lab.Estado 'preparo.json') -Encoding UTF8
+$r = Invoke-Backup $lab
+eq ($r.erro -match 'vinculo SSH completo') $true 'preparo legado sem hashes recusado'
+
+Write-Host '== config íntegra e exclusão válida após preparo =='
+$lab = New-Lab; Write-Config $lab
+Invoke-Preparar $lab | Out-Null
+Write-Config $lab @{ exclusoes = @('*.tmp', '*.bak'); horario = '04:15' }   # mesmos destino/identidade
+$r = Invoke-Backup $lab
+eq $r.status 'sucesso' 'exclusões e horário novos no mesmo destino: sucesso'
+eq @((Get-Content (Join-Path $lab.StubDir 'last-args.txt')) -ceq '*.bak').Count 1 'nova exclusão aplicada'
 
 Write-Host '== JSON inválido após sucesso =='
 $lab = New-Lab; Write-Config $lab
