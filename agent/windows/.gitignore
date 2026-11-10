@@ -1,0 +1,15 @@
+# Artefatos operacionais do agente — nunca versionar
+backup.json
+restic.exe
+restic
+*.dpapi
+preparo.json
+ultimo-resultado.json
+ultimo-restic.log
+ssh_config
+known_hosts
+*_ed25519
+*.pem
+*.key
+cache/
+estado/

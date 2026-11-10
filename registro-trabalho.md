@@ -1108,3 +1108,27 @@ A unit da VM (corrigida manualmente) segue válida — marcador
 `install=` preservado; atualização por `install.sh` não toca units.
 
 ---
+
+## Agente Windows reutilizável (piloto) — feature/windows-pilot-agent
+
+Base: `e448894` (main). `agent/windows/Backup-MacipCliente.ps1` — um
+script, dois modos, PS 5.1. `backup.json` carrega origem/exclusoes/
+repositorio/horario (operador) + repositorio_id/identidade_ssh/
+known_hosts (MAC IP). `Preparar` valida config/executáveis/acesso na
+conta da tarefa, protege a senha em DPAPI, confere o ID do repositório
+existente (nunca `init`) e imprime os campos do Agendador. `Backup`
+roda sem prompts: revalida tudo, confirma identidade do destino ANTES
+do backup (ssh_config restrito: BatchMode, chave exclusiva, host key
+estrita), senha só no processo, `--exclude` por padrão, sucesso só com
+rc=0 + snapshot válido; rc=3 retorna erro. `ultimo-resultado.json` com
+início/fim UTC, conta, estado, código e snapshot.
+
+Suíte `agent/windows/tests/run-windows-agent-tests.ps1`: 73/73 em
+pwsh 7.6.9 (Linux) — validação, exclusões vazia/preenchida/acentos,
+destino divergente recusado sem chamar `backup`, rc 0/1/3, sigilo da
+senha, duas configs com o mesmo script, campos do Agendador, recusas
+de contexto. Ponte unittest: `tests/test_windows_agent_ps1.py`
+(pula sem pwsh). Limite da prova: fora do Windows só a fronteira DPAPI
+é simulada — DPAPI real + Agendador com sessão encerrada + SFTP ficam
+para a VM Windows descartável (pendente). `restic.exe`, chaves, senhas
+e `backup.json` real ficam fora do versionamento (.gitignore próprio).
