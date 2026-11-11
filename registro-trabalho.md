@@ -1186,3 +1186,30 @@ ssh_config adulterado/ausente, preparo legado e mutação válida de
 exclusões/horário — todos com prova de que o Restic não foi chamado.
 Prova com Restic 0.18.1 real + ssh registrador mantida verde nas duas
 formas de endereço. VM Windows continua pendente.
+
+## Agente Windows — evidência de laboratório e roteiro do piloto
+
+Sobre `5a2f3f8`, mesma branch. Registro de prova real + documento do
+piloto (`docs/piloto-windows-sftp.md`); nenhuma linha de agente/API/
+portal alterada.
+
+**Homologação de laboratório (11/11/2026 14h22, Brasília):** Agendador
+disparou o agente `5a2f3f8` em Windows PowerShell 5.1 com a sessão
+encerrada — rc `0` no Agendador e no Restic, `status: sucesso`.
+Snapshot `f0d283ee…3aa823a`; `restic check --read-data` sem erros no
+SFTP; restauração independente da VM com `amostra.txt` (43 B, SHA-256
+`18c4b63c…fc56`); origem com espaço/acento; `ignorar.tmp` e
+`cache temporário.log` excluídos conforme configurado. Classificado
+como laboratório — não é aceite de cliente nem produção.
+
+Roteiro do piloto: ficha (autorização, pasta, exclusões, horário,
+janela, retenção, alertas, meta), preparação MAC IP (repo exclusivo,
+chave do servidor conferida, senha custodiada, **cópia protegida** com
+prova fictícia de separação e restauração antes de dados reais —
+pendência se a infra não oferecer), instalação (kit do SHA, Preparar na
+conta de lote, tarefa nova, disparo único com sessão encerrada antes do
+diário), acompanhamento de 7 disparos com alertas de falha e de
+ausência (integração Windows-portal = **pendência**, verificação manual
+na ficha), aceite exigindo os 7 disparos + 2 alertas + restaurações
+(ponto recente e anterior, uma delas da cópia protegida) e interrupção
+preservando repositório/logs/snapshots. Piloto **não iniciado**.
