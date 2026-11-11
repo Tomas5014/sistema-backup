@@ -1262,3 +1262,49 @@ evidência como relatada pelo operador. Piloto continua **não iniciado**:
 depende de autorização registrada + prova da cópia protegida aprovada.
 Verificações: comandos conferidos contra `-Modo/-Config/-DiretorioEstado/
 -ResticExe`; exemplos JSON/hash sem segredos; `git diff --check` limpo.
+
+---
+
+## 11/11/2026 — Homologação Windows: cópia protegida e avisos operacionais
+
+Evidências de laboratório **relatadas pelo operador** (horários de
+Brasília). Estes resultados vêm do relato — não foram reexecutados por
+esta sessão. O piloto com dados reais **não começou**.
+
+**Restauração pela cópia:** o snapshot sintético `f0d283ee…` foi copiado
+com `restic copy` para um repositório novo e transferido para o PC
+Linux de desenvolvimento. O pacote passou na conferência SHA-256 e
+`restic check --read-data` não encontrou erros na cópia. O snapshot de
+destino
+`91f1a49ce0dca9408bad49a555fa94f96a6f54c58582bbe50b4dfafe8c443e3e` foi
+restaurado usando somente a cópia local, sem depender do repositório
+primário nem da VM Windows. `amostra.txt` bateu com o SHA-256 esperado
+e os arquivos excluídos não apareceram.
+
+**Separação de acesso:** no `srvdev1`, a conta `macipsftpwinlab`
+tentou alterar e apagar uma sentinela descartável no diretório privado
+de exportação. As duas operações foram negadas e o SHA-256 da sentinela
+ficou intacto. Essa prova cobre as permissões da exportação **no
+laboratório** — o armazenamento definitivo para dados de clientes ainda
+precisa ser escolhido e testado.
+
+**Avisos operacionais — conferência manual dos dois cenários:**
+
+- **15h39 — Falha registrada:** o Agendador disparou a tarefa
+  `MACIP-Restic-WinLab-Alertas` e retornou `1`. O JSON novo registrou
+  `status: falha`, `codigo_restic: null`, `snapshot: null` — a origem
+  fictícia estava indisponível de propósito e o agente registrou a
+  falha antes de chamar o Restic.
+- **15h59 — Sem resultado novo na janela:** disparo previsto para
+  15h57, tolerância de 2 minutos. Ao fim da janela, o disparador
+  continuava desabilitado, a última execução seguia a das 15h39 e o
+  SHA-256 do `ultimo-resultado.json` permaneceu inalterado — caso
+  classificado como **"sem resultado novo na janela"**.
+
+Os dois cenários foram conferidos **manualmente**. Não há evidência de
+confirmação de recebimento por outro responsável nem de envio
+automático de alertas — a integração Windows → portal segue não
+comprovada.
+
+**Continuam pendentes:** autorização registrada do cliente e validação
+da cópia protegida no armazenamento definitivo.
