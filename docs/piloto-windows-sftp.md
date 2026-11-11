@@ -7,12 +7,18 @@ pasta local não crítica, um repositório SFTP **exclusivo** na MAC IP e
 em operação** — o piloto não substitui nada.
 
 Agente homologado em laboratório (ver seção Evidência): commit
-`5a2f3f882fb11ecb33b34e5c63ad70c967d1d027`, pacote
-`agente-windows-5a2f3f882fb1.zip`, SHA-256
-`1320310ac065b641b21212ab22190a200289534f2348ea115a36954f82f4cff6`.
+`5a2f3f882fb11ecb33b34e5c63ad70c967d1d027`. O pacote **instalado** na
+prova foi `macip-agente-windows-5a2f3f8.zip`, SHA-256
+`4d9489626e6920b510b533c4f3e83215ef42e18e07439a6c1974f0f694945be0`.
+(O arquivo `agente-windows-5a2f3f882fb1.zip`, SHA-256
+`1320310ac065b641b21212ab22190a200289534f2348ea115a36954f82f4cff6`,
+contém fontes do mesmo commit, mas é outro artefato e **não** foi o
+instalado nessa prova — use sempre o nome e o hash do pacote de
+instalação ao conferir o kit.)
 
-Status do piloto: **não iniciado — depende da autorização do cliente e
-das pendências marcadas abaixo.**
+Status do piloto: **não iniciado — depende da autorização registrada do
+cliente e das duas provas pendentes (seções 6 e 7) executadas com dados
+fictícios.**
 
 ## 1. Ficha do piloto (preencher ANTES da instalação)
 
@@ -32,10 +38,10 @@ das pendências marcadas abaixo.**
 **Regra:** a pasta precisa estar definida e autorizada **antes** da
 instalação — o `backup.json` é preenchido com ela.
 
-## 2. Evidência já comprovada em laboratório
+## 2. Evidência comprovada em laboratório
 
-Homologação de laboratório do agente `5a2f3f8` — **não é** aceite de
-cliente nem validação de produção:
+Homologação de laboratório **relatada pelo operador** para o agente
+`5a2f3f8` — **não é** aceite de cliente nem validação de produção:
 
 - 11/11/2026, 14h22 (Brasília): o Agendador disparou a tarefa em
   **Windows PowerShell 5.1**, com a sessão encerrada. Agendador e Restic
@@ -62,27 +68,35 @@ cliente nem validação de produção:
    máquina do cliente via `Preparar` (DPAPI), nunca no JSON.
 5. Gerar a chave SSH **exclusiva** do piloto e o `backup.json`
    preenchido (repositorio, repositorio_id, caminhos, horário).
-6. **Cópia protegida** do repositório, imune a alteração/exclusão pela
-   credencial do cliente (ex.: credencial somente-append, snapshot do
-   lado do servidor ou sincronização para destino fora do alcance da
-   chave do cliente). Exigência de teste: **antes** de usar dados
-   reais, provar com dados fictícios que (a) a credencial do cliente
-   não altera nem apaga a cópia e (b) uma restauração completa a partir
-   dessa cópia funciona.
-   ⏳ **Pendência se a infraestrutura ainda não oferecer a cópia
-   protegida verificada** — registrar como bloqueio para dados reais.
+6. Executar a **prova da cópia protegida** (seção 6) com dados fictícios
+   e registrá-la — bloqueio para dados reais se não passar.
+7. Executar a **prova de alertas** (seção 7) com dados fictícios —
+   acompanhamento manual é a medida provisória enquanto a integração
+   com o portal não é comprovada.
 
 Kit entregue: `Backup-MacipCliente.ps1`, `backup.json`, `restic.exe`,
 chave SSH, `known_hosts`, senha via cofre.
 
 ## 4. Instalação no Windows (administrador do cliente)
 
-1. Conferir o pacote:
-   `Get-FileHash agente-windows-5a2f3f882fb1.zip -Algorithm SHA256` →
-   `1320310ac065b641b21212ab22190a200289534f2348ea115a36954f82f4cff6`.
+1. Conferir o pacote de instalação — **abortar** se o arquivo estiver
+   ausente ou o hash divergir:
+
+   ```powershell
+   $zip = 'C:\MACIP\macip-agente-windows-5a2f3f8.zip'
+   if (-not (Test-Path -LiteralPath $zip -PathType Leaf)) { throw "Pacote ausente: $zip" }
+   $h = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLower()
+   if ($h -cne '4d9489626e6920b510b533c4f3e83215ef42e18e07439a6c1974f0f694945be0') {
+       throw "SHA-256 divergente: $h — abortar instalacao"
+   }
+   ```
+
 2. Criar a **conta dedicada** (ex.: `macip-backup`) com leitura na pasta
-   e **logon em lote**; criar pastas sem espaço (ex.: `C:\MACIP\agente`,
-   `C:\MACIP\id`, `C:\MACIP\estado`).
+   e direito de **logon em lote**; criar pastas sem espaço (ex.:
+   `C:\MACIP\agente`, `C:\MACIP\id`, `C:\MACIP\estado`).
+   Se faltar o direito de logon em lote à conta, **encaminhar ao
+   administrador responsável** — a tarefa sem esse direito não dispara
+   com a sessão encerrada.
 3. **Operador MAC IP + administrador** preenchem o `backup.json` juntos:
    origem/exclusões/horário do cliente + campos MAC IP.
 4. Na sessão da **conta dedicada**:
@@ -94,28 +108,144 @@ chave SSH, `known_hosts`, senha via cofre.
    ```
 
    Recusas (config, credencial, destino divergente) abortam sem deixar
-   pasta; sucesso imprime os campos exatos do Agendador.
-5. Cadastrar a tarefa **nova** (nome exclusivo, ex.:
-   `MACIP-Backup-Piloto`) com os campos impressos — conta dedicada,
-   "executar estando o usuário conectado ou não", "não iniciar nova
-   instância". **Primeiro disparo manual único**, sem agendamento:
+   pasta; sucesso imprime os campos exatos do Agendador — **guarde-os**.
 
-   ```powershell
-   schtasks /Create /TN "MACIP-Backup-Piloto" /SC ONCE /ST 23:59 `
-     /RU "macip-backup" /RP * /RL LIMITED `
-     /TR "powershell -NoProfile -NonInteractive -File C:\MACIP\agente\Backup-MacipCliente.ps1 -Modo Backup -Config C:\MACIP\agente\backup.json -DiretorioEstado C:\MACIP\estado"
-   schtasks /Run /TN "MACIP-Backup-Piloto"
-   ```
+5. Cadastrar a tarefa **nova** pela **interface do Agendador**
+   (`taskschd.msc` → *Criar Tarefa*, não *Criar Tarefa Básica*), nome
+   exclusivo, ex.: `MACIP-Backup-Piloto`:
 
-6. Conferir o disparo de prova **com a sessão encerrada**: horário,
-   `LastTaskResult=0`, `ultimo-resultado.json` com `sucesso`, snapshot
-   listado no destino (`restic snapshots`), restauração em **pasta
-   separada** (`restic restore <id> --target C:\MACIP\restore-teste`)
-   conferida por hash e ausência dos excluídos.
-7. **Só depois** ajustar o disparador para o horário diário aprovado:
-   `schtasks /Change /TN "MACIP-Backup-Piloto" /SC DAILY /ST 02:30`.
+   - **Geral:** conta = **a mesma do `Preparar`**; marcar **"Executar
+     estando o usuário conectado ou não"**. Ao salvar, o Windows pede a
+     senha da conta **somente na janela nativa** — nunca em linha de
+     comando.
+   - **Ações:** programa `powershell.exe` (caminho impresso pelo
+     `Preparar`); colar os argumentos **exatamente** como impressos —
+     conferir que o campo salvou o texto completo e **sem prefixo de
+     lista** como `1. ` no início (erro comum de cópia múltipla).
+   - **Disparadores:** **"Uma vez"**, alguns minutos no futuro.
+   - Conferir `NextRunTime`:
+     `Get-ScheduledTaskInfo -TaskName "MACIP-Backup-Piloto"` →
+     `NextRunTime` coerente com o horário escolhido.
 
-## 5. Monitoramento — 7 dias
+6. **Prova sem sessão:** encerrar a sessão do Windows, aguardar o
+   horário, religar e conferir:
+
+   - `Get-ScheduledTaskInfo` → `LastRunTime` ≈ horário previsto e
+     `LastTaskResult = 0`.
+   - `ultimo-resultado.json` **novo**: `inicio_utc`/`fim_utc` coerentes
+     com aquele disparo, `status: sucesso`, `snapshot` válido.
+   - Snapshot listado no destino e restauração em **pasta separada**
+     conferida (ver procedimento da seção 5).
+
+7. **Só depois de aprovado o disparo de prova:** editar o disparador na
+   interface para **Diário** no `horario` aprovado e conferir
+   `NextRunTime` diário. Mudanças futuras de horário seguem o mesmo
+   caminho — `horario` no `backup.json` **e** o disparador devem ser
+   atualizados juntos, sem editar o script.
+
+## 5. Restauração na MAC IP (procedimento executável)
+
+Feita **no servidor da MAC IP**, sem depender da máquina do cliente.
+Exemplos fictícios — substituir pelos valores do piloto:
+
+```bash
+# Pré-condições: usuário MAC IP com acesso ao servidor SFTP, restic e
+# jq instalados, ssh_config do piloto e senha no cofre.
+REPO='sftp:piloto@backup.macip.example:/dados/piloto'      # do backup.json
+ID_ESPERADO='<repositorio_id do backup.json, 64 hex>'
+SSHCMD='ssh -F /etc/macip/piloto/ssh_config -s backup.macip.example sftp'
+
+# Senha pelo procedimento do cofre — NUNCA impressa nem em argumentos:
+export RESTIC_PASSWORD_COMMAND='gpg --decrypt /cofre/piloto/pw.gpg'
+
+# 1. Confirmar que e o repositorio certo (o ID precisa bater):
+REAL_ID=$(restic -r "$REPO" -o "sftp.command=$SSHCMD" cat config | jq -r .id)
+[ "$REAL_ID" = "$ID_ESPERADO" ] || { echo "ID diverge: $REAL_ID"; exit 1; }
+
+# 2. Integridade do repositorio:
+restic -r "$REPO" -o "sftp.command=$SSHCMD" check --read-data
+
+# 3. Localizar o snapshot exato e a subpasta da origem no catalogo:
+SNAP='f0d283ee'  # prefixo do snapshot a restaurar
+restic -r "$REPO" -o "sftp.command=$SSHCMD" snapshots | grep "$SNAP"
+restic -r "$REPO" -o "sftp.command=$SSHCMD" ls "$SNAP" | grep -i 'dados exemplo'
+
+# 4. Restaurar em DIRETORIO NOVO (nunca sobre a origem):
+mkdir -p /tmp/restaura-piloto
+restic -r "$REPO" -o "sftp.command=$SSHCMD" restore "$SNAP" \
+    --target /tmp/restaura-piloto
+
+# 5. Conferir manifesto de SHA-256 e as exclusoes:
+find /tmp/restaura-piloto -type f -exec sha256sum {} + | sort \
+    > /tmp/restaura-piloto.sha256
+diff /tmp/restaura-piloto.sha256 /cofre/piloto/manifesto-origem.sha256
+! grep -q 'ignorar.tmp\|cache tempor' /tmp/restaura-piloto.sha256
+```
+
+Cada arquivo restaurado deve bater o manifesto da origem; qualquer
+arquivo excluído presente é falha do ensaio.
+
+## 6. Prova pendente A — cópia protegida (dados fictícios)
+
+Objetivo: provar que (a) a credencial do cliente **não** altera nem
+apaga a cópia e (b) a MAC IP restaura **somente pela cópia**, sem o
+repositório primário nem a máquina Windows. Executada **antes** de
+qualquer dado real.
+
+**Preflight:** capacidade da área protegida ≥ tamanho do repositório;
+isolamento em **domínio de falha independente** (outra conta,
+armazenamento ou local — não é isolamento apenas de permissão no mesmo
+disco, que não sobrevive à perda dele); dados **sintéticos** apenas.
+
+```bash
+# 1. Repositorio sintetico + um backup:
+mkdir -p /tmp/ensaio/origem && echo dado > /tmp/ensaio/origem/a.txt
+restic -r /tmp/ensaio/repo-primario init            # senha de ensaio
+restic -r /tmp/ensaio/repo-primario backup /tmp/ensaio/origem
+# 2. Copia consistente no destino protegido (metodo conforme a
+#    infraestrutura escolhida; ex.: sincronizacao file-level ou
+#    'restic copy'). Apos copiar, a integridade da copia e exigida:
+restic -r /protegido/repo-copia check --read-data
+# 3. Sentinela descartavel na area protegida:
+echo MACIP-SENTINELA > /protegido/sentinela.txt
+```
+
+**Teste de separação:** com a credencial equivalente à do cliente
+(conta SFTP restrita ao diretório do piloto), tentar alterar e apagar
+**somente** `/protegido/sentinela.txt` — as duas tentativas devem
+falhar; a sentinela permanece intacta (hash conferido).
+
+**Teste de restauração só pela cópia:** em um host da MAC IP, sem acesso
+ao primário nem à máquina Windows: `restic -r /protegido/repo-copia
+restore <snap> --target /tmp/ensaio/restore` → `sha256sum` dos arquivos
+batem com a origem sintética.
+
+**Aprovado se:** sentinela intacta + restauração pela cópia completa.
+**Não conta como cópia:** acesso somente-append no próprio primário;
+**não prova sobrevivência:** isolamento de permissão no mesmo disco.
+Se o armazenamento da cópia ainda não foi escolhido: ⏳ **pendência de
+decisão** — critérios a registrar: domínio de falha independente,
+integridade verificável por `check --read-data`, e prazo de restauração
+compatível com a meta da ficha. Não presumir tecnologia.
+
+## 7. Prova pendente B — alertas (dados fictícios)
+
+Verificar os dois avisos com dados **sintéticos**, **antes** dos dados
+reais. A conferência manual na ficha é a medida provisória — a
+integração Windows → portal **não está comprovada** e não se assume
+cobertura automática.
+
+| Caso | Como provocar | Quem confere | Prazo | Correlação ao disparo | Evidência de recebimento |
+|---|---|---|---|---|---|
+| Execução com falha/incompleto | origem de teste indisponível → `status: falha`, `codigo_restic` ≠ 0 | operador designado na ficha | até o fim da janela | `inicio_utc` do resultado ≈ `LastRunTime` do disparo | registro (print/ticket) assinado pelo responsável |
+| Ausência de execução nova | disparo não acontece (tarefa desabilitada ou máquina desligada no ensaio) | idem | idem | `inicio_utc` do último resultado **anterior** ao esperado + `LastRunTime` sem o horário | idem |
+
+Nota: um resultado **antigo ou ausente** não prova que a tarefa nunca
+rodou — correlacionar sempre com `LastRunTime`/`NextRunTime` do
+Agendador antes de classificar como ausência. O ensaio só fecha quando
+o responsável **reconhece** o recebimento dos dois avisos.
+
+## 8. Monitoramento — 7 dias
 
 Ficha de acompanhamento (uma linha por disparo):
 
@@ -127,34 +257,27 @@ Ficha de acompanhamento (uma linha por disparo):
   com `falha`/`codigo_restic=3` → investigar no dia.
 - **Ausência de execução:** `inicio_utc` anterior ao disparo esperado ao
   fim da **janela de tolerância** → a tarefa não rodou (Agendador/conta,
-  não Restic). Alerta distinto.
-- **Alertas MAC IP:** o monitoramento central deve disparar em (a)
-  execução com falha e (b) nenhuma execução nova até o fim da janela.
-  Procedimento de prova **com dados fictícios antes dos dados reais**:
-  forçar `falha` (ex.: origem temporariamente indisponível numa cópia de
-  teste) e deixar um disparo não acontecer — confirmar que os dois
-  alertas chegam ao responsável da ficha.
-  ⏳ **Pendência:** a integração do agente Windows com o monitoramento
-  do portal **não está comprovada** — se ainda não houver ingestão do
-  `ultimo-resultado.json`, os alertas são verificação manual na ficha;
-  registrar como pendência, não como cobertura existente.
+  não Restic). Alerta distinto — ver regra de correlação na seção 7.
 - **Snapshots:** todos preservados durante o piloto — sem
   `forget`/`prune`.
 
-## 6. Aceite
+## 9. Aceite
 
-Aprovação exige, registrado nesta ficha:
+Aprovação exige, registrado na ficha:
 
-- Evidência dos **7 disparos** (tabela acima completa, sem execução
-  ausente ou com explicação aceita).
-- Evidência dos **dois alertas** entregues ao responsável.
+- Autorização do cliente registrada **antes** da instalação.
+- Evidência dos **7 disparos** (tabela completa, sem execução ausente
+  ou com explicação aceita).
+- Prova da **cópia protegida** aprovada (seção 6) e evidência dos
+  **dois alertas** entregues ao responsável (seção 7).
 - Restauração de um **ponto recente** e de um **anterior**; pelo menos
   uma delas a partir da **cópia protegida**, sem depender da máquina
-  original — SHA-256 dos arquivos comparado à origem.
-- Comparar o tempo de restauração com a **meta de recuperação** da
-  ficha; registrar quem aprova (nome/data do cliente + MAC IP).
+  original — SHA-256 comparado à origem.
+- Comparar o tempo de restauração com a **meta de recuperação**;
+  registrar quem aprova (nome/data do cliente + MAC IP). A aprovação
+  do laboratório **não** libera produção.
 
-## 7. Interrupção
+## 10. Interrupção
 
 Para interromper: desabilitar **somente** a tarefa do piloto —
 `Disable-ScheduledTask -TaskName "MACIP-Backup-Piloto"`. **Preservar**

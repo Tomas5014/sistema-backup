@@ -1213,3 +1213,52 @@ ausência (integração Windows-portal = **pendência**, verificação manual
 na ficha), aceite exigindo os 7 disparos + 2 alertas + restaurações
 (ponto recente e anterior, uma delas da cópia protegida) e interrupção
 preservando repositório/logs/snapshots. Piloto **não iniciado**.
+
+---
+
+## 2026-11-12 — Correções do roteiro do piloto Windows e provas pendentes
+
+Entrega **documental** sobre `968a989` (branch
+`feature/windows-pilot-agent`), sem alterar agente Windows/Linux, API
+ou portal. Três correções no `docs/piloto-windows-sftp.md`:
+
+1. **Identidade do pacote:** o ZIP instalado na prova foi
+   `macip-agente-windows-5a2f3f8.zip` (SHA-256 `4d9489626e…945be0`), não
+   o ZIP de fontes `agente-windows-5a2f3f882fb1.zip` — referências
+   corrigidas na evidência e na instalação; a verificação agora
+   **aborta** se o arquivo estiver ausente ou o hash divergir.
+2. **Disparo real sem sessão:** substituídos `schtasks /Run` +
+   `/Change /SC DAILY` pelo fluxo validado na interface do Agendador —
+   mesma conta do `Preparar`, "executar estando o usuário conectado ou
+   não", argumentos conferidos sem prefixo de lista (`1. `), disparador
+   **único** no futuro, `NextRunTime` conferido, sessão encerrada,
+   `LastRunTime`/`LastTaskResult`/`ultimo-resultado.json` novo
+   correlacionados, e só depois o disparador **diário** na interface.
+   Senha apenas na janela nativa; falta de logon em lote vai para o
+   administrador.
+3. **Restauração na MAC IP:** procedimento executável com variáveis e
+   pré-condições — conferir o ID do repositório, senha pelo cofre via
+   `RESTIC_PASSWORD_COMMAND` (nunca impressa nem em argumentos),
+   `check --read-data`, `snapshots`/`ls` para localizar o snapshot e a
+   subpasta da origem, restore em diretório novo, manifesto SHA-256 e
+   verificação das exclusões.
+
+**Duas provas pendentes escritas para execução com dados fictícios:**
+seção 6 — **cópia protegida** (preflight de capacidade/isolamento,
+cópia consistente com `check --read-data`, sentinela descartável que a
+credencial do cliente não pode alterar/apagar, restauração só pela
+cópia sem primário nem Windows; append-only no primário não conta e
+isolamento no mesmo disco não prova sobrevivência; decisão de
+armazenamento pendente com critérios, sem presumir tecnologia). Seção 7
+— **alertas** (execução com falha/incompleta e ausência de resultado
+novo ao fim da janela: responsável, prazo, correlação
+`inicio_utc`×`LastRunTime`, evidência de recebimento; resultado antigo
+ou ausente não prova que a tarefa nunca rodou; conferência manual como
+medida provisória — integração Windows→portal segue **não
+comprovada**).
+
+README do agente passou a citar o pacote efetivamente instalado e a
+evidência como relatada pelo operador. Piloto continua **não iniciado**:
+depende de autorização registrada + prova da cópia protegida aprovada.
+Verificações: comandos conferidos contra `-Modo/-Config/-DiretorioEstado/
+-ResticExe`; exemplos JSON/hash sem segredos; `git diff --check` limpo.

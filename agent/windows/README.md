@@ -150,13 +150,15 @@ endereço é aceito e usuário/porta chegam ao comando, sem conexão.
 
 Fora do Windows a fronteira DPAPI é substituída nos testes acima.
 
-**Homologação de laboratório (11/11/2026, 14h22 Brasília):** o
-Agendador disparou a tarefa em Windows PowerShell 5.1 **com a sessão
-encerrada** — Agendador e Restic retornaram `0` e o agente registrou
-`sucesso`. Snapshot
+**Homologação de laboratório (11/11/2026, 14h22 Brasília), relatada
+pelo operador:** o Agendador disparou a tarefa em Windows PowerShell
+5.1 **com a sessão encerrada** — Agendador e Restic retornaram `0` e o
+agente registrou `sucesso`. Snapshot
 `f0d283eed89cc54322dc22e2d1900c0ef8e3ba30f5ba9d9b41fffb80f3aa823a`,
 `restic check --read-data` sem erros no servidor SFTP e restauração
 independente da VM conferida por SHA-256
-(`amostra.txt`, 43 bytes) com as exclusões respeitadas. Evidência
-registrada em `docs/piloto-windows-sftp.md` — é prova de laboratório,
-não aceite de cliente nem de produção.
+(`amostra.txt`, 43 bytes) com as exclusões respeitadas. O pacote
+instalado na prova foi `macip-agente-windows-5a2f3f8.zip`, SHA-256
+`4d9489626e6920b510b533c4f3e83215ef42e18e07439a6c1974f0f694945be0`.
+Evidência registrada em `docs/piloto-windows-sftp.md` — é prova de
+laboratório, não aceite de cliente nem de produção.
