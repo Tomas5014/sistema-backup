@@ -1,6 +1,6 @@
 #requires -Version 5.1
 # MacipBackup-Gui.ps1 - interface grafica do agente Windows da MAC IP (piloto).
-# WinForms sobre Windows PowerShell 5.1: sem dependencia nova  -  a mesma
+# WinForms sobre Windows PowerShell 5.1: sem dependencia nova — a mesma
 # tecnologia do agente. Todas as strings em ASCII: o arquivo roda em PS 5.1
 # sem BOM como o agente.
 #
@@ -9,9 +9,19 @@
 # O Agendador continua por tras: a tarefa MACIP-Backup roda com o app fechado,
 # sem sessao aberta e apos reinicio.
 #
-# Reaproveitamento: o agente Backup-MacipCliente.ps1 e dot-sourced  -  validacao
+# Reaproveitamento: o agente Backup-MacipCliente.ps1 e dot-sourced — validacao
 # de backup.json, ssh_config restrito, Confirm-Destino, Invoke-Restic e
 # Invoke-AgentePreparar sao os mesmos ja homologados em laboratorio.
+#
+# Modelo de salvamento em 2 fases (rollback seguro):
+#   Build-Configuracao  - monta um conjunto NOVO e imutavel (config-N/ com
+#                         identidade + backup.json; estado-N quando o perfil
+#                         muda) sem tocar nada usado pela tarefa ativa.
+#   Publish-Configuracao - registra a tarefa e so depois publica gui.json.
+#                         Qualquer falha desfaz o conjunto novo e restaura
+#                         a definicao anterior da tarefa; o conjunto anterior
+#                         (config + identidade + estado DPAPI + tarefa)
+#                         continua junto e funcional.
 [CmdletBinding()]
 param(
     # Pasta base de dados do app (config + estado). Padrao: ProgramData\MacipBackup.
@@ -33,11 +43,12 @@ if (-not (Test-Path -LiteralPath $AgentePath -PathType Leaf)) {
 }
 
 $script:BaseDir    = [IO.Path]::GetFullPath($BaseDir)
-$script:ConfigFile = Join-Path $script:BaseDir 'backup.json'
 $script:GuiMeta    = Join-Path $script:BaseDir 'gui.json'
 $script:TaskName   = 'MACIP-Backup'
 $script:AgentePath = $AgentePath
-$script:LogonPassword = 2   # TASK_LOGON_PASSWORD: token completo (rede + DPAPI)
+$script:LogonPassword = 1   # TASK_LOGON_PASSWORD = 1 (o 2 e S4U — sem DPAPI/rede)
+$script:TaskMarker    = 'MACIP Backup'
+$script:Backend       = $null   # injetavel nos testes; padrao COM no Windows
 
 . $AgentePath   # reusa Read-AgenteConfig, Write-SshConfig, Invoke-Restic, etc.
 
@@ -48,7 +59,7 @@ function Read-GuiMeta {
         try { return (Get-Content -LiteralPath $script:GuiMeta -Raw | ConvertFrom-Json) }
         catch { }
     }
-    return [pscustomobject]@{ estado_atual = $null; conta_tarefa = $null }
+    return [pscustomobject]@{ estado_atual = $null; config_atual = $null; conta_tarefa = $null }
 }
 
 function Save-GuiMeta {
@@ -80,13 +91,12 @@ function Read-Perfil {
     }
     foreach ($c in @($p.PSObject.Properties.Name)) {
         if ($script:PerfilCampos -cnotcontains $c) {
-            throw "Perfil com campo desconhecido '$c'  -  perfis sao gerados pela MAC IP e nao devem ser editados."
+            throw "Perfil com campo desconhecido '$c' - perfis sao gerados pela MAC IP e nao devem ser editados."
         }
         if ([string]$p.$c -match $script:PadroesSegredo) {
             throw "Perfil contem dado que parece segredo no campo '$c'. Senha e chave privada nunca viajam no perfil."
         }
     }
-    # repositorio nas formas canonicas do agente (validacao detalhada no backup.json depois)
     $repo = [string]$p.repositorio
     $m1 = [regex]::Match($repo, '^sftp:([^@\s/]+)@([^:/\s]+):(/{1,2}\S+)$')
     $m2 = [regex]::Match($repo, '^sftp://([^@\s/]+)@([^:/\s]+)(?::(\d{1,5}))?//(\S+)$')
@@ -96,7 +106,8 @@ function Read-Perfil {
     if ([string]$p.repositorio_id -cnotmatch '^[0-9a-f]{64}$') {
         throw 'Perfil com repositorio_id invalido (esperado ID Restic de 64 hex).'
     }
-    if ([string]$p.known_hosts -notmatch '^\S+\s+(ssh-|ecdsa-)') {
+    $kh = @($p.known_hosts) -join "`n"
+    if ($kh -notmatch '^\S+\s+(ssh-|ecdsa-)') {
         throw 'Perfil com known_hosts invalido (esperado "<host> <tipo> <chave>").'
     }
     $r = [ordered]@{
@@ -104,7 +115,7 @@ function Read-Perfil {
         nome = [string]$p.nome
         repositorio = $repo
         repositorio_id = [string]$p.repositorio_id
-        known_hosts = [string]$p.known_hosts
+        known_hosts = $kh
         horario_sugerido = [string]$p.horario_sugerido
     }
     if ($r.horario_sugerido -and $r.horario_sugerido -cnotmatch '^([01][0-9]|2[0-3]):[0-5][0-9]$') {
@@ -127,29 +138,66 @@ function New-BackupJsonObj {
     }
 }
 
-function Save-ConfigAtomico {
-    # Grava backup.json de forma atomica e NUNCA apaga a config valida anterior:
-    # valida pelo proprio parser do agente antes de substituir.
-    param([hashtable]$CfgObj)
-    if (-not (Test-Path -LiteralPath $script:BaseDir)) { New-Item -ItemType Directory -Path $script:BaseDir | Out-Null }
-    $tmp = "$($script:ConfigFile).tmp"
-    ($CfgObj | ConvertTo-Json -Depth 4) | Set-Content -LiteralPath $tmp -Encoding UTF8
-    try {
-        [void](Read-AgenteConfig -Caminho $tmp)   # recusa invalida ANTES de tocar a anterior
-    } catch {
-        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
-        throw "Configuracao recusada: $($_.Exception.Message)  -  a configuracao anterior continua valendo."
+# ---------- tarefa: backend injetavel (COM no Windows) ----------
+
+function Get-Backend {
+    if (-not $script:Backend) {
+        if (-not (Test-IsWindows)) { throw 'Agendador de Tarefas disponivel apenas no Windows.' }
+        $script:Backend = New-BackendCom
     }
-    Move-Item -LiteralPath $tmp -Destination $script:ConfigFile -Force
+    return $script:Backend
 }
 
-# ---------- tarefa agendada (COM Schedule.Service, somente Windows) ----------
+function New-BackendCom {
+    $b = [pscustomobject]@{ svc = $null }
+    $b | Add-Member ScriptMethod Conectar {
+        if (-not $this.svc) {
+            $this.svc = New-Object -ComObject Schedule.Service
+            $this.svc.Connect()
+        }
+    }
+    $b | Add-Member ScriptMethod Get {
+        $this.Conectar()
+        try { return $this.svc.GetFolder('\').GetTask($script:TaskName) } catch { return $null }
+    }
+    $b | Add-Member ScriptMethod NewDef {
+        param($TarefaExistente)
+        $this.Conectar()
+        if ($TarefaExistente) { return $TarefaExistente.Definition }
+        return $this.svc.NewTask(0)
+    }
+    $b | Add-Member ScriptMethod Registrar {
+        param($Def, $Conta, $SenhaConta)
+        $this.Conectar()
+        # 6 = TASK_CREATE_OR_UPDATE | TASK_LOGON_PASSWORD (1): conta com
+        # senha — token completo (rede + DPAPI) mesmo sem sessao aberta.
+        $this.svc.GetFolder('\').RegisterTaskDefinition(
+            $script:TaskName, $Def, 6, $Conta, $SenhaConta, $script:LogonPassword, $null) | Out-Null
+    }
+    $b | Add-Member ScriptMethod RegistrarXml {
+        param([string]$Xml, $Conta, $SenhaConta)
+        $this.Conectar()
+        # Rollback: repoe a definicao anterior exatamente como estava (XML
+        # serializado ANTES de qualquer alteracao — um objeto Definition
+        # reusado poderia ja vir modificado).
+        $this.svc.GetFolder('\').RegisterTask(
+            $script:TaskName, $Xml, 6, $Conta, $SenhaConta, $script:LogonPassword, $null) | Out-Null
+    }
+    $b | Add-Member ScriptMethod XmlAtual {
+        $t = $this.Get(); if ($t) { return [string]$t.Xml } else { return $null }
+    }
+    return $b
+}
 
-function Get-TarefaMacip {
-    if (-not (Test-IsWindows)) { return $null }
-    $svc = New-Object -ComObject Schedule.Service
-    $svc.Connect()
-    try { return $svc.GetFolder('\').GetTask($script:TaskName) } catch { return $null }
+function Test-TarefaDoApp {
+    # Uma tarefa MACIP-Backup so e "nossa" quando traz a marca do aplicativo
+    # na descricao. Tarefa homonima estranha -> recusar qualquer alteracao.
+    param($Tarefa)
+    if (-not $Tarefa) { return $false }
+    try {
+        $desc = [string]$Tarefa.Definition.RegistrationInfo.Description
+        return ($desc -like ('*' + $script:TaskMarker + '*'))
+    } catch { return $false }
 }
 
 function Get-TaskActionArgs {
@@ -157,64 +205,107 @@ function Get-TaskActionArgs {
     return '-NoProfile -NonInteractive -File "{0}" -Modo Backup -Config "{1}" -DiretorioEstado "{2}"' -f $Agente, $Config, $Estado
 }
 
-function Save-TarefaMacip {
-    # Idempotente: existe a tarefa -> atualiza SOMENTE o disparador e a acao;
-    # nao existe -> cria. Nunca gera uma segunda tarefa. Conta e senha sao da
-    # janela de credencial nativa (TASK_LOGON_PASSWORD: roda sem sessao e o
-    # token completo permite rede e DPAPI da conta).
-    param([string]$Horario, [string]$Conta, [string]$SenhaConta, [string]$Estado)
+function Write-TaskDef {
+    # Preenche a definicao: marca do app, acao do agente e disparo diario.
+    param($Def, [string]$Horario, [string]$Config, [string]$Estado, [string]$Conta)
     if ($Horario -cnotmatch '^([01][0-9]|2[0-3]):[0-5][0-9]$') { throw "Horario invalido: $Horario" }
-    if (-not (Test-IsWindows)) { throw 'Agendador disponivel apenas no Windows.' }
-    $svc = New-Object -ComObject Schedule.Service
-    $svc.Connect()
-    $def = $null; $tarefa = $null
-    try { $tarefa = $svc.GetFolder('\').GetTask($script:TaskName) } catch { }
-    if ($tarefa) { $def = $tarefa.Definition } else { $def = $svc.NewTask(0) }
-
-    $def.Settings.Enabled = $true
-    $def.Settings.MultipleInstances = 2            # IGNORE_NEW: nunca duas execucoes
-    $def.Settings.DisallowStartIfOnBatteries = $false
-    $def.Settings.StopIfGoingOnBatteries = $false
-    $def.Settings.ExecutionTimeLimit = 'PT0S'      # sem limite de duracao
-    $def.Triggers.Clear()
-    $trg = $def.Triggers.Create(2)                 # DAILY
+    $Def.RegistrationInfo.Description = "$($script:TaskMarker) - agente de backup do piloto"
+    $Def.Settings.Enabled = $true
+    $Def.Settings.MultipleInstances = 2            # IGNORE_NEW: nunca duas execucoes
+    $Def.Settings.DisallowStartIfOnBatteries = $false
+    $Def.Settings.StopIfGoingOnBatteries = $false
+    $Def.Settings.ExecutionTimeLimit = 'PT0S'      # sem limite de duracao
+    $Def.Triggers.Clear()
+    $trg = $Def.Triggers.Create(2)                 # DAILY
     $hoje = Get-Date
     $trg.StartBoundary = (Get-Date -Year $hoje.Year -Month $hoje.Month -Day $hoje.Day `
         -Hour ([int]$Horario.Substring(0,2)) -Minute ([int]$Horario.Substring(3,2)) -Second 0).ToString('s')
     $trg.DaysInterval = 1
     $trg.Enabled = $true
-
-    $ps = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    $def.Actions.Clear()
-    $act = $def.Actions.Create(0)
+    $ps = if (Test-IsWindows) { Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe' }
+          else { 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' }
+    while ($Def.Actions.Count -gt 0) { $Def.Actions.Remove(1) }   # IActionCollection nao tem Clear()
+    $act = $Def.Actions.Create(0)
     $act.Path = $ps
-    $act.Arguments = Get-TaskActionArgs -Agente $script:AgentePath -Config $script:ConfigFile -Estado $Estado
+    $act.Arguments = Get-TaskActionArgs -Agente $script:AgentePath -Config $Config -Estado $Estado
+    $Def.Principal.UserId = $Conta
+    $Def.Principal.LogonType = $script:LogonPassword   # TASK_LOGON_PASSWORD = 1
+    $Def.Principal.RunLevel = 0                        # LIMITADO: sem elevacao
+}
 
-    $prin = $def.Principal
-    $prin.UserId = $Conta
-    $prin.LogonType = $script:LogonPassword
-    $prin.RunLevel = 0                             # LIMITADO: sem elevacao
+function Register-TarefaMacip {
+    # Unico ponto que cria/altera a tarefa. Idempotente (CreateOrUpdate);
+    # recusa tarefa homonima que nao seja do app; devolve a def anterior
+    # para rollback.
+    param([string]$Horario, [string]$Conta, [string]$SenhaConta, [string]$Config, [string]$Estado)
+    $b = Get-Backend
+    $t = $b.Get()
+    if ($t -and -not (Test-TarefaDoApp -Tarefa $t)) {
+        throw ("Ja existe uma tarefa '$($script:TaskName)' que NAO pertence ao MAC IP Backup. " +
+            'Renomeie ou remova a tarefa estranha - o aplicativo nao a altera.')
+    }
+    $xmlAnterior = $b.XmlAtual()                 # copia serializada — imune a mutacao da def
+    $def = $b.NewDef($t)
+    Write-TaskDef -Def $def -Horario $Horario -Config $Config -Estado $Estado -Conta $Conta
+    $b.Registrar($def, $Conta, $SenhaConta)      # erro de permissao/credencial sobe para a tela
+    return $xmlAnterior
+}
 
-    # 6 = TASK_CREATE_OR_UPDATE: mesma tarefa, nunca duplicada.
-    $svc.GetFolder('\').RegisterTaskDefinition($script:TaskName, $def, 6, $Conta, $SenhaConta, $script:LogonPassword, $null) | Out-Null
+function Get-TaskArg {
+    param([string]$Nome)
+    $t = (Get-Backend).Get()
+    if (-not $t) { return $null }
+    try {
+        $args = [string]$t.Definition.Actions.Item(1).Arguments
+        if ($args -match ('-' + $Nome + '\s+"([^"]+)"')) { return $Matches[1] }
+        if ($args -match ('-' + $Nome + '\s+(\S+)')) { return $Matches[1] }
+    } catch { }
+    return $null
+}
+
+function Get-EstadoAtual {
+    # Fonte primaria: o que a TAREFA usa — se o meta ficou para tras numa
+    # falha de publicacao, a tela acompanha a realidade do Agendador.
+    $e = Get-TaskArg -Nome 'DiretorioEstado'
+    if ($e) { return $e }
+    $meta = Read-GuiMeta
+    return $meta.estado_atual
+}
+
+function Get-ConfigAtual {
+    $c = Get-TaskArg -Nome 'Config'
+    if ($c) { return $c }
+    $meta = Read-GuiMeta
+    if ($meta.config_atual) { return $meta.config_atual }
+    return $null
 }
 
 function Set-TarefaHabilitada {
     param([bool]$On)
-    $t = Get-TarefaMacip
-    if (-not $t) { throw 'Tarefa MACIP-Backup nao existe  -  salve a configuracao primeiro.' }
+    $t = (Get-Backend).Get()
+    if (-not $t) { throw "Tarefa $($script:TaskName) nao existe - salve a configuracao primeiro." }
+    if (-not (Test-TarefaDoApp -Tarefa $t)) { throw "Tarefa $($script:TaskName) nao pertence ao MAC IP Backup - recusado." }
     $t.Enabled = $On
 }
 
 function Start-TarefaAgora {
-    $t = Get-TarefaMacip
-    if (-not $t) { throw 'Tarefa MACIP-Backup nao existe  -  salve a configuracao primeiro.' }
+    # Executar agora = a MESMA tarefa agendada, na MESMA conta registrada.
+    $t = (Get-Backend).Get()
+    if (-not $t) { throw "Tarefa $($script:TaskName) nao existe - salve a configuracao primeiro." }
+    if (-not (Test-TarefaDoApp -Tarefa $t)) { throw "Tarefa $($script:TaskName) nao pertence ao MAC IP Backup - recusado." }
     if ($t.State -eq 4) { throw 'Ja ha uma execucao em andamento.' }   # TASK_STATE_RUNNING
+    $meta = Read-GuiMeta
+    if ($meta.conta_tarefa -and $t.Principal.UserId) {
+        $dom = [string]$t.Principal.UserId
+        if ($dom -and ($dom -split '[\\/]')[-1] -cne ($meta.conta_tarefa -split '[\\/]')[-1]) {
+            throw "Conta da tarefa ($dom) difere da conta do preparo ($($meta.conta_tarefa)) - recusado."
+        }
+    }
     $t.Run($null) | Out-Null
 }
 
 function Get-InfoTarefa {
-    $t = Get-TarefaMacip
+    $t = (Get-Backend).Get()
     if (-not $t) { return $null }
     return [pscustomobject]@{
         Habilitada = [bool]$t.Enabled
@@ -222,6 +313,8 @@ function Get-InfoTarefa {
         Ultima     = [string]$t.LastRunTime
         Proxima    = [string]$t.NextRunTime
         Codigo     = [int]$t.LastTaskResult
+        Conta      = [string]$t.Principal.UserId
+        DoApp      = (Test-TarefaDoApp -Tarefa $t)
     }
 }
 
@@ -255,28 +348,37 @@ function Classify-Resultado {
 }
 
 $script:RotulosStatus = @{
-    sucesso            = 'SUCESSO  -  backup concluido neste disparo'
-    falha              = 'FALHA  -  execucao terminou com erro'
-    incompleto         = 'INCOMPLETO  -  Restic codigo 3 (nem todo arquivo lido)'
-    em_execucao        = 'EM EXECUCAO  -  backup rodando agora'
-    sem_resultado_novo = 'SEM RESULTADO NOVO  -  o ultimo resultado e de um disparo anterior'
-    nunca_executou     = 'NUNCA EXECUTOU  -  ainda nao ha resultado registrado'
-    sem_tarefa         = 'SEM TAREFA  -  configure e salve primeiro'
+    sucesso            = 'SUCESSO - backup concluido neste disparo'
+    falha              = 'FALHA - execucao terminou com erro'
+    incompleto         = 'INCOMPLETO - Restic codigo 3 (nem todo arquivo lido)'
+    em_execucao        = 'EM EXECUCAO - backup rodando agora'
+    sem_resultado_novo = 'SEM RESULTADO NOVO - o ultimo resultado e de um disparo anterior'
+    nunca_executou     = 'NUNCA EXECUTOU - ainda nao ha resultado registrado'
+    sem_tarefa         = 'SEM TAREFA - configure e salve primeiro'
+    tarefa_estranha    = 'TAREFA ESTRANHA - existe MACIP-Backup que nao e do aplicativo'
 }
 
 # ---------- restauracao ----------
 
 function Get-CfgOperacional {
-    param([string]$Estado)
-    $cfg = Read-AgenteConfig -Caminho $script:ConfigFile
+    param([string]$Estado, [string]$Config)
+    $cfg = Read-AgenteConfig -Caminho $Config
     $cfg | Add-Member -NotePropertyName ssh_exe -NotePropertyValue (Get-SshExe) -Force
     $cfg | Add-Member -NotePropertyName ssh_config -NotePropertyValue ((Join-Path $Estado 'ssh_config').Replace('\', '/')) -Force
     return $cfg
 }
 
+function Confirm-DestinoOperacional {
+    # Antes de listar ou restaurar: confere que o destino responde e que o
+    # ID do repositorio e o aprovado no preparo.
+    param([pscustomobject]$Cfg, [string]$Estado)
+    return (Confirm-Destino -Cfg $Cfg -Estado $Estado)
+}
+
 function Get-Snapshots {
-    param([string]$Estado)
-    $cfg = Get-CfgOperacional -Estado $Estado
+    param([string]$Estado, [string]$Config)
+    $cfg = Get-CfgOperacional -Estado $Estado -Config $Config
+    [void](Confirm-DestinoOperacional -Cfg $cfg -Estado $Estado)
     $r = Invoke-Restic -Cfg $cfg -Estado $Estado -Comando @('snapshots', '--json')
     if ($r.Codigo -ne 0) { throw "Falha ao listar pontos de restauracao (restic $($r.Codigo))." }
     $snaps = @($r.Linhas | ForEach-Object { try { $_ | ConvertFrom-Json } catch { } } |
@@ -285,32 +387,124 @@ function Get-Snapshots {
 }
 
 function Get-ArquivosSnapshot {
-    param([string]$Estado, [string]$Snapshot)
-    $cfg = Get-CfgOperacional -Estado $Estado
-    $r = Invoke-Restic -Cfg $cfg -Estado $Estado -Comando @('ls', $Snapshot)
+    # restic ls --json: um objeto por no. Retorna SOMENTE arquivos regulares
+    # (type == 'file'), com o caminho exato do snapshot — nada de texto livre.
+    param([string]$Estado, [string]$Config, [string]$Snapshot)
+    $cfg = Get-CfgOperacional -Estado $Estado -Config $Config
+    [void](Confirm-DestinoOperacional -Cfg $cfg -Estado $Estado)
+    $r = Invoke-Restic -Cfg $cfg -Estado $Estado -Comando @('ls', '--json', $Snapshot)
     if ($r.Codigo -ne 0) { throw "Falha ao listar arquivos do ponto (restic $($r.Codigo))." }
-    return @($r.Linhas | Where-Object { $_ -and $_.Trim() -ne '' })
+    $arquivos = @()
+    foreach ($linha in $r.Linhas) {
+        try { $no = $linha | ConvertFrom-Json } catch { continue }
+        if ($no.type -ceq 'file' -and $no.path) { $arquivos += [string]$no.path }
+    }
+    return $arquivos
+}
+
+function Resolve-LinkPath {
+    # Resolve links simbolicos/junctions: um destino "equivalente" por link
+    # conta como a propria origem.
+    param([string]$Caminho)
+    $atual = $Caminho
+    for ($i = 0; $i -lt 8; $i++) {
+        if (-not (Test-Path -LiteralPath $atual)) { break }
+        try { $item = Get-Item -LiteralPath $atual -Force } catch { break }
+        if (-not $item.LinkType -or -not $item.Target) { break }
+        $alvo = $item.Target
+        if ($alvo -is [array]) { $alvo = $alvo[0] }
+        if (-not [IO.Path]::IsPathRooted($alvo)) {
+            $alvo = Join-Path (Split-Path -LiteralPath $atual -Parent) $alvo
+        }
+        $atual = [IO.Path]::GetFullPath($alvo)
+    }
+    return [IO.Path]::GetFullPath($atual)
+}
+
+function Get-NomeArquivoRestic {
+    # Folha do caminho dentro do snapshot ('/D/pasta/arq.txt' -> 'arq.txt').
+    param([string]$PathRestic)
+    return ($PathRestic -split '[\\/]')[-1]
+}
+
+function Invoke-ResticDump {
+    # 'restic dump <snap> <caminho>' escreve o conteudo do ARQUIVO EXATO no
+    # stdout — sem glob: um '*' no nome nao arrasta outros arquivos.
+    # stdout vai direto para o destino via stream (nao passa por string do
+    # PS — preserva binario).
+    param([pscustomobject]$Cfg, [string]$Estado, [string]$Snapshot, [string]$Arquivo, [string]$Destino)
+    $exe = Join-Path $Estado $script:ResticExeNome
+    $senha = Read-ResticPassword -Caminho (Join-Path $Estado 'restic.dpapi')
+    $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($senha)
+    $alvo = Join-Path $Destino (Get-NomeArquivoRestic -PathRestic $Arquivo)
+    try {
+        $psi = [Diagnostics.ProcessStartInfo]::new()
+        $sftpCmd = 'sftp.command={0} -F {1} -s {2} sftp' -f $Cfg.ssh_exe, $Cfg.ssh_config, $Cfg.sftp_host
+        $resticArgs = '--repo "{0}" --cache-dir "{1}" -o "{2}" dump {3} "{4}"' -f `
+            $Cfg.repositorio, (Join-Path $Estado 'cache'), $sftpCmd, $Snapshot, $Arquivo
+        if (Test-IsWindows) {
+            $psi.FileName = $exe
+            $psi.Arguments = $resticArgs
+        } else {
+            # Em Windows o restic.exe e nativo. Fora do Windows (so em teste) o
+            # "exe" e um script ps1 — roda pelo interpretador que hospeda a GUI.
+            $psi.FileName = (Get-Process -Id $PID).Path
+            $psi.Arguments = '-NoProfile -File "{0}" {1}' -f $exe, $resticArgs
+        }
+        $psi.UseShellExecute = $false
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.EnvironmentVariables['RESTIC_PASSWORD'] = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+        $psi.EnvironmentVariables.Remove('RESTIC_PASSWORD_FILE') | Out-Null
+        $psi.EnvironmentVariables.Remove('RESTIC_PASSWORD_COMMAND') | Out-Null
+        $p = [Diagnostics.Process]::Start($psi)
+        $fs = [IO.File]::Create($alvo)
+        try { $p.StandardOutput.BaseStream.CopyTo($fs) } finally { $fs.Close() }
+        $p.WaitForExit()
+        $err = $p.StandardError.ReadToEnd()
+        $codigo = $p.ExitCode
+    } finally {
+        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+        if ($senha) { $senha.Dispose() }
+    }
+    if ($codigo -ne 0) {
+        Remove-Item -LiteralPath $alvo -Force -ErrorAction SilentlyContinue
+        throw "Falha na restauracao (restic $codigo): $err"
+    }
+    return $alvo
 }
 
 function Restore-Arquivo {
-    # Piloto: restaura SOMENTE em pasta separada  -  nunca sobre a origem nem em
-    # pasta que ja tenha conteudo.
-    param([string]$Estado, [string]$Snapshot, [string]$Arquivo, [string]$Destino, [string]$Origem)
+    # Piloto: restaura SOMENTE o arquivo escolhido, em pasta nova ou vazia,
+    # fora da arvore protegida - inclusive quando a equivalencia vem de
+    # link/junction. Sucesso exige o arquivo esperado no destino.
+    param([string]$Estado, [string]$Config, [string]$Snapshot, [string]$Arquivo,
+          [string]$Destino, [string]$Origem)
     if (-not $Destino) { throw 'Escolha a pasta de destino da restauracao.' }
+    if (-not $Arquivo) { throw 'Escolha o arquivo a restaurar na lista.' }
     $destAbs = [IO.Path]::GetFullPath($Destino)
     $origAbs = if ($Origem) { [IO.Path]::GetFullPath($Origem) } else { $null }
-    if ($origAbs -and $destAbs.TrimEnd('\','/') -ieq $origAbs.TrimEnd('\','/')) {
-        throw 'A restauracao do piloto nao pode ser feita sobre a pasta protegida.'
+    $destResolvido = Resolve-LinkPath -Caminho $destAbs
+    $origResolvido = if ($origAbs) { Resolve-LinkPath -Caminho $origAbs } else { $null }
+    if ($origResolvido -and $destResolvido.TrimEnd('\','/') -ieq $origResolvido.TrimEnd('\','/')) {
+        throw 'A restauracao do piloto nao pode ser feita sobre a pasta protegida (nem por link/junction).'
+    }
+    if ($origResolvido -and $destResolvido.StartsWith($origResolvido.TrimEnd('\','/') + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'A pasta de destino esta DENTRO da pasta protegida - escolha outra.'
     }
     if (Test-Path -LiteralPath $destAbs) {
         if ((Get-ChildItem -LiteralPath $destAbs -Force | Measure-Object).Count -gt 0) {
             throw "Destino precisa estar vazio (restauracao nunca sobrescreve): $destAbs"
         }
     } else { New-Item -ItemType Directory -Path $destAbs -Force | Out-Null }
-    $cfg = Get-CfgOperacional -Estado $Estado
-    $r = Invoke-Restic -Cfg $cfg -Estado $Estado -Comando @('restore', $Snapshot, '--target', $destAbs, '--include', $Arquivo)
-    if ($r.Codigo -ne 0) { throw "Falha na restauracao (restic $($r.Codigo))." }
-    return $destAbs
+
+    $cfg = Get-CfgOperacional -Estado $Estado -Config $Config
+    [void](Confirm-DestinoOperacional -Cfg $cfg -Estado $Estado)
+    $alvo = Invoke-ResticDump -Cfg $cfg -Estado $Estado -Snapshot $Snapshot -Arquivo $Arquivo -Destino $destAbs
+    if (-not (Test-Path -LiteralPath $alvo -PathType Leaf)) {
+        throw "Restauracao falhou: arquivo esperado ausente no destino ($alvo)."
+    }
+    return $alvo
 }
 
 # ---------- pre-requisitos ----------
@@ -323,52 +517,51 @@ function Get-PreRequisitos {
             $falta += "Cliente OpenSSH ausente ($ssh). Ative em Configuracoes > Recursos opcionais > Cliente OpenSSH."
         }
     }
-    $restic = Join-Path $script:BaseDir 'restic.exe'
+    $restic = Join-Path $script:BaseDir $script:ResticExeNome
     if (-not (Test-Path -LiteralPath $restic -PathType Leaf)) {
-        $restic = Join-Path $PSScriptRoot 'restic.exe'
+        $restic = Join-Path $PSScriptRoot $script:ResticExeNome
     }
     if (-not (Test-Path -LiteralPath $restic -PathType Leaf)) {
-        $falta += 'restic.exe ausente  -  o instalador da MAC IP coloca o binario aprovado na pasta do aplicativo.'
+        $falta += "$($script:ResticExeNome) ausente - o instalador da MAC IP coloca o binario aprovado na pasta do aplicativo."
     }
     return [pscustomobject]@{ Ok = ($falta.Count -eq 0); Faltas = $falta; ResticExe = $restic }
 }
 
-# ---------- ativacao ----------
+# ---------- ativacao / salvamento em 2 fases ----------
 
 function Test-ConexaoDestino {
-    # Prova a identidade do servidor e o ID do repositorio SEM gravar estado:
-    # pasta temporaria descartavel com known_hosts + chave + ssh_config.
+    # Prova a identidade do servidor e o ID do repositorio SEM gravar estado
+    # do app: pasta temporaria descartavel, com ACL restrita a conta atual.
     param([pscustomobject]$Perfil, [string]$ChavePath, [securestring]$SenhaRestic)
     if (-not (Test-Path -LiteralPath $ChavePath -PathType Leaf)) { throw "Chave privada nao encontrada: $ChavePath" }
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ('macip-teste-' + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $tmp | Out-Null
     try {
+        Protect-PastaEstado -Estado $tmp     # ACL: so a conta atual le a chave copiada
         $kh = Join-Path $tmp 'known_hosts'
-        [IO.File]::WriteAllText($kh, ($Perfil.known_hosts -join "`n") + "`n")
+        [IO.File]::WriteAllText($kh, $Perfil.known_hosts + "`n")
         $chave = Join-Path $tmp 'id'
         Copy-Item -LiteralPath $ChavePath -Destination $chave
         if (-not (Test-IsWindows)) { & chmod 600 $chave 2>$null | Out-Null }
-        $cfgObj = [ordered]@{ repositorio = $Perfil.repositorio; sftp_host = ''; sftp_user = ''; sftp_porta = '22' }
         $m1 = [regex]::Match($Perfil.repositorio, '^sftp:([^@\s/]+)@([^:/\s]+):')
         $m2 = [regex]::Match($Perfil.repositorio, '^sftp://([^@\s/]+)@([^:/\s]+)(?::(\d{1,5}))?//')
-        if ($m1.Success) { $cfgObj.sftp_user = $m1.Groups[1].Value; $cfgObj.sftp_host = $m1.Groups[2].Value }
-        else { $cfgObj.sftp_user = $m2.Groups[1].Value; $cfgObj.sftp_host = $m2.Groups[2].Value
-               if ($m2.Groups[3].Success) { $cfgObj.sftp_porta = $m2.Groups[3].Value } }
+        if ($m1.Success) { $usr = $m1.Groups[1].Value; $hst = $m1.Groups[2].Value; $prt = '22' }
+        else { $usr = $m2.Groups[1].Value; $hst = $m2.Groups[2].Value
+               $prt = $(if ($m2.Groups[3].Success) { $m2.Groups[3].Value } else { '22' }) }
         $cfg = [pscustomobject]@{
             repositorio = $Perfil.repositorio; repositorio_id = $Perfil.repositorio_id
-            sftp_user = $cfgObj.sftp_user; sftp_host = $cfgObj.sftp_host; sftp_porta = $cfgObj.sftp_porta
+            sftp_user = $usr; sftp_host = $hst; sftp_porta = $prt
             identidade_ssh = $chave; known_hosts = $kh
             ssh_exe = (Get-SshExe); ssh_config = $null
         }
         $cfg.ssh_config = Write-SshConfig -Cfg $cfg -Estado $tmp
-        foreach ($src in @((Join-Path $script:BaseDir 'restic.exe'), (Join-Path $PSScriptRoot 'restic.exe'))) {
+        foreach ($src in @((Join-Path $script:BaseDir $script:ResticExeNome), (Join-Path $PSScriptRoot $script:ResticExeNome))) {
             if (Test-Path -LiteralPath $src -PathType Leaf) {
                 Copy-Item -LiteralPath $src -Destination (Join-Path $tmp $script:ResticExeNome) -Force
                 break
             }
         }
         if (-not (Test-IsWindows)) { & chmod +x (Join-Path $tmp $script:ResticExeNome) 2>$null | Out-Null }
-        # restic precisa da senha no processo: usa restic.dpapi da pasta tmp (DPAPI da conta atual)
         Protect-ResticPassword -Senha $SenhaRestic -Destino (Join-Path $tmp 'restic.dpapi')
         $id = Confirm-Destino -Cfg $cfg -Estado $tmp
         return $id
@@ -377,33 +570,119 @@ function Test-ConexaoDestino {
     }
 }
 
-function Complete-Ativacao {
-    # Grava identidade + known_hosts + senha (DPAPI da conta atual) e o backup.json.
-    # Retorna a pasta de estado usada (nova  -  Preparar recusa sobrescrever).
+function Get-ProximoIndice {
+    $n = 0
+    if (Test-Path -LiteralPath $script:BaseDir) {
+        Get-ChildItem -LiteralPath $script:BaseDir -Directory -Filter 'config-*' |
+            ForEach-Object { if ($_.Name -match 'config-(\d+)$' -and [int]$Matches[1] -gt $n) { $n = [int]$Matches[1] } }
+        Get-ChildItem -LiteralPath $script:BaseDir -Directory -Filter 'estado-*' |
+            ForEach-Object { if ($_.Name -match 'estado-(\d+)$' -and [int]$Matches[1] -gt $n) { $n = [int]$Matches[1] } }
+    }
+    return ($n + 1)
+}
+
+function Build-Configuracao {
+    # FASE 1: cria o conjunto NOVO (config-N/ com identidade + backup.json;
+    # estado-N apenas quando o perfil muda). Nada do conjunto ativo e tocado.
+    # Retorna o descritor; em erro, o que esta fase criou e removido.
     param([pscustomobject]$Perfil, [string]$ChavePath, [securestring]$SenhaRestic,
           [string]$Origem, [object[]]$Exclusoes, [string]$Horario)
-    New-Item -ItemType Directory -Path $script:BaseDir -Force | Out-Null
-    $idDir = Join-Path $script:BaseDir 'id'
-    New-Item -ItemType Directory -Path $idDir -Force | Out-Null
-    $chave = Join-Path $idDir 'id_cliente'
-    Copy-Item -LiteralPath $ChavePath -Destination $chave -Force
-    if (-not (Test-IsWindows)) { & chmod 600 $chave 2>$null | Out-Null }
-    $kh = Join-Path $script:BaseDir 'known_hosts'
-    [IO.File]::WriteAllText($kh, ($Perfil.known_hosts -join "`n") + "`n")
+    if ($Horario -cnotmatch '^([01][0-9]|2[0-3]):[0-5][0-9]$') { throw "Horario invalido (use HH:mm): $Horario" }
+    $perfilNovo = ($null -ne $Perfil)
+    $n = Get-ProximoIndice
+    $cfgDir = Join-Path $script:BaseDir "config-$n"
+    $estadoNovo = $null
+    try {
+        New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null
+        Protect-PastaEstado -Estado $cfgDir
+        if ($Perfil) {
+            # nova ativacao/troca de perfil: identidade propria neste conjunto
+            if (-not $ChavePath -or -not (Test-Path -LiteralPath $ChavePath -PathType Leaf)) {
+                throw 'Escolha o arquivo da chave privada fornecida pela MAC IP.'
+            }
+            $chave = Join-Path $cfgDir 'id_cliente'
+            Copy-Item -LiteralPath $ChavePath -Destination $chave -Force
+            if (-not (Test-IsWindows)) { & chmod 600 $chave 2>$null | Out-Null }
+            $kh = Join-Path $cfgDir 'known_hosts'
+            [IO.File]::WriteAllText($kh, $Perfil.known_hosts + "`n")
+            $repo = $Perfil.repositorio; $rid = $Perfil.repositorio_id
+        } else {
+            # mesmo destino: reusa identidade e repositorio da config ativa
+            $configAtual = Get-ConfigAtual
+            if (-not $configAtual) { throw 'Sem ativacao anterior - conclua a aba Ativar primeiro.' }
+            $cfgAnt = Read-AgenteConfig -Caminho $configAtual
+            $chave = $cfgAnt.identidade_ssh
+            $kh = $cfgAnt.known_hosts
+            $repo = $cfgAnt.repositorio; $rid = $cfgAnt.repositorio_id
+            $Perfil = [pscustomobject]@{ repositorio = $repo; repositorio_id = $rid }
+        }
+        $jsonPath = Join-Path $cfgDir 'backup.json'
+        $tmp = "$jsonPath.tmp"
+        (New-BackupJsonObj -Perfil $Perfil -Origem $Origem -Exclusoes $Exclusoes `
+            -Horario $Horario -IdentidadeSsh $chave -KnownHostsFile $kh |
+            ConvertTo-Json -Depth 4) | Set-Content -LiteralPath $tmp -Encoding UTF8
+        [void](Read-AgenteConfig -Caminho $tmp)         # valida ANTES de nomear
+        Move-Item -LiteralPath $tmp -Destination $jsonPath -Force
 
-    Save-ConfigAtomico -CfgObj (New-BackupJsonObj -Perfil $Perfil -Origem $Origem -Exclusoes $Exclusoes `
-        -Horario $Horario -IdentidadeSsh $chave -KnownHostsFile $kh)
+        if ($perfilNovo) {
+            # perfil novo: preparo completo num estado NOVO (o anterior fica intacto)
+            if (-not $SenhaRestic) { throw 'Informe a senha Restic na aba Ativar.' }
+            $estadoNovo = Join-Path $script:BaseDir "estado-$n"
+            Invoke-AgentePreparar -Config $jsonPath -DiretorioEstado $estadoNovo `
+                -ResticExe (Get-PreRequisitos).ResticExe -SenhaRestic $SenhaRestic | Out-Null
+        }
+        $estado = if ($estadoNovo) { $estadoNovo } else { Get-EstadoAtual }
+        if (-not $estado) { throw 'Sem estado preparado - conclua a ativacao primeiro.' }
+        return [pscustomobject]@{
+            Indice = $n; ConfigDir = $cfgDir; Config = $jsonPath
+            Estado = $estado; EstadoNovo = ($null -ne $estadoNovo); Horario = $Horario
+        }
+    } catch {
+        # rollback da fase 1: o conjunto anterior nao foi tocado
+        Remove-Item -LiteralPath $cfgDir -Recurse -Force -ErrorAction SilentlyContinue
+        if ($estadoNovo) { Remove-Item -LiteralPath $estadoNovo -Recurse -Force -ErrorAction SilentlyContinue }
+        throw
+    }
+}
 
-    $meta = Read-GuiMeta
-    $n = 1
-    if ($meta.estado_atual -and $meta.estado_atual -match 'estado-(\d+)') { $n = [int]$Matches[1] + 1 }
-    $estado = Join-Path $script:BaseDir ("estado-$n")
-    $restic = (Get-PreRequisitos).ResticExe
-    Invoke-AgentePreparar -Config $script:ConfigFile -DiretorioEstado $estado -ResticExe $restic -SenhaRestic $SenhaRestic | Out-Null
-    $meta.estado_atual = $estado
-    $meta.conta_tarefa = (Get-IdentidadeAtual).Nome
-    Save-GuiMeta -Meta $meta
-    return $estado
+function Remove-ConjuntoNovo {
+    # Remove o que a fase 1 criou (cancelamento ou falha posterior).
+    param($Built)
+    if (-not $Built) { return }
+    Remove-Item -LiteralPath $Built.ConfigDir -Recurse -Force -ErrorAction SilentlyContinue
+    if ($Built.EstadoNovo) { Remove-Item -LiteralPath $Built.Estado -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+function Publish-Configuracao {
+    # FASE 2: registra a tarefa apontando para o conjunto NOVO e so depois
+    # publica gui.json. Falha de registro -> Remove-ConjuntoNovo; falha apos
+    # o registro (ex.: gui.json) -> restaura a definicao anterior da tarefa
+    # para manter o conjunto anterior coerente (config+estado+tarefa).
+    param($Built, [string]$Conta, [string]$SenhaConta)
+    $xmlAnterior = $null
+    try {
+        $xmlAnterior = Register-TarefaMacip -Horario $Built.Horario -Conta $Conta `
+            -SenhaConta $SenhaConta -Config $Built.Config -Estado $Built.Estado
+    } catch {
+        Remove-ConjuntoNovo -Built $Built
+        throw
+    }
+    try {
+        $meta = Read-GuiMeta
+        $meta.estado_atual = $Built.Estado
+        $meta.config_atual = $Built.Config
+        $meta.conta_tarefa = $Conta
+        Save-GuiMeta -Meta $meta
+    } catch {
+        # tarefa ja aponta para o novo conjunto: repoe a definicao anterior
+        # (XML capturado antes da alteracao) para o conjunto anterior
+        # continuar coerente — config+estado+tarefa andam juntos.
+        if ($xmlAnterior) {
+            try { (Get-Backend).RegistrarXml($xmlAnterior, $Conta, $SenhaConta) } catch { }
+        }
+        Remove-ConjuntoNovo -Built $Built
+        throw
+    }
 }
 
 # =================== INTERFACE ===================
@@ -461,7 +740,7 @@ function Show-Gui {
     $tbChave = New-TextBox $t1 '' 10 106 380
     $tbChave.ReadOnly = $true
     $btChave = New-Button $t1 'Chave privada...' 400 104
-    New-Label $t1 'Senha Restic (fornecida pela MAC IP  -  nunca vai para o perfil nem para o JSON):' 10 142 | Out-Null
+    New-Label $t1 'Senha Restic (fornecida pela MAC IP - nunca vai para o perfil nem para o JSON):' 10 142 | Out-Null
     $tbSenha = New-TextBox $t1 '' 10 164 240
     $tbSenha.UseSystemPasswordChar = $true
     $lblAtv = New-Label $t1 '' 10 230 520
@@ -499,7 +778,7 @@ function Show-Gui {
             $ss = ConvertTo-SecureString $tbSenha.Text -AsPlainText -Force
             $id = Test-ConexaoDestino -Perfil $script:perfilAtual -ChavePath $tbChave.Text -SenhaRestic $ss
             $lblAtv.ForeColor = 'DarkGreen'
-            $lblAtv.Text = "Conexao OK  -  identidade do servidor e ID do repositorio conferem ($($id.Substring(0,12))...)."
+            $lblAtv.Text = "Conexao OK - identidade do servidor e ID do repositorio conferem ($($id.Substring(0,12))...)."
             $btAtivar.Enabled = $true
         } catch {
             $lblAtv.ForeColor = 'DarkRed'; $lblAtv.Text = "Recusado: $($_.Exception.Message)"
@@ -518,7 +797,7 @@ function Show-Gui {
     New-Label $t2 'Pasta protegida:' 10 14 | Out-Null
     $tbOrigem = New-TextBox $t2 '' 10 36 380
     $btOrigem = New-Button $t2 'Escolher pasta...' 400 34
-    New-Label $t2 'Exclusoes (opcional, uma por linha  -  ex.: *.tmp):' 10 70 | Out-Null
+    New-Label $t2 'Exclusoes (opcional, uma por linha - ex.: *.tmp):' 10 70 | Out-Null
     $tbExcl = New-Object "$W.TextBox"
     $tbExcl.Multiline = $true; $tbExcl.ScrollBars = 'Vertical'
     $tbExcl.Location = New-Object System.Drawing.Point(10, 92)
@@ -535,10 +814,11 @@ function Show-Gui {
         if ($dlg.ShowDialog() -eq 'OK') { $tbOrigem.Text = $dlg.SelectedPath }
     })
 
-    # Preenche com a config existente, se houver (reabrir o app mostra o atual).
-    if (Test-Path -LiteralPath $script:ConfigFile -PathType Leaf) {
+    # Preenche com a config ativa (a que a TAREFA usa), se houver.
+    $cfgPath = Get-ConfigAtual
+    if ($cfgPath -and (Test-Path -LiteralPath $cfgPath -PathType Leaf)) {
         try {
-            $cfgAtual = Read-AgenteConfig -Caminho $script:ConfigFile
+            $cfgAtual = Read-AgenteConfig -Caminho $cfgPath
             $tbOrigem.Text = $cfgAtual.origem
             $tbExcl.Lines = $cfgAtual.exclusoes
             $tbHora.Text = $cfgAtual.horario
@@ -548,59 +828,43 @@ function Show-Gui {
     $btSalvar.Add_Click({
         $btSalvar.Enabled = $false; $lblCfg.ForeColor = 'DarkBlue'; $lblCfg.Text = 'Salvando...'
         $form.Refresh()
+        $built = $null
         try {
-            if (-not $script:perfilAtual) {
-                # reabertura: perfil ja usado antes  -  remonta do backup.json atual
-                if (-not (Test-Path -LiteralPath $script:ConfigFile)) { throw 'Ative um perfil na aba 1 primeiro.' }
-            }
             $excl = @($tbExcl.Lines | Where-Object { $_ -and $_.Trim() -ne '' })
             if (-not $tbOrigem.Text) { throw 'Escolha a pasta a proteger.' }
             if ($tbHora.Text -cnotmatch '^([01][0-9]|2[0-3]):[0-5][0-9]$') { throw 'Horario invalido (use HH:mm).' }
-
-            $estado = $meta.estado_atual
-            $perfil = $script:perfilAtual
-            if ($perfil) {
-                # ativacao nova ou troca de perfil: roda o preparo completo em estado NOVO
-                $estado = Complete-Ativacao -Perfil $perfil -ChavePath $tbChave.Text `
-                    -SenhaRestic (ConvertTo-SecureString $tbSenha.Text -AsPlainText -Force) `
-                    -Origem $tbOrigem.Text -Exclusoes $excl -Horario $tbHora.Text
-                $meta = Read-GuiMeta
-            } else {
-                # ajuste de pasta/exclusoes/horario no MESMO destino: so o JSON muda
-                if (-not $estado -or -not (Test-Path -LiteralPath (Join-Path $estado 'preparo.json') -PathType Leaf)) {
-                    throw 'Sem preparo concluido nesta maquina  -  conclua a ativacao na aba 1 primeiro.'
-                }
-                $cfg = Read-AgenteConfig -Caminho $script:ConfigFile
-                $prep = Get-Content -LiteralPath (Join-Path $estado 'preparo.json') -Raw | ConvertFrom-Json
-                $cfgObj = [ordered]@{
-                    origem = $tbOrigem.Text; exclusoes = $excl; repositorio = $cfg.repositorio
-                    horario = $tbHora.Text; repositorio_id = $cfg.repositorio_id
-                    identidade_ssh = $prep.identidade_ssh; known_hosts = $prep.known_hosts
-                }
-                Save-ConfigAtomico -CfgObj $cfgObj
-            }
-            # Tarefa: criar ou atualizar  -  pede a senha Windows da conta na janela nativa
+            # FASE 1: conjunto novo, sem tocar no ativo
+            $senhaSs = if ($tbSenha.Text) { ConvertTo-SecureString $tbSenha.Text -AsPlainText -Force } else { $null }
+            $built = Build-Configuracao -Perfil $script:perfilAtual -ChavePath $tbChave.Text `
+                -SenhaRestic $senhaSs -Origem $tbOrigem.Text -Exclusoes $excl -Horario $tbHora.Text
+            # credencial do Windows na janela nativa; cancelar => desfaz a fase 1
             $cred = $host.UI.PromptForCredential('MAC IP Backup',
                 "Senha do Windows da conta $conta (a tarefa roda mesmo sem sessao aberta)",
                 $conta, '')
-            if (-not $cred) { throw 'Agendamento cancelado pelo operador.' }
-            Save-TarefaMacip -Horario $tbHora.Text -Conta $conta `
-                -SenhaConta $cred.GetNetworkCredential().Password -Estado $estado
+            if (-not $cred) {
+                Remove-ConjuntoNovo -Built $built
+                throw 'Agendamento cancelado - a configuracao anterior continua valendo.'
+            }
+            # FASE 2: publica
+            Publish-Configuracao -Built $built -Conta $conta -SenhaConta $cred.GetNetworkCredential().Password
+            $cred = $null
             $script:perfilAtual = $null
+            $built = $null
             $lblCfg.ForeColor = 'DarkGreen'
             $lblCfg.Text = "Salvo. Tarefa '$($script:TaskName)' agendada para $($tbHora.Text) na conta $conta."
         } catch {
+            if ($built) { Remove-ConjuntoNovo -Built $built }
             $lblCfg.ForeColor = 'DarkRed'; $lblCfg.Text = "Erro: $($_.Exception.Message)"
         } finally { $btSalvar.Enabled = $true }
     })
 
     # ----- Tab 3: Operar -----
     $t3 = New-Tab '3. Operar'
-    $lblPasta = New-Label $t3 'Pasta protegida:  - ' 10 14
-    $lblStatus = New-Label $t3 'Situacao:  - ' 10 40
+    $lblPasta = New-Label $t3 'Pasta protegida: -' 10 14
+    $lblStatus = New-Label $t3 'Situacao: -' 10 40
     $lblStatus.Font = New-Object System.Drawing.Font($lblStatus.Font, 'Bold')
-    $lblProx = New-Label $t3 'Proxima execucao:  - ' 10 66
-    $lblUlt = New-Label $t3 'Ultimo resultado:  - ' 10 92
+    $lblProx = New-Label $t3 'Proxima execucao: -' 10 66
+    $lblUlt = New-Label $t3 'Ultimo resultado: -' 10 92
     $btAgora = New-Button $t3 'Executar agora' 10 130 130
     $btPausa = New-Button $t3 'Pausar' 150 130 90
     $btRetomar = New-Button $t3 'Retomar' 250 130 90
@@ -610,12 +874,16 @@ function Show-Gui {
     $script:AtualizarTela = {
         try {
             $info = Get-InfoTarefa
-            $meta = Read-GuiMeta
-            if (Test-Path -LiteralPath $script:ConfigFile -PathType Leaf) {
-                try { $lblPasta.Text = 'Pasta protegida: ' + (Read-AgenteConfig -Caminho $script:ConfigFile).origem } catch { }
+            $cfgPath = Get-ConfigAtual
+            if ($cfgPath -and (Test-Path -LiteralPath $cfgPath -PathType Leaf)) {
+                try { $lblPasta.Text = 'Pasta protegida: ' + (Read-AgenteConfig -Caminho $cfgPath).origem } catch { }
             }
-            if (-not $info) { $lblStatus.Text = 'Situacao: ' + $script:RotulosStatus.sem_tarefa; $lblProx.Text = 'Proxima execucao:  - '; $lblUlt.Text = 'Ultimo resultado:  - '; return }
-            $estado = $meta.estado_atual
+            if (-not $info) { $lblStatus.Text = 'Situacao: ' + $script:RotulosStatus.sem_tarefa; $lblProx.Text = 'Proxima execucao: -'; $lblUlt.Text = 'Ultimo resultado: -'; return }
+            if (-not $info.DoApp) {
+                $lblStatus.ForeColor = 'DarkRed'; $lblStatus.Text = 'Situacao: ' + $script:RotulosStatus.tarefa_estranha
+                return
+            }
+            $estado = Get-EstadoAtual
             $res = if ($estado) { Read-UltimoResultado -Estado $estado } else { $null }
             $cls = Classify-Resultado -Res $res -InfoTarefa $info
             $cor = switch ($cls) {
@@ -627,14 +895,14 @@ function Show-Gui {
             $lblProx.Text = 'Proxima execucao: ' + $(if ($info.Habilitada) { $info.Proxima } else { 'PAUSADO' })
             $lblUlt.Text = 'Ultimo resultado: ' + $(if ($res) {
                 "$($res.status) em $($res.fim_utc) (restic $($res.codigo_restic), snapshot $($res.snapshot))"
-            } else { ' - ' })
+            } else { '-' })
             $btPausa.Enabled = $info.Habilitada
             $btRetomar.Enabled = -not $info.Habilitada
             $btAgora.Enabled = ($info.Estado -ne 4)
-        } catch { $lblStatus.Text = 'Situacao: erro ao ler  -  ' + $_.Exception.Message }
+        } catch { $lblStatus.Text = 'Situacao: erro ao ler - ' + $_.Exception.Message }
     }
-    $btAgora.Add_Click({ try { Start-TarefaAgora; $lblOp.ForeColor='DarkGreen'; $lblOp.Text = 'Disparo manual enviado  -  a mesma tarefa agendada executa agora.' } catch { $lblOp.ForeColor='DarkRed'; $lblOp.Text = $_.Exception.Message }; & $script:AtualizarTela })
-    $btPausa.Add_Click({ try { Set-TarefaHabilitada $false; $lblOp.Text = 'Tarefa pausada  -  o disparo agendado nao roda ate retomar.' } catch { $lblOp.Text = $_.Exception.Message }; & $script:AtualizarTela })
+    $btAgora.Add_Click({ try { Start-TarefaAgora; $lblOp.ForeColor='DarkGreen'; $lblOp.Text = 'Disparo manual enviado - a mesma tarefa agendada executa agora.' } catch { $lblOp.ForeColor='DarkRed'; $lblOp.Text = $_.Exception.Message }; & $script:AtualizarTela })
+    $btPausa.Add_Click({ try { Set-TarefaHabilitada $false; $lblOp.Text = 'Tarefa pausada - o disparo agendado nao roda ate retomar.' } catch { $lblOp.Text = $_.Exception.Message }; & $script:AtualizarTela })
     $btRetomar.Add_Click({ try { Set-TarefaHabilitada $true; $lblOp.Text = 'Tarefa retomada.' } catch { $lblOp.Text = $_.Exception.Message }; & $script:AtualizarTela })
     $btAtual.Add_Click({ & $script:AtualizarTela })
 
@@ -644,26 +912,26 @@ function Show-Gui {
     $cbSnap = New-Object "$W.ComboBox"
     $cbSnap.DropDownStyle = 'DropDownList'; $cbSnap.Location = New-Object System.Drawing.Point(10, 36)
     $cbSnap.Size = New-Object System.Drawing.Size(520, 24); $t4.Controls.Add($cbSnap)
-    New-Label $t4 'Arquivo no ponto escolhido:' 10 70 | Out-Null
+    New-Label $t4 'Arquivo no ponto escolhido (somente lista - sem texto livre):' 10 70 | Out-Null
     $cbArq = New-Object "$W.ComboBox"
+    $cbArq.DropDownStyle = 'DropDownList'          # selecao fechada: sem texto livre
     $cbArq.Location = New-Object System.Drawing.Point(10, 92)
     $cbArq.Size = New-Object System.Drawing.Size(520, 24); $t4.Controls.Add($cbArq)
     $tbDest = New-TextBox $t4 '' 10 136 380
     $btDest = New-Button $t4 'Pasta de destino...' 400 134
     $lblRes = New-Label $t4 '' 10 210 520
-    $btRest = New-Button $t4 'Restaurar arquivo' 10 170 150
     $btSnaps = New-Button $t4 'Carregar pontos' 10 170 130
-    $btRest.Location = New-Object System.Drawing.Point(150, 170)
+    $btRest = New-Button $t4 'Restaurar arquivo' 150 170 150
 
     $btSnaps.Add_Click({
         $btSnaps.Enabled = $false; $lblRes.ForeColor = 'DarkBlue'; $lblRes.Text = 'Listando pontos...'; $form.Refresh()
         try {
-            $meta = Read-GuiMeta
-            if (-not $meta.estado_atual) { throw 'Sem preparo concluido  -  ative e configure primeiro.' }
-            $snaps = Get-Snapshots -Estado $meta.estado_atual
+            $estado = Get-EstadoAtual; $cfgPath = Get-ConfigAtual
+            if (-not $estado -or -not $cfgPath) { throw 'Sem preparo concluido - ative e configure primeiro.' }
+            $snaps = Get-Snapshots -Estado $estado -Config $cfgPath
             $script:snaps = @($snaps)
             $cbSnap.Items.Clear()
-            foreach ($s in $snaps) { [void]$cbSnap.Items.Add(('{0}  -  {1}' -f $s.short_id, $s.time)) }
+            foreach ($s in $script:snaps) { [void]$cbSnap.Items.Add(('{0} - {1}' -f $s.short_id, $s.time)) }
             if ($cbSnap.Items.Count -gt 0) { $cbSnap.SelectedIndex = $cbSnap.Items.Count - 1 }
             $lblRes.ForeColor = 'DarkGreen'; $lblRes.Text = "$($cbSnap.Items.Count) ponto(s) disponivel(is)."
         } catch { $lblRes.ForeColor = 'DarkRed'; $lblRes.Text = $_.Exception.Message }
@@ -672,27 +940,30 @@ function Show-Gui {
     $cbSnap.Add_SelectedIndexChanged({
         try {
             $cbArq.Items.Clear()
-            $meta = Read-GuiMeta
+            $estado = Get-EstadoAtual; $cfgPath = Get-ConfigAtual
             $snap = $script:snaps[$cbSnap.SelectedIndex]
-            foreach ($a in (Get-ArquivosSnapshot -Estado $meta.estado_atual -Snapshot $snap.id)) { [void]$cbArq.Items.Add($a) }
+            foreach ($a in (Get-ArquivosSnapshot -Estado $estado -Config $cfgPath -Snapshot $snap.id)) {
+                [void]$cbArq.Items.Add($a)
+            }
             if ($cbArq.Items.Count -gt 0) { $cbArq.SelectedIndex = 0 }
         } catch { $lblRes.ForeColor = 'DarkRed'; $lblRes.Text = $_.Exception.Message }
     })
     $btDest.Add_Click({
         $dlg = New-Object "$W.FolderBrowserDialog"
-        $dlg.Description = 'Pasta SEPARADA para receber o arquivo restaurado'
+        $dlg.Description = 'Pasta SEPARADA e vazia para receber o arquivo restaurado'
         if ($dlg.ShowDialog() -eq 'OK') { $tbDest.Text = $dlg.SelectedPath }
     })
     $btRest.Add_Click({
         $btRest.Enabled = $false; $lblRes.ForeColor = 'DarkBlue'; $lblRes.Text = 'Restaurando...'; $form.Refresh()
         try {
-            $meta = Read-GuiMeta
+            $estado = Get-EstadoAtual; $cfgPath = Get-ConfigAtual
             $snap = $script:snaps[$cbSnap.SelectedIndex]
-            $cfg = Read-AgenteConfig -Caminho $script:ConfigFile
-            $dest = Restore-Arquivo -Estado $meta.estado_atual -Snapshot $snap.id `
-                -Arquivo $cbArq.Text -Destino $tbDest.Text -Origem $cfg.origem
+            $cfg = Read-AgenteConfig -Caminho $cfgPath
+            $alvo = Restore-Arquivo -Estado $estado -Config $cfgPath -Snapshot $snap.id `
+                -Arquivo $cbArq.SelectedItem -Destino $tbDest.Text -Origem $cfg.origem
+            $sha = (Get-FileHash -LiteralPath $alvo -Algorithm SHA256).Hash.ToLower()
             $lblRes.ForeColor = 'DarkGreen'
-            $lblRes.Text = "Restaurado com sucesso em: $dest (o arquivo original NAO foi sobrescrito)."
+            $lblRes.Text = "Restaurado: $alvo (SHA-256 $sha) - o original NAO foi sobrescrito."
         } catch { $lblRes.ForeColor = 'DarkRed'; $lblRes.Text = $_.Exception.Message }
         finally { $btRest.Enabled = $true }
     })

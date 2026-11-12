@@ -82,6 +82,30 @@ class TestWindowsAgentPs1(unittest.TestCase):
         # a interface nunca chama init nem grava senha em arquivo/log
         self.assertNotIn("'init'", fonte)
         self.assertNotIn('"init"', fonte)
+        # TASK_LOGON_PASSWORD = 1 (PASSWORD), nao 2 (S4U)
+        self.assertRegex(fonte, r"LogonPassword\s*=\s*1\b")
+        # listagem estruturada e caminho exato, nunca texto livre
+        self.assertIn("'ls', '--json'", fonte)
+        self.assertIn("type -ceq 'file'", fonte)
+        # conjunto novo (config-N/estado-N) nao toca o conjunto ativo
+        self.assertIn("config-$n", fonte)
+        self.assertIn("estado-$n", fonte)
+
+    def test_contrato_instalador(self):
+        """Contrato estatico do instalador NSIS."""
+        nsi = (AGENT_DIR / "installer" / "macip-backup.nsi").read_text(
+            encoding="utf-8")
+        # $PROGRAMDATA nao e variavel nativa do NSIS — nao pode aparecer em
+        # codigo (comentarios que explicam a ausencia sao ignorados).
+        codigo = "\n".join(
+            ln for ln in nsi.splitlines() if not ln.lstrip().startswith(";"))
+        self.assertNotIn("$PROGRAMDATA", codigo)
+        # SetShellVarContext all: $APPDATA = %ProgramData% (mesmo caminho da GUI)
+        self.assertIn("SetShellVarContext all", nsi)
+        self.assertIn('$APPDATA\\MacipBackup', nsi)
+        # desinstalacao so remove executaveis apos desabilitar a tarefa
+        self.assertIn('/DISABLE', nsi)
+        self.assertIn('MACIP-Backup', nsi)
 
 
 if __name__ == "__main__":

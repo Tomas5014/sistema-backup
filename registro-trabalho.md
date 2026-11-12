@@ -1348,3 +1348,51 @@ regressao: **119/119** (Restic real skip sem MACIP_RESTIC_REAL).
 fluxo completo na interface com sessao encerrada e reinicio, DPAPI
 real, SFTP real e restauracao; registro/execucao da tarefa via COM e
 PromptForCredential so testados estaticamente.
+
+## 2026-11-12 — GUI do piloto: correcao de agendamento, salvamento atomico, instalador e restauracao
+
+Branch `feature/windows-backup-gui-pilot`. Quatro defeitos revisados da
+primeira versao da interface, todos corrigidos com regressao:
+
+1. **Agendamento:** `TASK_LOGON_PASSWORD = 1` (PASSWORD, nao o 2/S4U) na
+   definicao (`Principal.LogonType`) e no registro COM — a tarefa roda na
+   mesma conta da sessao em que o DPAPI protege a senha Restic.
+   Credencial Windows pedida so na janela nativa `PromptForCredential`,
+   nunca gravada em arquivo/log/argumento. Tarefa so e alterada com a
+   marca do aplicativo na descricao; homonima estranha e recusada.
+   Executar agora dispara a mesma tarefa/conta e recusa conta divergente
+   do preparo e execucao sobreposta (`State=RUNNING` +
+   `MultipleInstances=IGNORE_NEW`).
+2. **Salvamento em duas fases (rollback):** `Build-Configuracao` monta
+   conjunto novo `config-N` (+`estado-N` so quando o perfil muda —
+   mesmo destino reusa o DPAPI anterior) sem tocar no ativo;
+   `Publish-Configuracao` registra a tarefa e so entao publica
+   `gui.json`. Cancelamento da credencial, falha de preparo ou erro no
+   COM removem o conjunto novo; falha apos o registro repoe o XML
+   anterior da tarefa. Config+estado+tarefa anteriores continuam juntos
+   e funcionais. `Get-ConfigAtual`/`Get-EstadoAtual` leem o que a TAREFA
+   usa (a meta nao mente).
+3. **Instalador NSIS:** `$PROGRAMDATA` (inexistente no NSIS) substituido
+   por `SetShellVarContext all` — `$APPDATA` = `%ProgramData%`, mesmo
+   caminho da GUI, e atalho no Menu Iniciar comum (visivel a conta
+   dedicada). Desinstalacao desabilita a tarefa ANTES de remover
+   executaveis; sem confirmacao de desativacao, informa a falha e
+   preserva os arquivos. Dados/estado sempre preservados.
+   **Nao compilado:** sem `makensis` nem `restic.exe` aprovado neste
+   ambiente — build no Windows documentado em `installer/BUILD.md`.
+4. **Restauracao:** `restic ls --json` filtrado a `type == 'file'`
+   (dirs/symlinks fora), caminho exato do snapshot em ComboBox fechado
+   (sem texto livre); `restic dump` do arquivo escolhido — nome com
+   `[1]`/`*` e literal, nao arrasta outros arquivos. Destino novo ou
+   vazio, fora da arvore protegida, equivalencia por link/junction
+   recusada; destino e ID do repositorio conferidos antes de listar e
+   restaurar; sucesso so quando o arquivo esperado existe no destino.
+
+Testes: `run-gui-tests.ps1` **55/55** em pwsh 7.4.6 — inclui falha
+simulada de preparo, cancelamento da credencial, erro no COM, conta e
+`LogonType` da def real, restauracao real com SHA-256 conferido e caso
+sem arquivo. Agente sem regressao **119/119**; `unittest` **5/5**
+(contrato do instalador incluido). **Pendente (bloqueio para
+homologacao):** VM Windows — instalador compilado, COM/DPAPI/
+PromptForCredential reais, SFTP real, sessao encerrada, reinicio e
+restauracao ponta a ponta.

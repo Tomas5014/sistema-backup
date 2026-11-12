@@ -32,8 +32,33 @@ a senha Restic (chave e senha por canal seguro, nunca junto ao pacote).
   continua; backup só funciona depois de ativado).
 - Copia `Backup-MacipCliente.ps1`, `MacipBackup-Gui.ps1`, exemplo de
   perfil e `restic.exe` para `%ProgramFiles%\MACIP-Backup`.
-- Cria `%ProgramData%\MacipBackup` (sem espaços — configuração e estado).
-- Cria atalho no Menu Iniciar. **A GUI deve ser aberta na conta dedicada
-  do backup** — o preparo e a tarefa ficam vinculados a essa conta.
-- Desinstalação: desabilita a tarefa `MACIP-Backup` e preserva
-  `%ProgramData%\MacipBackup` (configuração, estado e senha protegida).
+- Cria `%ProgramData%\MacipBackup` (sem espaços — configuração e estado)
+  via `SetShellVarContext all`: `$APPDATA` resolve para `%ProgramData%`,
+  **o mesmo caminho que a interface usa** (`$env:ProgramData`). NSIS não
+  tem `$PROGRAMDATA` nativo — não use essa variável.
+- Cria atalho no **Menu Iniciar comum** (`$SMPROGRAMS` com contexto
+  `all`): aparece para a conta dedicada do backup mesmo quando outro
+  administrador autorizou a instalação. **A GUI deve ser aberta na conta
+  dedicada** — preparo, tarefa e DPAPI ficam nessa conta.
+- Permissões: as pastas `config-N`/`estado-N` e a pasta temporária do
+  teste de conexão recebem ACL própria na primeira gravação da GUI
+  (somente a conta do backup lê/escreve — inclusive a chave privada
+  copiada e o `restic.dpapi`). A raiz `%ProgramData%\MacipBackup` fica
+  com a herança padrão do ProgramData para que a conta dedicada consiga
+  criar suas subpastas.
+- Desinstalação: **primeiro** desabilita somente a tarefa `MACIP-Backup`
+  (`schtasks /End` + `/Change /DISABLE`) e confere o código de retorno;
+  se a desativação não for confirmada, informa a falha e **preserva os
+  executáveis** que a tarefa roda. `%ProgramData%\MacipBackup`
+  (configuração, estado, resultados, senha protegida) é sempre
+  preservado.
+
+## Status de compilação
+
+**Instalador ainda não compilado.** Neste ambiente de desenvolvimento
+(Linux) não há `makensis` nem o `restic.exe` homologado pela MAC IP —
+o binário de teste do repositório **não** é instalador aprovado e nunca
+deve ser distribuído como tal. Quando o build acontecer no Windows,
+registrar aqui: versão (`/DVERSAO`), comando exato, caminho do `.exe`
+gerado e o SHA-256 — um pacote só é homologável com o `restic.exe`
+aprovado e a validação da VM documentada no roteiro do piloto.

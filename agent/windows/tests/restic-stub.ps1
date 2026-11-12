@@ -27,3 +27,18 @@ elseif ($args -contains 'backup') {
     }
     $global:LASTEXITCODE = [int](Get-Content (Join-Path $d 'code') -Raw)
 }
+elseif ($args -contains 'snapshots') {
+    # snaps.jsonl: uma linha JSON por snapshot (como "restic snapshots --json")
+    if (Test-Path (Join-Path $d 'snaps.jsonl')) { Get-Content (Join-Path $d 'snaps.jsonl') }
+}
+elseif ($args -contains 'ls') {
+    # ls.jsonl: nos de "restic ls --json" (type file/dir/symlink/snapshot)
+    if (Test-Path (Join-Path $d 'ls.jsonl')) { Get-Content (Join-Path $d 'ls.jsonl') }
+}
+elseif ($args -contains 'dump') {
+    # dump.bin: conteudo do arquivo "restaurado" (bytes, para Invoke-ResticDump)
+    if (Test-Path (Join-Path $d 'dump.bin')) {
+        $b = [IO.File]::ReadAllBytes((Join-Path $d 'dump.bin'))
+        [Console]::OpenStandardOutput().Write($b, 0, $b.Length)
+    } else { $global:LASTEXITCODE = 1 }
+}

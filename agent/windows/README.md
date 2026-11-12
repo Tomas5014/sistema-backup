@@ -164,20 +164,34 @@ repositório e o `Preparar` (DPAPI na conta) são os mesmos do agente.
   servidor + ID do repositório em pasta temporária, sem gravar estado;
   ativação só libera se os dois conferirem.
 - **Configurar:** seletor de pasta do Windows, exclusões opcionais e
-  horário diário. Salvar grava o `backup.json` **atomicamente** (recusa
-  preserva a config válida) e cria ou atualiza **somente** a tarefa
-  `MACIP-Backup` via Schedule.Service — `TASK_LOGON_PASSWORD`, senha
-  Windows pedida na janela nativa de credencial; salvar duas vezes
-  atualiza a mesma tarefa, nunca duplica.
+  horário diário. Salvar é **transacional em duas fases**: primeiro um
+  conjunto novo (`config-N`, identidade e `backup.json`; `estado-N` novo
+  só quando o perfil muda — DPAPI do estado anterior é reaproveitado se
+  o destino é o mesmo) é montado e validado **sem tocar** no conjunto
+  ativo; depois a tarefa `MACIP-Backup` é registrada e só então os
+  metadados apontam para o conjunto novo. Cancelamento da janela de
+  credencial, falha no preparo ou erro no COM descartam o conjunto novo
+  e restauram a definição anterior da tarefa — configuração, estado
+  DPAPI e tarefa anteriores continuam juntos e funcionais. A tarefa usa
+  `TASK_LOGON_PASSWORD` (**1**, não S4U) na mesma conta da sessão e só
+  é alterada se estiver marcada como do aplicativo — tarefa homônima
+  estranha é recusada. Salvar duas vezes atualiza a mesma tarefa, nunca
+  duplica.
 - **Operar:** pasta protegida, próxima execução e último resultado com
   classificação em sucesso/falha/incompleto/em execução/**sem resultado
   novo**/nunca executou — um resultado antigo não conta como prova da
   execução atual (inicio_utc × LastRunTime). *Executar agora* dispara a
-  **mesma** tarefa na **mesma** conta; *Pausar/Retomar* habilita a
-  tarefa; execução em andamento bloqueia novo disparo.
-- **Restaurar:** pontos via `restic snapshots`, arquivo via `restic ls`,
-  destino obrigatoriamente **vazio e fora da pasta protegida** — o
-  piloto nunca sobrescreve o original.
+  **mesma** tarefa na **mesma** conta (conta divergente do preparo é
+  recusada); *Pausar/Retomar* habilita a tarefa; execução em andamento
+  bloqueia novo disparo.
+- **Restaurar:** pontos via `restic snapshots`; arquivos via
+  `restic ls --json` filtrados a **arquivos regulares** — a escolha vem
+  da lista, nunca de texto livre. Destino obrigatoriamente **vazio e
+  fora da pasta protegida** (equivalência por link/junction recusada);
+  antes de listar/restaurar o destino e o ID do repositório são
+  conferidos. `restic dump` traz **somente o arquivo escolhido** —
+  nome com `[`/`]`/`*` é literal, não arrasta outros arquivos — e a tela
+  só mostra sucesso quando o arquivo esperado existe no destino.
 - **Conta:** a GUI roda na conta dedicada do backup — DPAPI, preparo e
   tarefa ficam na mesma identidade; se for aberta elevada em outra
   conta, a conta da tarefa registrada será a da sessão, e o aviso na
@@ -186,8 +200,13 @@ repositório e o `Preparar` (DPAPI na conta) são os mesmos do agente.
 Instalador: `installer/macip-backup.nsi` + `installer/BUILD.md`
 (`makensis /DVERSAO=…` gera `MacipBackupSetup-<versao>.exe`; verifica
 OpenSSH e copia agente + GUI + `restic.exe` aprovado, sem segredos).
-Dados ficam em `%ProgramData%\MacipBackup` (sem espaços); desinstalar
-desabilita a tarefa e preserva dados/estado.
+Dados ficam em `%ProgramData%\MacipBackup` (sem espaços) — o instalador
+resolve o diretório comum com `SetShellVarContext all`, o **mesmo**
+caminho da interface, e cria o atalho no Menu Iniciar de todos os
+usuários (visível à conta dedicada do backup). Desinstalar desabilita a
+tarefa **antes** de remover os executáveis — se a desativação não for
+confirmada, os arquivos ficam e a falha é informada — e sempre preserva
+dados/estado.
 
 Uso por script continua igual — a GUI não altera o agente.
 
