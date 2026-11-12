@@ -1,0 +1,7 @@
+{
+  "nome": "Cliente Exemplo (ficticio)",
+  "repositorio": "sftp:cliente01@backup.macip.example:/dados/cliente01",
+  "repositorio_id": "f0d283eed89cc54322dc22e2d1900c0ef8e3ba30f5ba9d9b41fffb80f3aa823a",
+  "known_hosts": "backup.macip.example ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIChavePublicaFicticiaDoServidorDeExemplo",
+  "horario_sugerido": "02:30"
+}

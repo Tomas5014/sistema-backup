@@ -79,6 +79,30 @@ chave SSH, `known_hosts`, senha via cofre.
 
 ## 4. Instalação no Windows (administrador do cliente)
 
+### 4a. Pela interface (caminho do piloto)
+
+1. Instalar `MacipBackupSetup-<versao>.exe` (gerar por
+   `agent/windows/installer/BUILD.md`; conferir SHA-256 do pacote —
+   abortar se ausente ou divergente).
+2. Abrir **MAC IP Backup** na **conta dedicada** com logon em lote —
+   preparo, senha DPAPI e tarefa ficam nessa conta.
+3. **Ativar:** *Importar perfil* (JSON da MAC IP — só dados), *Chave
+   privada*, *Senha Restic* → **Testar conexão** → **Ativar** (só
+   libera com identidade do servidor e ID do repositório conferindo).
+4. **Configurar:** *Escolher pasta*, exclusões, horário → **Salvar e
+   agendar** — a senha Windows é pedida na janela nativa; a tarefa
+   `MACIP-Backup` é criada (salvar de novo só a atualiza).
+5. Prova sem sessão: encerrar a sessão antes do horário, religar,
+   conferir na aba **Operar** (*Situacao: SUCESSO* com resultado novo)
+   e no destino (`restic snapshots`). Disparo manual pelo botão
+   **Executar agora** — a mesma tarefa, na mesma conta.
+6. **Restaurar:** aba 4 — ponto, arquivo, pasta separada; o original
+   nunca é sobrescrito.
+
+O fluxo por script abaixo segue válido como alternativa de diagnóstico.
+
+### 4b. Pelo script (alternativa/diagnóstico)
+
 1. Conferir o pacote de instalação — **abortar** se o arquivo estiver
    ausente ou o hash divergir:
 

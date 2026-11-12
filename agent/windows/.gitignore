@@ -13,3 +13,10 @@ known_hosts
 *.key
 cache/
 estado/
+estado-*/
+id/
+gui.json
+macip-perfil*.json
+installer/payload/
+MacipBackupSetup-*.exe
+*.exe

@@ -150,6 +150,49 @@ endereço é aceito e usuário/porta chegam ao comando, sem conexão.
 
 Fora do Windows a fronteira DPAPI é substituída nos testes acima.
 
+## Interface gráfica (piloto)
+
+`gui/MacipBackup-Gui.ps1` — WinForms em PS 5.1, sem dependência nova.
+Dot-sourcing do próprio `Backup-MacipCliente.ps1`: a validação do
+`backup.json`, o `ssh_config` restrito, a conferência do ID do
+repositório e o `Preparar` (DPAPI na conta) são os mesmos do agente.
+
+- **Ativar:** importa um `perfil.json` da MAC IP (repositório, ID
+  esperado e `known_hosts` embutidos — dados, sem segredos; perfis com
+  campo de senha/chave são recusados). Chave privada e senha Restic
+  entram separadas pela tela. **Testar conexão** prova identidade do
+  servidor + ID do repositório em pasta temporária, sem gravar estado;
+  ativação só libera se os dois conferirem.
+- **Configurar:** seletor de pasta do Windows, exclusões opcionais e
+  horário diário. Salvar grava o `backup.json` **atomicamente** (recusa
+  preserva a config válida) e cria ou atualiza **somente** a tarefa
+  `MACIP-Backup` via Schedule.Service — `TASK_LOGON_PASSWORD`, senha
+  Windows pedida na janela nativa de credencial; salvar duas vezes
+  atualiza a mesma tarefa, nunca duplica.
+- **Operar:** pasta protegida, próxima execução e último resultado com
+  classificação em sucesso/falha/incompleto/em execução/**sem resultado
+  novo**/nunca executou — um resultado antigo não conta como prova da
+  execução atual (inicio_utc × LastRunTime). *Executar agora* dispara a
+  **mesma** tarefa na **mesma** conta; *Pausar/Retomar* habilita a
+  tarefa; execução em andamento bloqueia novo disparo.
+- **Restaurar:** pontos via `restic snapshots`, arquivo via `restic ls`,
+  destino obrigatoriamente **vazio e fora da pasta protegida** — o
+  piloto nunca sobrescreve o original.
+- **Conta:** a GUI roda na conta dedicada do backup — DPAPI, preparo e
+  tarefa ficam na mesma identidade; se for aberta elevada em outra
+  conta, a conta da tarefa registrada será a da sessão, e o aviso na
+  aba 1 mostra qual é.
+
+Instalador: `installer/macip-backup.nsi` + `installer/BUILD.md`
+(`makensis /DVERSAO=…` gera `MacipBackupSetup-<versao>.exe`; verifica
+OpenSSH e copia agente + GUI + `restic.exe` aprovado, sem segredos).
+Dados ficam em `%ProgramData%\MacipBackup` (sem espaços); desinstalar
+desabilita a tarefa e preserva dados/estado.
+
+Uso por script continua igual — a GUI não altera o agente.
+
+## Homologação
+
 **Homologação de laboratório (11/11/2026, 14h22 Brasília), relatada
 pelo operador:** o Agendador disparou a tarefa em Windows PowerShell
 5.1 **com a sessão encerrada** — Agendador e Restic retornaram `0` e o

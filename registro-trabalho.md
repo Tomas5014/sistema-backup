@@ -1308,3 +1308,43 @@ comprovada.
 
 **Continuam pendentes:** autorização registrada do cliente e validação
 da cópia protegida no armazenamento definitivo.
+
+---
+
+## 2026-11-12 — MAC IP Backup com interface grafica (piloto Windows)
+
+Branch `feature/windows-backup-gui-pilot` sobre `main` (`8e690d0`,
+linha Windows `45b45dc` ja integrada). **Sem alteracao no agente**: a
+GUI (`agent/windows/gui/MacipBackup-Gui.ps1`, WinForms/PS 5.1,
+somente-ASCII) dot-sourcing do `Backup-MacipCliente.ps1` reusa toda a
+validacao homologada — `Read-AgenteConfig`, `Write-SshConfig`,
+`Confirm-Destino`, `Invoke-Restic`, `Invoke-AgentePreparar`.
+
+Fluxo sem terminal nem Agendador: **Ativar** (perfil `.json` da MAC IP
+como dados — campos de segredo recusados; chave e senha Restic
+separadas; *Testar conexao* prova identidade do servidor + ID do
+repositorio em pasta temporaria sem gravar estado) -> **Configurar**
+(seletor de pasta, exclusoes, horario; `backup.json` atomico que
+preserva a config anterior em recusa; tarefa `MACIP-Backup` criada ou
+atualizada via Schedule.Service com `TASK_LOGON_PASSWORD` e senha na
+janela nativa — nunca duplica) -> **Operar** (pasta, proxima execucao,
+resultado classificado — resultado antigo nao conta como execucao nova;
+Executar agora na mesma tarefa/conta, pausa/retomada, bloqueio de
+execucao dupla) -> **Restaurar** (ponto + arquivo em pasta separada
+vazia; original intocado). Estado em `%ProgramData%\MacipBackup` sem
+espacos; pastas de estado `estado-N` novas a cada preparo (recusa de
+sobrescrita do agente preservada).
+
+Instalador: `installer/macip-backup.nsi` + `BUILD.md`
+(`makensis /DVERSAO=…` no Windows gera `MacipBackupSetup-<versao>.exe`;
+checa OpenSSH, copia agente+GUI+restic aprovado; sem segredos no
+pacote). `perfil.example.json` ficticio entregue.
+
+Testes: `run-gui-tests.ps1` **32/32** em pwsh 7.4.6 (perfil e recusas,
+atomica da config, classificacao de resultado, alvo de restauracao,
+argumentos da tarefa; COM pulado fora do Windows). Agente sem
+regressao: **119/119** (Restic real skip sem MACIP_RESTIC_REAL).
+`unittest` 4/4. **Pendente (bloqueio para homologacao):** VM Windows —
+fluxo completo na interface com sessao encerrada e reinicio, DPAPI
+real, SFTP real e restauracao; registro/execucao da tarefa via COM e
+PromptForCredential so testados estaticamente.
