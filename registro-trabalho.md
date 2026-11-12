@@ -1108,3 +1108,203 @@ A unit da VM (corrigida manualmente) segue válida — marcador
 `install=` preservado; atualização por `install.sh` não toca units.
 
 ---
+
+## Agente Windows reutilizável (piloto) — feature/windows-pilot-agent
+
+Base: `e448894` (main). `agent/windows/Backup-MacipCliente.ps1` — um
+script, dois modos, PS 5.1. `backup.json` carrega origem/exclusoes/
+repositorio/horario (operador) + repositorio_id/identidade_ssh/
+known_hosts (MAC IP). `Preparar` valida config/executáveis/acesso na
+conta da tarefa, protege a senha em DPAPI, confere o ID do repositório
+existente (nunca `init`) e imprime os campos do Agendador. `Backup`
+roda sem prompts: revalida tudo, confirma identidade do destino ANTES
+do backup (ssh_config restrito: BatchMode, chave exclusiva, host key
+estrita), senha só no processo, `--exclude` por padrão, sucesso só com
+rc=0 + snapshot válido; rc=3 retorna erro. `ultimo-resultado.json` com
+início/fim UTC, conta, estado, código e snapshot.
+
+Suíte `agent/windows/tests/run-windows-agent-tests.ps1`: 73/73 em
+pwsh 7.6.9 (Linux) — validação, exclusões vazia/preenchida/acentos,
+destino divergente recusado sem chamar `backup`, rc 0/1/3, sigilo da
+senha, duas configs com o mesmo script, campos do Agendador, recusas
+de contexto. Ponte unittest: `tests/test_windows_agent_ps1.py`
+(pula sem pwsh). Limite da prova: fora do Windows só a fronteira DPAPI
+é simulada — DPAPI real + Agendador com sessão encerrada + SFTP ficam
+para a VM Windows descartável (pendente). `restic.exe`, chaves, senhas
+e `backup.json` real ficam fora do versionamento (.gitignore próprio).
+
+## Agente Windows — correções de endereço, preparo e vínculo (review 2)
+
+Sobre `d9e6968`, mesma branch. Achados corrigidos:
+
+- **SFTP:** regex rejeitava a forma canônica `sftp:u@h:/caminho` (até o
+  exemplo). Agora aceita `sftp:usuario@host:/caminho` (porta 22) e
+  `sftp://usuario@host:porta//caminho`; a ambígua `:porta/caminho` é
+  recusada (Restic lê como caminho). `ssh_config` ganhou `User` e
+  `Port` — usuário SFTP explícito no comando. Prova com **Restic
+  0.18.1 real** + ssh registrador: host e `-s sftp` chegam na invocação
+  nas duas formas.
+- **PS 5.1:** script agora 100% ASCII (travessão removido de string);
+  `GetDirectoryName` no lugar de `Split-Path -Parent`; suíte salva em
+  UTF-8 com BOM.
+- **Preparo:** recusa pasta de estado existente (byte a byte
+  preservada), só marca concluído após conferir o ID, e em erro remove
+  apenas os artefatos da tentativa atual. `Backup` reconfere
+  repositório, ID e SHA-256 de chave/known_hosts contra o
+  `preparo.json`; divergência recusa antes do backup e orienta preparo
+  em outra pasta — sem reuso silencioso de ssh_config.
+- **Validação:** `origem` exige unidade local no Windows (UNC e volume
+  de rede recusados); `exclusoes` exige lista no JSON bruto (texto
+  isolado e null recusados; `[]` e `[x]` válidos). JSON inválido após
+  sucesso grava falha nova apenas se houver preparo verificável; sem
+  ele, erro ao Agendador sem criar pasta.
+- **Roteiro:** README sem `-ExecutionPolicy Bypass`, `schtasks` sem
+  `/F`, troca de horário/destino documentada (destino novo = pasta de
+  estado nova, validada antes de apontar a tarefa).
+
+Suíte: **118/118** em pwsh (com `MACIP_RESTIC_REAL`). Prova real de
+DPAPI/Agendador/SFTP continua pendente de VM Windows descartável.
+
+## Agente Windows — vínculo SSH efetivo e exclusoes no objeto (review 3)
+
+Sobre `5136b5b`, mesma branch.
+
+- **Vínculo SSH efetivo:** `preparo.json` agora registra caminhos
+  resolvidos + SHA-256 de identidade e known_hosts **e** o SHA-256 do
+  `ssh_config` gerado. `Backup` confere tudo antes de chamar o Restic:
+  cópia com bytes idênticos em outro caminho é recusada (o SSH lê o
+  caminho do preparo), `ssh_config` adulterado/ausente é recusado e
+  preparo legado sem os novos campos é recusado — nada de regravar
+  ssh_config fora do preparo.
+- **exclusoes:** validação sobre o objeto interpretado
+  (`-is [object[]]`), sem regex no JSON bruto; chave duplicada usa o
+  último valor como o ConvertFrom-Json — documentado no código e no
+  README. `[]`, `[x]`, espaços e acentos preservados.
+
+Suíte: **129/129** em pwsh, incluindo duplicata, cópia idêntica,
+ssh_config adulterado/ausente, preparo legado e mutação válida de
+exclusões/horário — todos com prova de que o Restic não foi chamado.
+Prova com Restic 0.18.1 real + ssh registrador mantida verde nas duas
+formas de endereço. VM Windows continua pendente.
+
+## Agente Windows — evidência de laboratório e roteiro do piloto
+
+Sobre `5a2f3f8`, mesma branch. Registro de prova real + documento do
+piloto (`docs/piloto-windows-sftp.md`); nenhuma linha de agente/API/
+portal alterada.
+
+**Homologação de laboratório (11/11/2026 14h22, Brasília):** Agendador
+disparou o agente `5a2f3f8` em Windows PowerShell 5.1 com a sessão
+encerrada — rc `0` no Agendador e no Restic, `status: sucesso`.
+Snapshot `f0d283ee…3aa823a`; `restic check --read-data` sem erros no
+SFTP; restauração independente da VM com `amostra.txt` (43 B, SHA-256
+`18c4b63c…fc56`); origem com espaço/acento; `ignorar.tmp` e
+`cache temporário.log` excluídos conforme configurado. Classificado
+como laboratório — não é aceite de cliente nem produção.
+
+Roteiro do piloto: ficha (autorização, pasta, exclusões, horário,
+janela, retenção, alertas, meta), preparação MAC IP (repo exclusivo,
+chave do servidor conferida, senha custodiada, **cópia protegida** com
+prova fictícia de separação e restauração antes de dados reais —
+pendência se a infra não oferecer), instalação (kit do SHA, Preparar na
+conta de lote, tarefa nova, disparo único com sessão encerrada antes do
+diário), acompanhamento de 7 disparos com alertas de falha e de
+ausência (integração Windows-portal = **pendência**, verificação manual
+na ficha), aceite exigindo os 7 disparos + 2 alertas + restaurações
+(ponto recente e anterior, uma delas da cópia protegida) e interrupção
+preservando repositório/logs/snapshots. Piloto **não iniciado**.
+
+---
+
+## 2026-11-12 — Correções do roteiro do piloto Windows e provas pendentes
+
+Entrega **documental** sobre `968a989` (branch
+`feature/windows-pilot-agent`), sem alterar agente Windows/Linux, API
+ou portal. Três correções no `docs/piloto-windows-sftp.md`:
+
+1. **Identidade do pacote:** o ZIP instalado na prova foi
+   `macip-agente-windows-5a2f3f8.zip` (SHA-256 `4d9489626e…945be0`), não
+   o ZIP de fontes `agente-windows-5a2f3f882fb1.zip` — referências
+   corrigidas na evidência e na instalação; a verificação agora
+   **aborta** se o arquivo estiver ausente ou o hash divergir.
+2. **Disparo real sem sessão:** substituídos `schtasks /Run` +
+   `/Change /SC DAILY` pelo fluxo validado na interface do Agendador —
+   mesma conta do `Preparar`, "executar estando o usuário conectado ou
+   não", argumentos conferidos sem prefixo de lista (`1. `), disparador
+   **único** no futuro, `NextRunTime` conferido, sessão encerrada,
+   `LastRunTime`/`LastTaskResult`/`ultimo-resultado.json` novo
+   correlacionados, e só depois o disparador **diário** na interface.
+   Senha apenas na janela nativa; falta de logon em lote vai para o
+   administrador.
+3. **Restauração na MAC IP:** procedimento executável com variáveis e
+   pré-condições — conferir o ID do repositório, senha pelo cofre via
+   `RESTIC_PASSWORD_COMMAND` (nunca impressa nem em argumentos),
+   `check --read-data`, `snapshots`/`ls` para localizar o snapshot e a
+   subpasta da origem, restore em diretório novo, manifesto SHA-256 e
+   verificação das exclusões.
+
+**Duas provas pendentes escritas para execução com dados fictícios:**
+seção 6 — **cópia protegida** (preflight de capacidade/isolamento,
+cópia consistente com `check --read-data`, sentinela descartável que a
+credencial do cliente não pode alterar/apagar, restauração só pela
+cópia sem primário nem Windows; append-only no primário não conta e
+isolamento no mesmo disco não prova sobrevivência; decisão de
+armazenamento pendente com critérios, sem presumir tecnologia). Seção 7
+— **alertas** (execução com falha/incompleta e ausência de resultado
+novo ao fim da janela: responsável, prazo, correlação
+`inicio_utc`×`LastRunTime`, evidência de recebimento; resultado antigo
+ou ausente não prova que a tarefa nunca rodou; conferência manual como
+medida provisória — integração Windows→portal segue **não
+comprovada**).
+
+README do agente passou a citar o pacote efetivamente instalado e a
+evidência como relatada pelo operador. Piloto continua **não iniciado**:
+depende de autorização registrada + prova da cópia protegida aprovada.
+Verificações: comandos conferidos contra `-Modo/-Config/-DiretorioEstado/
+-ResticExe`; exemplos JSON/hash sem segredos; `git diff --check` limpo.
+
+---
+
+## 11/11/2026 — Homologação Windows: cópia protegida e avisos operacionais
+
+Evidências de laboratório **relatadas pelo operador** (horários de
+Brasília). Estes resultados vêm do relato — não foram reexecutados por
+esta sessão. O piloto com dados reais **não começou**.
+
+**Restauração pela cópia:** o snapshot sintético `f0d283ee…` foi copiado
+com `restic copy` para um repositório novo e transferido para o PC
+Linux de desenvolvimento. O pacote passou na conferência SHA-256 e
+`restic check --read-data` não encontrou erros na cópia. O snapshot de
+destino
+`91f1a49ce0dca9408bad49a555fa94f96a6f54c58582bbe50b4dfafe8c443e3e` foi
+restaurado usando somente a cópia local, sem depender do repositório
+primário nem da VM Windows. `amostra.txt` bateu com o SHA-256 esperado
+e os arquivos excluídos não apareceram.
+
+**Separação de acesso:** no `srvdev1`, a conta `macipsftpwinlab`
+tentou alterar e apagar uma sentinela descartável no diretório privado
+de exportação. As duas operações foram negadas e o SHA-256 da sentinela
+ficou intacto. Essa prova cobre as permissões da exportação **no
+laboratório** — o armazenamento definitivo para dados de clientes ainda
+precisa ser escolhido e testado.
+
+**Avisos operacionais — conferência manual dos dois cenários:**
+
+- **15h39 — Falha registrada:** o Agendador disparou a tarefa
+  `MACIP-Restic-WinLab-Alertas` e retornou `1`. O JSON novo registrou
+  `status: falha`, `codigo_restic: null`, `snapshot: null` — a origem
+  fictícia estava indisponível de propósito e o agente registrou a
+  falha antes de chamar o Restic.
+- **15h59 — Sem resultado novo na janela:** disparo previsto para
+  15h57, tolerância de 2 minutos. Ao fim da janela, o disparador
+  continuava desabilitado, a última execução seguia a das 15h39 e o
+  SHA-256 do `ultimo-resultado.json` permaneceu inalterado — caso
+  classificado como **"sem resultado novo na janela"**.
+
+Os dois cenários foram conferidos **manualmente**. Não há evidência de
+confirmação de recebimento por outro responsável nem de envio
+automático de alertas — a integração Windows → portal segue não
+comprovada.
+
+**Continuam pendentes:** autorização registrada do cliente e validação
+da cópia protegida no armazenamento definitivo.

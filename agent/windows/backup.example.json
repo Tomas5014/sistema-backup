@@ -1,0 +1,12 @@
+{
+  "origem": "D:\\Dados\\ClienteExemplo",
+  "exclusoes": [
+    "*.tmp",
+    "cache local\\*"
+  ],
+  "repositorio": "sftp:cliente-exemplo@10.10.20.240:/backup/cliente-exemplo",
+  "horario": "02:30",
+  "repositorio_id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "identidade_ssh": "C:\\MACIP\\identidade\\cliente-exemplo_ed25519",
+  "known_hosts": "C:\\MACIP\\identidade\\known_hosts"
+}

@@ -1,0 +1,29 @@
+# Simula restic.exe para os testes. Registra argv e ambiente, responde
+# conforme arquivos em $env:RESTIC_STUB_DIR:
+#   version (se presente, saida de "restic version")
+#   id        ID que "cat config" devolve
+#   code      codigo de saida de "backup"
+#   snapshot  snapshot_id do resumo JSON (ausente = backup sem resumo)
+$d = $env:RESTIC_STUB_DIR
+$logArgs = Join-Path $d 'args.log'
+[IO.File]::WriteAllLines((Join-Path $d 'last-args.txt'), [string[]]$args)
+[IO.File]::AppendAllText($logArgs, ([string]::Join("`n", [string[]]$args) + "`n---`n"))
+$senha = if ($env:RESTIC_PASSWORD) { 'DEFINIDA' } else { 'AUSENTE' }
+[IO.File]::AppendAllText((Join-Path $d 'env.log'), "RESTIC_PASSWORD=$senha`n")
+$global:LASTEXITCODE = 0
+if ($args -contains 'version') {
+    if (Test-Path (Join-Path $d 'version')) { Write-Output (Get-Content (Join-Path $d 'version') -Raw).Trim() }
+    else { Write-Output 'restic 0.18.1 compiled with go1.24.5 on windows/amd64' }
+}
+elseif ($args -contains 'cat') {
+    $id = (Get-Content (Join-Path $d 'id') -Raw).Trim()
+    Write-Output ('{"version":2,"id":"' + $id + '","chunker_polynomial":"00"}')
+}
+elseif ($args -contains 'backup') {
+    $snap = ''
+    if (Test-Path (Join-Path $d 'snapshot')) { $snap = (Get-Content (Join-Path $d 'snapshot') -Raw).Trim() }
+    if ($snap) {
+        Write-Output ('{"message_type":"summary","files_new":3,"snapshot_id":"' + $snap + '"}')
+    }
+    $global:LASTEXITCODE = [int](Get-Content (Join-Path $d 'code') -Raw)
+}
