@@ -1479,3 +1479,44 @@ Restic real 0.18.1 (Linux): prova anterior de `ls --json`/`dump`/
 SHA-256 mantida. **Pendente:** mesma lista — VM Windows limpa, build
 NSIS com restic.exe aprovado, prova real de COM/DPAPI/junction;
 instalador segue nao compilado neste ambiente.
+
+## Revisao 5 (branch feature/windows-backup-gui-pilot)
+
+1. **Agendador preciso:** `Get-TarefaInfo` (GUI e `Desinstalar-Tarefa.ps1`)
+   separa falha de conexao/pasta da consulta; 'ausente' SOMENTE quando o
+   proprio `GetTask` devolve 0x80070002 — cadeia de InnerException cobre
+   o empacotamento COM do PowerShell; texto de excecao e retorno vazio
+   nunca provam ausencia (retorno inesperado = inconclusivo). Registro
+   separa TASK_CREATE(2) — falha se homonima surgir entre consulta e
+   cadastro — de TASK_UPDATE(4); rollback usa UPDATE e so repoe se a
+   tarefa atual for confirmadamente a def publicada pela tentativa
+   (propriedade + argumentos conferidos); sem confirmacao, preserva.
+   Limpeza exige sem referencia E sem instancia ativa/pendente
+   (`GetInstances`).
+2. **Propriedade por campos:** regra compartilhada GUI/desinstalador —
+   descricao EXATA do app, UMA acao, executavel powershell.exe e
+   argumento `-File` igual ao caminho absoluto NORMALIZADO de
+   `Backup-MacipCliente.ps1` da instalacao; prefixo parecido
+   (`MACIP-Backup2`), caminho em outro argumento e acoes ambiguas sao
+   recusados. Desinstalacao: desabilita primeiro, para instancias,
+   RE-consulta e so libera com Enabled=false + contagem COM de
+   instancias zero; falta de visibilidade = inconclusivo, preserva.
+   Remocao de arquivos por nome, sem curinga.
+3. **Publicacao do arquivo:** dump continua com stdout/stderr em
+   paralelo; o temporario exclusivo so vira o nome final depois de
+   codigo 0 + copia de stdout concluida sem erro + fechamento ok.
+   Falha de escrita (mesmo apos bytes gravados) = FALHA mesmo com
+   restic 0. Prazo cobre processo E leituras; qualquer falha fecha
+   recursos e remove so o parcial da tentativa.
+
+Regressoes novas: texto "not found" com HRESULT errado -> inconclusivo
+(recusado); homonima entre consulta e cadastro -> CREATE falha e ela
+fica intacta; -File em prefixo parecido e caminho so em outro
+argumento -> recusados; def trocada apos registro -> sem reposicao e
+arquivos preservados; instancia pendente bloqueia a limpeza; falha de
+escrita com restic 0 -> nada publicado; desinstalacao: re-consulta
+falha, Enabled persiste true e consulta de instancias negada ->
+preservar. `run-gui-tests.ps1` **130/130**; agente **119/119**;
+`unittest` **5/5**; `git diff --check` limpo; arquivos ps1 ASCII.
+Pendente sem mudanca: VM Windows limpa, build NSIS com restic.exe
+aprovado e prova real de COM/DPAPI/junction — instalador NAO compilado.

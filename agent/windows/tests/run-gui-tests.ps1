@@ -89,19 +89,36 @@ try {
         # NOVAS a cada chamada -- mutacoes locais nao vazam para o gravado,
         # como no COM real).
         param([string[]]$FalharEm = @(), [bool]$TemEstranha = $false)
-        $b = [pscustomobject]@{ defData = $null; registros = 0; falha = $FalharEm; estado = 1; runs = 0 }
+        $b = [pscustomobject]@{ defData = $null; registros = 0; falha = $FalharEm; estado = 1; runs = 0; inst = 0 }
         if ($TemEstranha) {
             $b.defData = @{ descricao='Manutencao da empresa'; userId='OUTRO\usuario'; logon=1
                             enabled=$true; args='-File C:\outra\coisa.ps1'; trigger='' }
         }
+        $b | Add-Member ScriptMethod Conectar {
+            if ($this.falha -contains 'conectar') { throw 'Servico do Agendador indisponivel (simulado)' }
+        }
         $b | Add-Member ScriptMethod Get {
-            if ($this.falha -contains 'gettask') { throw 'Acesso negado a tarefa (simulado)' }
+            if ($this.falha -contains 'gettask') {
+                throw ([Runtime.InteropServices.COMException]::new('Acesso negado (simulado)', -2147024891))
+            }
+            # texto "not found" com HRESULT ERRADO -> inconclusivo, NAO ausente
+            if ($this.falha -contains 'gettask-txt') {
+                throw ([Runtime.InteropServices.COMException]::new('odd not found text', -2147023085))
+            }
+            # "ausente" mentiroso: devolve nao-encontrada MESMO com tarefa
+            # gravada -- o CREATE abaixo e quem barra a colisao real.
+            if ($this.falha -contains 'ausente-falsa') {
+                throw ([Runtime.InteropServices.COMException]::new('nao existe', -2147024894))
+            }
             # falha temporizada: consulta quebra SOMENTE apos um registro ter
             # acontecido (cenario "acesso negado logo apos registrar").
             if (($this.falha -contains 'gettask-pos-reg') -and ($this.registros -gt 0)) {
-                throw 'Acesso negado a tarefa (simulado)'
+                throw ([Runtime.InteropServices.COMException]::new('Acesso negado (simulado)', -2147024891))
             }
-            if (-not $this.defData) { return $null }
+            if (-not $this.defData) {
+                # como o COM real: tarefa inexistente THROW 0x80070002 -- nao $null
+                throw ([Runtime.InteropServices.COMException]::new('nao existe', -2147024894))
+            }
             $d = Set-DefData -Def (New-DefFalsa) -D $this.defData
             # formato REAL do COM: Principal fica em Definition.Principal --
             # NAO existe Principal de primeiro nivel na tarefa.
@@ -113,14 +130,28 @@ try {
                 bk=$this
             }
             $t | Add-Member ScriptMethod Run { param($x) $this.bk.runs++; $this.State = 4 } | Out-Null
+            $t | Add-Member ScriptMethod GetInstances { param($n)
+                # ," preserva a colecao vazia -- return puro viraria $null
+                return ,(New-Object 'object[]' $this.bk.inst) } | Out-Null
             return $t
         }
         $b | Add-Member ScriptMethod NewDef { param($Tarefa)
             return (New-DefFalsa)   # sempre copia nova -- o registrado fica intacto
         }
-        $b | Add-Member ScriptMethod Registrar { param($Def,$Conta,$SenhaConta)
+        $b | Add-Member ScriptMethod Registrar { param($Def,$Conta,$SenhaConta,[int]$Flag)
             if ($this.falha -contains 'registrar') { throw 'Permissao negada (simulada)' }
+            # homonima aparece ENTRE a consulta e o cadastro: CREATE (2) deve
+            # falhar sem sobrescreve-la (como o COM real faria).
+            if ($Flag -eq 2 -and $this.defData) { throw 'Ja existe uma tarefa com esse nome' }
+            if ($Flag -eq 4 -and -not $this.defData) { throw 'A tarefa nao existe' }
+            # 're-registrar': outra definicao toma o lugar logo apos o nosso
+            # registro (simula re-registro concorrente).
             $this.registros++
+            if ($this.falha -contains 're-registrar') {
+                $this.defData = @{ descricao='Manutencao da empresa'; userId='OUTRO\usuario'; logon=1
+                                  enabled=$true; args='-File C:\outra\coisa.ps1'; trigger='' }
+                return
+            }
             $this.defData = Get-DefData -Def $Def
             $this.defData.userId = $Conta
         }
@@ -131,7 +162,8 @@ try {
                                enabled=[bool]$d.enabled; args=[string]$d.args; trigger=[string]$d.trigger }
         }
         $b | Add-Member ScriptMethod XmlAtual {
-            if ($this.defData) { return ($this.defData | ConvertTo-Json -Compress) } else { return $null }
+            try { if ($this.defData) { return ($this.defData | ConvertTo-Json -Compress) } else { return $null } }
+            catch { return $null }
         }
         return $b
     }
@@ -242,13 +274,35 @@ try {
     throws { Set-TarefaHabilitada $false } 'consulta negada: pausa recusada'
     throws { Start-TarefaAgora } 'consulta negada: executar agora recusado'
 
+    # texto "not found" com HRESULT errado -> INCONCLUSIVO (nao ausente)
+    $script:Backend = New-BackendFalso -FalharEm @('gettask-txt')
+    throws { Register-TarefaMacip -Horario '02:30' -Conta 'X' -SenhaConta 'y' -Config 'c' -Estado 'e' } 'texto "not found" sem codigo: inconclusivo, recusado'
+    eq $script:Backend.registros 0 'texto "not found": nenhum registro tentado'
+    # falha de SERVICO (conexao ao COM) -> inconclusivo
+    $script:Backend = New-BackendFalso -FalharEm @('conectar')
+    throws { Register-TarefaMacip -Horario '02:30' -Conta 'X' -SenhaConta 'y' -Config 'c' -Estado 'e' } 'falha de conexao COM: registro recusado'
+    eq $script:Backend.registros 0 'falha de conexao: nenhum registro tentado'
+
+    # homonima criada ENTRE consulta e cadastro: CREATE falha sem tocar nela
+    $script:Backend = New-BackendFalso -TemEstranha $true -FalharEm @('ausente-falsa')
+    throws { Register-TarefaMacip -Horario '02:30' -Conta 'X' -SenhaConta 'y' -Config 'c' -Estado 'e' } 'homonima entre consulta e cadastro: CREATE falha'
+    eq $script:Backend.defData.descricao 'Manutencao da empresa' 'homonima entre consulta e cadastro: estranha intacta'
+
+    # propriedade pela ACAO: marca certa na descricao + -File em outro lugar
+    $script:Backend = New-BackendFalso
+    $script:Backend.defData = @{ descricao='MACIP Backup - agente de backup do piloto'; userId='X'; logon=1
+                                 enabled=$true; args='-File "C:\outro\Backup-MacipCliente.ps1" -Modo Backup'; trigger='' }
+    throws { Register-TarefaMacip -Horario '02:30' -Conta 'X' -SenhaConta 'y' -Config 'c' -Estado 'e' } 'marca na descricao mas -File estranho: recusado'
+    $script:Backend.defData.args = '-Modo Backup "C:\Program Files\MACIP-Backup\Backup-MacipCliente.ps1"'
+    throws { Register-TarefaMacip -Horario '02:30' -Conta 'X' -SenhaConta 'y' -Config 'c' -Estado 'e' } 'caminho so em outro argumento (sem -File): recusado'
+
     # ---- Executar agora: SID da tarefa == SID do preparo (estado real) ----
     # A conta do preparo (preparo.json em $b1.Estado) e a conta atual do teste.
     $contaPrep = (Get-IdentidadeAtual).Nome
     $script:Backend = New-BackendFalso
     $script:Backend.defData = @{ descricao='MACIP Backup - agente de backup do piloto'; userId=$contaPrep
                                  logon=1; enabled=$true
-                                 args=('-DiretorioEstado "{0}" -Config "{1}"' -f $b1.Estado, $b1.Config); trigger='' }
+                                 args=('-File "{0}" -Modo Backup -DiretorioEstado "{1}" -Config "{2}"' -f $script:AgentePath, $b1.Estado, $b1.Config); trigger='' }
     $script:Backend.estado = 4
     throws { Start-TarefaAgora } 'execucao em andamento: novo disparo recusado'
     eq $script:Backend.runs 0 'em execucao: zero chamadas a Run'
@@ -269,7 +323,7 @@ try {
     # estado sem preparo.json -> sem identidade verificavel -> recusa
     $estadoVazio = Join-Path $tmp 'estado-sem-preparo'; New-Item -ItemType Directory $estadoVazio | Out-Null
     $script:Backend.defData.userId = $contaPrep
-    $script:Backend.defData.args = '-DiretorioEstado "{0}" -Config "{1}"' -f $estadoVazio, $b1.Config
+    $script:Backend.defData.args = '-File "{0}" -Modo Backup -DiretorioEstado "{1}" -Config "{2}"' -f $script:AgentePath, $estadoVazio, $b1.Config
     throws { Start-TarefaAgora } 'estado sem preparo.json: disparo recusado'
     eq $script:Backend.runs 1 'sem preparo verificavel: zero chamadas novas a Run'
 
@@ -346,6 +400,33 @@ try {
     ok (Test-Path -LiteralPath $builtE.Config -PathType Leaf) 'reposicao inconclusiva: arquivos preservados'
     $script:Backend.falha = @()
     $script:FalhaSaveMeta = $false
+
+    # caso F: entre o registro e a reposicao, a def foi TROCADA por outra
+    # (re-registro concorrente) -> NAO repoe; arquivos preservados.
+    $script:Backend = New-BackendFalso
+    $script:Backend.Registrar($defAntiga4, $contaPrep, 'w')
+    $script:FalhaSaveMeta = $true
+    $builtF = Build-Configuracao -Perfil $null -ChavePath '' -SenhaRestic $null -Origem $origem -Exclusoes @() -Horario '10:00'
+    $script:Backend.falha = @('re-registrar')
+    throws { Publish-Configuracao -Built $builtF -Conta $contaPrep -SenhaConta 'w' } 'pub falhou (def trocada): excecao propagada'
+    ok (Test-Path -LiteralPath $builtF.Config -PathType Leaf) 'def trocada: arquivos preservados'
+    eq $script:Backend.defData.descricao 'Manutencao da empresa' 'def trocada: estranha nao foi reposta por cima'
+    $script:Backend.falha = @()
+    $script:FalhaSaveMeta = $false
+
+    # instancia ATIVA/PENDENTE bloqueia a limpeza do conjunto
+    $script:Backend = New-BackendFalso
+    $script:Backend.defData = @{ descricao='MACIP Backup - agente de backup do piloto'; userId=$contaPrep; logon=1
+                                 enabled=$true
+                                 args=('-File "{0}" -Modo Backup -DiretorioEstado "{1}" -Config "{2}"' -f $script:AgentePath, $b1.Estado, $b1.Config); trigger='' }
+    $script:Backend.inst = 1
+    $builtG = Build-Configuracao -Perfil $null -ChavePath '' -SenhaRestic $null -Origem $origem -Exclusoes @() -Horario '10:30'
+    $avisoG = Remove-ConjuntoNovo -Built $builtG
+    ok ($null -ne $avisoG) 'instancia ativa/pendente: conjunto preservado com aviso'
+    ok (Test-Path -LiteralPath $builtG.Config -PathType Leaf) 'instancia ativa/pendente: arquivos intactos'
+    $script:Backend.inst = 0
+    Remove-ConjuntoNovo -Built $builtG | Out-Null
+    ok (-not (Test-Path -LiteralPath $builtG.ConfigDir)) 'sem instancia: conjunto removido'
 
     # ---- conta do preparo diverge da sessao: reuso de estado recusado ----
     $prepFile = Join-Path $b1.Estado 'preparo.json'
@@ -459,6 +540,13 @@ try {
     $script:DumpTimeoutMs = 600000
     Remove-Item -LiteralPath (Join-Path $stubDir 'dump-sleep') -Force
 
+    # falha de ESCRITA com restic retornando 0 -> FALHA, nada publicado
+    $script:DumpStreamFail = $true
+    $dest10 = Join-Path $tmp 'dest-writefail'; New-Item -ItemType Directory $dest10 | Out-Null
+    throws { Invoke-ResticDump -Cfg $cfgOp -Estado $estado -Snapshot ('c'*64) -Arquivo '/o/a[1].txt' -Destino $dest10 } 'restaurar: falha de escrita -> erro mesmo com restic 0'
+    eq (Get-ChildItem -LiteralPath $dest10 -Force | Measure-Object).Count 0 'restaurar: falha de escrita -- nada publicado nem parcial'
+    $script:DumpStreamFail = $false
+
     # arquivo BINARIO com nome de padrao: SHA-256 confere byte a byte
     $bin = New-Object byte[] 256
     for ($i = 0; $i -lt 256; $i++) { $bin[$i] = [byte]$i }
@@ -476,28 +564,43 @@ try {
         param([string]$Desc = 'MACIP Backup - agente de backup do piloto',
               [string]$ArgsAcao = '-NoProfile -File "C:\Program Files\MACIP-Backup\Backup-MacipCliente.ps1" -Modo Backup',
               [int]$Instancias = 0, [bool]$FalhaEnabled = $false,
-              [bool]$NaoPara = $false, [bool]$FalhaInstancias = $false)
+              [bool]$NaoPara = $false, [bool]$FalhaInstancias = $false, [bool]$NaoDesabilita = $false)
         $t = [pscustomobject]@{ _en = $true; nInst = $Instancias; falhaEn = $FalhaEnabled
-                                naoPara = $NaoPara; falhaInst = $FalhaInstancias; stops = 0; State = 1 }
+                                naoPara = $NaoPara; falhaInst = $FalhaInstancias; stops = 0; State = 1
+                                naoDesab = $NaoDesabilita }
         $t | Add-Member ScriptProperty Enabled { return $this._en } {
-            param($v) if ($this.falhaEn) { throw 'falha ao desabilitar (simulada)' }; $this._en = [bool]$v }
+            param($v) if ($this.falhaEn) { throw 'falha ao desabilitar (simulada)' }
+                      if ($this.naoDesab) { return }; $this._en = [bool]$v }
         $ri = [pscustomobject]@{ Description = $Desc }
         $ac = [pscustomobject]@{ a1 = ([pscustomobject]@{ Path = 'powershell.exe'; Arguments = $ArgsAcao }) }
+        $ac | Add-Member ScriptProperty Count { return 1 }
         $ac | Add-Member ScriptMethod Item { param($i) return $this.a1 }
         $df = [pscustomobject]@{ RegistrationInfo = $ri; Actions = $ac }
         $t | Add-Member NoteProperty Definition $df
         $t | Add-Member ScriptMethod GetInstances { param($n)
             if ($this.falhaInst) { throw 'acesso negado a instancias (simulado)' }
-            return (New-Object 'object[]' $this.nInst) }
+            return ,(New-Object 'object[]' $this.nInst) }
         $t | Add-Member ScriptMethod Stop { param($x) $this.stops++; if (-not $this.naoPara) { $this.nInst = 0 } }
         return $t
     }
-    function New-SvcFalso { param($Tarefa = $null, [string]$ErroGet = '')
-        $s = [pscustomobject]@{ t = $Tarefa; eg = $ErroGet }
+    function New-SvcFalso { param($Tarefa = $null, [string]$ErroGet = '', [int]$ErroDepois = 0)
+        $s = [pscustomobject]@{ t = $Tarefa; eg = $ErroGet; ed = $ErroDepois; chamadas = 0 }
         $s | Add-Member ScriptMethod GetFolder { param($p) return $this }
         $s | Add-Member ScriptMethod GetTask { param($n)
-            if ($this.eg) { throw $this.eg }
-            if (-not $this.t) { throw 'The system cannot find the file specified' }
+            $this.chamadas++
+            if ($this.eg) {
+                # 'naoexiste' -> codigo de tarefa inexistente; outro texto -> acesso
+                if ($this.eg -eq 'naoexiste') {
+                    throw ([Runtime.InteropServices.COMException]::new('nao existe', -2147024894))
+                }
+                throw ([Runtime.InteropServices.COMException]::new($this.eg, -2147024891))
+            }
+            if ($this.ed -gt 0 -and $this.chamadas -gt $this.ed) {
+                throw ([Runtime.InteropServices.COMException]::new('re-consulta negada', -2147024891))
+            }
+            if (-not $this.t) {
+                throw ([Runtime.InteropServices.COMException]::new('nao existe', -2147024894))
+            }
             return $this.t }
         return $s
     }
@@ -521,6 +624,16 @@ try {
     eq (Invoke-DesinstalacaoTarefa) 4 'uninstall: falha ao desabilitar -> preservar'
     $Svc = New-SvcFalso -Tarefa (New-TarefaFalsa -FalhaInstancias $true)
     eq (Invoke-DesinstalacaoTarefa) 4 'uninstall: consulta de instancias negada -> preservar'
+    $Svc = New-SvcFalso -Tarefa (New-TarefaFalsa -ArgsAcao '-File "C:\Program Files\MACIP-Backup2\Backup-MacipCliente.ps1"')
+    eq (Invoke-DesinstalacaoTarefa) 3 'uninstall: prefixo parecido (MACIP-Backup2) -> preservada'
+    $Svc = New-SvcFalso -Tarefa (New-TarefaFalsa) -ErroDepois 1
+    eq (Invoke-DesinstalacaoTarefa) 4 'uninstall: re-consulta falha -> preservar'
+    $Svc = New-SvcFalso -Tarefa (New-TarefaFalsa -NaoDesabilita $true)
+    eq (Invoke-DesinstalacaoTarefa) 4 'uninstall: Enabled nao ficou false -> preservar'
+    $Svc = New-SvcFalso -Tarefa (New-TarefaFalsa -ArgsAcao '-Modo Backup "C:\Program Files\MACIP-Backup\Backup-MacipCliente.ps1"')
+    eq (Invoke-DesinstalacaoTarefa) 3 'uninstall: caminho sem -File -> preservada'
+    $Svc = New-SvcFalso -ErroGet 'Acesso negado'
+    eq (Invoke-DesinstalacaoTarefa) 4 'uninstall: texto de erro qualquer -> inconclusivo (nao ausente)'
 
     # ---- agendamento COM real (so no Windows) ----
     if (Test-IsWindows) {

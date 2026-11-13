@@ -48,6 +48,9 @@ $script:TaskName   = 'MACIP-Backup'
 $script:AgentePath = $AgentePath
 $script:LogonPassword = 1   # TASK_LOGON_PASSWORD = 1 (o 2 e S4U -- sem DPAPI/rede)
 $script:TaskMarker    = 'MACIP Backup'
+$script:TaskDescricao = "$($script:TaskMarker) - agente de backup do piloto"
+$script:TaskCreate    = 2   # TASK_CREATE   -- FALHA se a tarefa ja existir
+$script:TaskUpdate    = 4   # TASK_UPDATE   -- FALHA se a tarefa nao existir
 $script:DumpTimeoutMs = 600000   # restauracao: 10 min -- alem disso Kill + parcial fora
 $script:Backend       = $null   # injetavel nos testes; padrao COM no Windows
 
@@ -170,24 +173,26 @@ function New-BackendCom {
         return $this.svc.NewTask(0)
     }
     $b | Add-Member ScriptMethod Registrar {
-        param($Def, $Conta, $SenhaConta)
+        # $Flag: TASK_CREATE (2) = so se nao existir (falha se uma homonima
+        # aparecer entre a consulta e aqui -- NUNCA sobrescreve a estranha);
+        # TASK_UPDATE (4) = so se existir. Sem CREATE_OR_UPDATE cego.
+        param($Def, $Conta, $SenhaConta, [int]$Flag)
         $this.Conectar()
-        # 6 = TASK_CREATE_OR_UPDATE | TASK_LOGON_PASSWORD (1): conta com
-        # senha -- token completo (rede + DPAPI) mesmo sem sessao aberta.
         $this.svc.GetFolder('\').RegisterTaskDefinition(
-            $script:TaskName, $Def, 6, $Conta, $SenhaConta, $script:LogonPassword, $null) | Out-Null
+            $script:TaskName, $Def, $Flag, $Conta, $SenhaConta, $script:LogonPassword, $null) | Out-Null
     }
     $b | Add-Member ScriptMethod RegistrarXml {
+        # Rollback com TASK_UPDATE: repoe a definicao anterior exatamente
+        # como estava (XML serializado ANTES de qualquer alteracao); falha
+        # se a tarefa sumiu entre a tentativa e a reposicao.
         param([string]$Xml, $Conta, $SenhaConta)
         $this.Conectar()
-        # Rollback: repoe a definicao anterior exatamente como estava (XML
-        # serializado ANTES de qualquer alteracao -- um objeto Definition
-        # reusado poderia ja vir modificado).
         $this.svc.GetFolder('\').RegisterTask(
-            $script:TaskName, $Xml, 6, $Conta, $SenhaConta, $script:LogonPassword, $null) | Out-Null
+            $script:TaskName, $Xml, $script:TaskUpdate, $Conta, $SenhaConta, $script:LogonPassword, $null) | Out-Null
     }
     $b | Add-Member ScriptMethod XmlAtual {
-        $t = $this.Get(); if ($t) { return [string]$t.Xml } else { return $null }
+        try { $t = $this.Get() } catch { return $null }   # sem tarefa -> sem XML
+        if ($t) { return [string]$t.Xml } else { return $null }
     }
     return $b
 }
@@ -195,34 +200,70 @@ function New-BackendCom {
 function Get-TarefaInfo {
     # Consulta estruturada a tarefa do app. Status:
     #   encontrada  -> objeto em .Tarefa
-    #   ausente     -> ausencia CONFIRMADA (GetTask disse "nao existe"/null)
-    #   erro        -> consulta inconclusiva (acesso negado, falha COM...)
-    # A GUI so cadastra tarefa nova com ausencia confirmada e so atualiza
-    # tarefa com propriedade verificada; inconclusivo = recusa.
+    #   ausente     -> ausencia CONFIRMADA (o proprio GetTask devolveu o
+    #                  codigo de "tarefa inexistente", HRESULT 0x80070002)
+    #   erro        -> inconclusivo (falha de conexao, pasta, acesso...)
+    # NADA de texto de excecao nem retorno vazio como prova de ausencia:
+    # so o codigo especifico do GetTask classifica 'ausente'.
     $b = Get-Backend
+    try { $b.Conectar() } catch {
+        return [pscustomobject]@{ Tarefa = $null; Status = 'erro'
+            Erro = "servico/pasta do Agendador indisponivel: $($_.Exception.Message)" }
+    }
     try {
         $t = $b.Get()
     } catch {
-        $hr = $null
-        try { $hr = $_.Exception.HResult } catch { }
+        # O PowerShell empacota a excecao COM (MethodInvocation) -- procura
+        # o HRESULT na cadeia interna inteira.
+        $hrOk = $false; $e = $_.Exception
+        while ($null -ne $e) {
+            try { if ($e.HResult -eq -2147024894) { $hrOk = $true; break } } catch { }
+            $e = $e.InnerException
+        }
         $msg = [string]$_.Exception.Message
-        if ($hr -eq -2147024894 -or $msg -match 'cannot find|find the file|encontr|not found') {
+        if ($hrOk) {
             return [pscustomobject]@{ Tarefa = $null; Status = 'ausente'; Erro = $msg }
         }
         return [pscustomobject]@{ Tarefa = $null; Status = 'erro'; Erro = $msg }
     }
     if ($t) { return [pscustomobject]@{ Tarefa = $t; Status = 'encontrada'; Erro = $null } }
-    return [pscustomobject]@{ Tarefa = $null; Status = 'ausente'; Erro = $null }
+    # retorno inesperado/vazio NAO prova ausencia -- trata como inconclusivo
+    return [pscustomobject]@{ Tarefa = $null; Status = 'erro'; Erro = 'consulta devolveu tarefa vazia' }
+}
+
+function ConvertTo-CaminhoNormal {
+    # Normaliza separador e resolve o caminho absoluto NO WINDOWS; fora
+    # dele (so teste) devolve a forma textual -- comparacao exata dos
+    # dois lados.
+    param([string]$P)
+    $p2 = $P.Trim() -replace '/', '\'
+    if ($env:OS -ne 'Windows_NT') { return $p2 }
+    try { return [IO.Path]::GetFullPath($p2) } catch { return $p2 }
 }
 
 function Test-TarefaDoApp {
-    # Uma tarefa MACIP-Backup so e "nossa" quando traz a marca do aplicativo
-    # na descricao. Tarefa homonima estranha -> recusar qualquer alteracao.
+    # Propriedade EXIGE os campos esperados -- nunca so trecho de texto:
+    #   1. descricao EXATA publicada pelo app;
+    #   2. UMA unica acao de execucao (sem acoes ambiguas);
+    #   3. executavel = powershell.exe;
+    #   4. argumento -File apontando para o caminho ABSOLUTO e NORMALIZADO
+    #      do Backup-MacipCliente.ps1 desta instalacao (prefixo parecido
+    #      ou caminho em outro argumento nao comprovam nada).
     param($Tarefa)
     if (-not $Tarefa) { return $false }
     try {
-        $desc = [string]$Tarefa.Definition.RegistrationInfo.Description
-        return ($desc -like ('*' + $script:TaskMarker + '*'))
+        $def = $Tarefa.Definition
+        if ([string]$def.RegistrationInfo.Description -cne $script:TaskDescricao) { return $false }
+        if ([int]$def.Actions.Count -ne 1) { return $false }
+        $acao = $def.Actions.Item(1)
+        if ([string]$acao.Path -notlike '*powershell.exe') { return $false }
+        $args = [string]$acao.Arguments
+        if ($args -match '-File\s+"([^"]+)"') { $alvo = $Matches[1] }
+        elseif ($args -match '-File\s+(\S+)') { $alvo = $Matches[1] }
+        else { return $false }
+        $esperado = ConvertTo-CaminhoNormal -P $script:AgentePath
+        $real = ConvertTo-CaminhoNormal -P $alvo
+        return ($real -ieq $esperado)
     } catch { return $false }
 }
 
@@ -235,7 +276,7 @@ function Write-TaskDef {
     # Preenche a definicao: marca do app, acao do agente e disparo diario.
     param($Def, [string]$Horario, [string]$Config, [string]$Estado, [string]$Conta)
     if ($Horario -cnotmatch '^([01][0-9]|2[0-3]):[0-5][0-9]$') { throw "Horario invalido: $Horario" }
-    $Def.RegistrationInfo.Description = "$($script:TaskMarker) - agente de backup do piloto"
+    $Def.RegistrationInfo.Description = $script:TaskDescricao
     $Def.Settings.Enabled = $true
     $Def.Settings.MultipleInstances = 2            # IGNORE_NEW: nunca duas execucoes
     $Def.Settings.DisallowStartIfOnBatteries = $false
@@ -278,7 +319,10 @@ function Register-TarefaMacip {
     $xmlAnterior = $b.XmlAtual()                 # copia serializada -- imune a mutacao da def
     $def = $b.NewDef($t)
     Write-TaskDef -Def $def -Horario $Horario -Config $Config -Estado $Estado -Conta $Conta
-    $b.Registrar($def, $Conta, $SenhaConta)      # erro de permissao/credencial sobe para a tela
+    # CREATE no 1o cadastro: se uma homonima aparecer entre a consulta e o
+    # registro, a criacao FALHA sem tocar nela. UPDATE so na tarefa nossa.
+    $flag = $(if ($info.Status -eq 'ausente') { $script:TaskCreate } else { $script:TaskUpdate })
+    $b.Registrar($def, $Conta, $SenhaConta, $flag)   # erro de permissao/credencial sobe para a tela
     return $xmlAnterior
 }
 
@@ -560,18 +604,32 @@ function Invoke-ResticDump {
         try { $p = [Diagnostics.Process]::Start($psi) }
         catch { throw "Nao foi possivel iniciar o restic ($exe): $($_.Exception.Message)" }
         # stdout e stderr drenados EM PARALELO -- um pipe cheio nao trava o
-        # filho -- e WaitForExit vigia o tempo: processo pendurado e morto.
+        # filho. O prazo cobre a espera do processo E das leituras; uma
+        # falha de escrita e falha de restauracao MESMO com codigo 0.
+        $limite = [DateTime]::UtcNow.AddMilliseconds([int]$script:DumpTimeoutMs)
+        # seam de teste: falha de escrita apos a abertura do temporario
+        if ($script:DumpStreamFail) { try { $fs.Close() } catch { } }
         $outTask = $p.StandardOutput.BaseStream.CopyToAsync($fs)
         $errTask = $p.StandardError.ReadToEndAsync()
-        if (-not $p.WaitForExit([int]$script:DumpTimeoutMs)) {
+        $prazo = { [int][Math]::Max(0, ($limite - [DateTime]::UtcNow).TotalMilliseconds) }
+        if (-not $p.WaitForExit((& $prazo))) {
             try { $p.Kill() } catch { }
             try { $fs.Close() } catch { }; $fs = $null
             throw ("Restauracao excedeu o tempo limite de $([int]($script:DumpTimeoutMs / 60000)) " +
                 'minutos - arquivo parcial descartado.')
         }
-        try { $outTask.Wait() } catch { }
-        try { $fs.Close() } catch { }; $fs = $null
-        try { $err = [string]$errTask.Result } catch { $err = '(stderr ilegivel)' }
+        if (-not $outTask.Wait((& $prazo))) {
+            try { $p.Kill() } catch { }
+            throw 'Leitura do stdout do restic excedeu o tempo limite - parcial descartado.'
+        }
+        # erro de escrita no temporario (mesmo apos gravar bytes) = FALHA
+        try { $outTask.GetAwaiter().GetResult() | Out-Null }
+        catch { throw "Falha ao gravar o arquivo restaurado: $($_.Exception.Message)" }
+        try { $errTask.Wait((& $prazo)) | Out-Null } catch { }
+        # so fecha depois de confirmar a copia; fechamento falho = FALHA
+        try { $fs.Close() } catch { throw "Falha ao fechar o arquivo restaurado: $($_.Exception.Message)" }
+        $fs = $null
+        $err = try { [string]$errTask.Result } catch { '(stderr ilegivel)' }
         if ($p.ExitCode -ne 0) { throw "Falha na restauracao (restic $($p.ExitCode)): $err" }
         # Publica no nome final SOMENTE apos sucesso; File.Move falha se o
         # destino existir -- um arquivo que apareceu durante o dump (e qualquer
@@ -788,6 +846,9 @@ function Test-ConjuntoEmUso {
         if ($info.Status -ne 'encontrada') { return $false }
         $t = $info.Tarefa
         if ([int]$t.State -eq 4) { return $true }        # em execucao pode depender dele
+        # instancia ATIVA ou PENDENTE pode estar usando este conjunto
+        $inst = $t.GetInstances(0)
+        if ($null -eq $inst -or [int]$inst.Count -gt 0) { return $true }
         $c = Get-TaskArg -Nome 'Config'
         $e = Get-TaskArg -Nome 'DiretorioEstado'
         if ((-not $c) -or (-not $e)) { return $true }  # argumentos ilegiveis = nao confirmado
@@ -840,9 +901,23 @@ function Publish-Configuracao {
         $meta.conta_tarefa = $Conta
         Save-GuiMeta -Meta $meta
     } catch {
+        # Antes de repor a definicao anterior, confirma que a tarefa ATUAL
+        # e a do app e aponta para o conjunto publicado POR ESTA tentativa
+        # (outra definicao = alguem mexeu no meio -> inconclusivo, preserva).
         $reposto = $false
         if ($xmlAnterior) {
-            try { (Get-Backend).RegistrarXml($xmlAnterior, $Conta, $SenhaConta); $reposto = $true } catch { }
+            try {
+                $info2 = Get-TarefaInfo
+                if ($info2.Status -ne 'encontrada' -or -not (Test-TarefaDoApp -Tarefa $info2.Tarefa)) {
+                    throw 'tarefa nao confirmada como a publicada pela tentativa'
+                }
+                $c2 = Get-TaskArg -Nome 'Config'; $e2 = Get-TaskArg -Nome 'DiretorioEstado'
+                if ($c2 -ine $Built.Config -or $e2 -ine $Built.Estado) {
+                    throw 'a tarefa atual nao e a def publicada por esta tentativa'
+                }
+                (Get-Backend).RegistrarXml($xmlAnterior, $Conta, $SenhaConta)
+                $reposto = $true
+            } catch { }
         }
         if ($reposto) {
             # tarefa anterior restaurada -> conjunto novo livre
@@ -851,12 +926,10 @@ function Publish-Configuracao {
                 "e a configuracao anterior continua valendo. $($_.Exception.Message)" +
                 $(if ($aviso) { " $aviso" } else { '' }))
         }
-        # sem reposicao: a tarefa aponta para o conjunto NOVO -- nunca apagar
-        # os arquivos que ela executa. O conjunto fica funcional e o meta
-        # pode ser regravado numa nova tentativa de salvar.
+        # sem reposicao (ou impossivel confirmar a def atual): os arquivos
+        # ficam PRESERVADOS -- nada e apagado sem confirmacao do Agendador.
         throw ("Falha ao publicar os metadados ($($_.Exception.Message)). " +
-            "Os arquivos novos foram PRESERVADOS porque a tarefa os referencia - " +
-            "tente salvar novamente para concluir a publicacao.")
+            "Os arquivos novos foram PRESERVADOS - tente salvar novamente para concluir a publicacao.")
     }
 }
 

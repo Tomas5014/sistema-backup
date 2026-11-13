@@ -1,11 +1,11 @@
 # Desinstalar-Tarefa.ps1 -- verificacao ESTRUTURADA da tarefa MACIP-Backup
 # chamada pelo desinstalador NSIS antes de remover os executaveis.
-# Sem texto livre nem filtro por palavra: usa Schedule.Service (COM) direto.
+# Sem texto livre, schtasks, XML ou findstr: usa Schedule.Service (COM).
 #
 # Codigos de saida (o NSIS decide):
 #   0 = tarefa do app, desabilitada e sem instancias ativas/pendentes -> pode remover
 #   2 = tarefa AUSENTE confirmada -> pode remover
-#   3 = homonima ALHEIA (sem a marca do app ou acao fora da instalacao) -> preservada; abortar
+#   3 = homonima ALHEIA (sem a descricao/acao esperadas) -> preservada; abortar
 #   4 = consulta inconclusiva / erro / falha ao desabilitar -> preservar executaveis
 #   5 = ainda ha instancia ativa/pendente -> preservar executaveis
 #
@@ -13,7 +13,7 @@
 [CmdletBinding()]
 param(
     [string]$Nome = 'MACIP-Backup',
-    [string]$Marca = 'MACIP Backup',
+    [string]$DescricaoEsperada = 'MACIP Backup - agente de backup do piloto',
     [string]$PrefixoAcao = '',          # $INSTDIR -- a acao precisa apontar p/ a instalacao
     $Svc = $null,                       # injetavel em teste; $null cria o COM real
     [switch]$SomenteVerificar           # sem -SomenteVerificar age (desabilita/encerra)
@@ -29,46 +29,73 @@ function Get-SchedService {
 }
 
 function Get-TarefaInfo {
-    # Status: encontrada | ausente (confirmado) | erro (inconclusivo)
+    # Status: encontrada | ausente (CONFIRMADA: o proprio GetTask devolveu
+    # o codigo de tarefa inexistente, HRESULT 0x80070002) | erro.
+    # Falha de pasta/servico e falha da consulta sao separadas; texto de
+    # excecao e retorno vazio NUNCA provam ausencia.
     param($Svc)
-    try { $t = $Svc.GetFolder('\').GetTask($Nome) } catch {
-        $hr = $null; try { $hr = $_.Exception.HResult } catch { }
-        $msg = [string]$_.Exception.Message
-        if ($hr -eq -2147024894 -or $msg -match 'cannot find|find the file|encontr|not found') {
-            return [pscustomobject]@{ Tarefa = $null; Status = 'ausente'; Erro = $msg }
+    try { $pasta = $Svc.GetFolder('\') } catch {
+        return [pscustomobject]@{ Tarefa = $null; Status = 'erro'
+            Erro = "pasta do Agendador indisponivel: $($_.Exception.Message)" }
+    }
+    try { $t = $pasta.GetTask($Nome) } catch {
+        # excecao empacotada pelo PowerShell -> procura o HRESULT na cadeia
+        $hrOk = $false; $e = $_.Exception
+        while ($null -ne $e) {
+            try { if ($e.HResult -eq -2147024894) { $hrOk = $true; break } } catch { }
+            $e = $e.InnerException
         }
-        return [pscustomobject]@{ Tarefa = $null; Status = 'erro'; Erro = $msg }
+        if ($hrOk) { return [pscustomobject]@{ Tarefa = $null; Status = 'ausente'; Erro = [string]$_.Exception.Message } }
+        return [pscustomobject]@{ Tarefa = $null; Status = 'erro'; Erro = [string]$_.Exception.Message }
     }
     if ($t) { return [pscustomobject]@{ Tarefa = $t; Status = 'encontrada'; Erro = $null } }
-    return [pscustomobject]@{ Tarefa = $null; Status = 'ausente'; Erro = $null }
+    return [pscustomobject]@{ Tarefa = $null; Status = 'erro'; Erro = 'consulta devolveu tarefa vazia' }
+}
+
+function ConvertTo-CaminhoNormal {
+    # Normaliza separador e resolve o caminho absoluto NO WINDOWS; fora
+    # dele (so teste) devolve a forma textual -- a comparacao segue exata
+    # dos dois lados, sem transformar prefixo parecido em igualdade.
+    param([string]$P)
+    $p2 = $P.Trim() -replace '/', '\'
+    if ($env:OS -ne 'Windows_NT') { return $p2 }
+    try { return [IO.Path]::GetFullPath($p2) } catch { return $p2 }
 }
 
 function Test-Propriedade {
-    # Propriedade exige as DUAS evidencias nos campos esperados:
-    #   RegistrationInfo.Description contem a marca  E
-    #   a acao aponta para a instalacao MAC IP ($PrefixoAcao).
-    # Texto parecido em outro campo NAO comprova propriedade.
+    # Propriedade EXIGE os campos esperados (mesma regra da GUI):
+    #   1. descricao EXATA publicada pelo app;
+    #   2. UMA unica acao (acoes ambiguas = estranha);
+    #   3. executavel = powershell.exe;
+    #   4. -File apontando para o caminho ABSOLUTO NORMALIZADO de
+    #      Backup-MacipCliente.ps1 DESTA instalacao ($PrefixoAcao).
+    # Prefixo parecido e caminho em outro argumento nao comprovam nada.
     param($Tarefa)
     try {
-        $desc = [string]$Tarefa.Definition.RegistrationInfo.Description
-        if ($desc -notlike ('*' + $Marca + '*')) { return $false }
-        if ($PrefixoAcao) {
-            $cmd  = [string]$Tarefa.Definition.Actions.Item(1).Path
-            $args = [string]$Tarefa.Definition.Actions.Item(1).Arguments
-            $ref  = ($cmd + ' ' + $args) -replace '/', '\'
-            $pfx  = $PrefixoAcao -replace '/', '\'
-            if ($ref -notlike ('*' + $pfx + '*')) { return $false }
-        }
-        return $true
+        $def = $Tarefa.Definition
+        if ([string]$def.RegistrationInfo.Description -cne $DescricaoEsperada) { return $false }
+        if ([int]$def.Actions.Count -ne 1) { return $false }
+        $acao = $def.Actions.Item(1)
+        if ([string]$acao.Path -notlike '*powershell.exe') { return $false }
+        $args = [string]$acao.Arguments
+        if ($args -match '-File\s+"([^"]+)"') { $alvo = $Matches[1] }
+        elseif ($args -match '-File\s+(\S+)') { $alvo = $Matches[1] }
+        else { return $false }
+        $esperado = ConvertTo-CaminhoNormal -P ($PrefixoAcao.TrimEnd('\', '/') + '\Backup-MacipCliente.ps1')
+        $real = ConvertTo-CaminhoNormal -P $alvo
+        return ($real -ieq $esperado)
     } catch { return $false }
 }
 
 function Get-InstanciasAtivas {
-    # RegisteredTask.GetInstances(0) -> IRunningTaskCollection: instancias
-    # ATIVAS ou PENDENTES de uma vez (0 = todas as associadas a tarefa).
+    # Contagem da colecao COM IRunningTaskCollection: ATIVAS + PENDENTES.
+    # Falta de visibilidade/falha de consulta = inconclusivo (-1).
     param($Tarefa)
-    try { return @($Tarefa.GetInstances(0)).Count }
-    catch { return -1 }   # consulta negada = inconclusivo
+    try {
+        $col = $Tarefa.GetInstances(0)
+        if ($null -eq $col) { return -1 }
+        return [int]$col.Count
+    } catch { return -1 }
 }
 
 function Write-Saida {
@@ -91,7 +118,7 @@ function Invoke-DesinstalacaoTarefa {
     $t = $info.Tarefa
     if (-not (Test-Propriedade -Tarefa $t)) {
         Write-Saida ("HOMONIMA ALHEIA: '$Nome' existe mas nao pertence ao MAC IP Backup " +
-            "(marca/acao divergentes) - preservada intacta; desinstalacao abortada.")
+            "(descricao/acao divergentes) - preservada intacta; desinstalacao abortada.")
         return 3
     }
     if ($SomenteVerificar) {
@@ -112,16 +139,27 @@ function Invoke-DesinstalacaoTarefa {
     if ($n -gt 0) {
         try { $t.Stop('') } catch { }
         Start-Sleep -Seconds 2
-        $n = Get-InstanciasAtivas -Tarefa $t
-        if ($n -ne 0) {
-            Write-Saida "EXECUCAO: ainda ha instancia ativa/pendente - executaveis preservados."
-            return 5
-        }
     }
-    # 3. confirma o estado final: desabilitada + sem instancias.
-    if ($t.Enabled) {
-        Write-Saida 'INCONCLUSIVO: Enabled nao ficou false - executaveis preservados.'
+    # 3. RE-CONSULTA: so libera quando confirmar desabilitada + sem
+    #    instancia ativa ou pendente (fresca, nao o objeto antigo).
+    $info2 = Get-TarefaInfo -Svc $svc
+    if ($info2.Status -ne 'encontrada') {
+        Write-Saida "INCONCLUSIVO: re-consulta falhou ($($info2.Erro)) - executaveis preservados."
         return 4
+    }
+    $t2 = $info2.Tarefa
+    if ($t2.Enabled) {
+        Write-Saida 'INCONCLUSIVO: a tarefa nao ficou desabilitada - executaveis preservados.'
+        return 4
+    }
+    $n2 = Get-InstanciasAtivas -Tarefa $t2
+    if ($n2 -lt 0) {
+        Write-Saida 'INCONCLUSIVO: instancias ilegiveis na verificacao final - executaveis preservados.'
+        return 4
+    }
+    if ($n2 -gt 0) {
+        Write-Saida "EXECUCAO: ainda ha instancia ativa/pendente - executaveis preservados."
+        return 5
     }
     Write-Saida 'PROPRIA E PARADA: tarefa desabilitada, sem instancias ativas/pendentes.'
     return 0

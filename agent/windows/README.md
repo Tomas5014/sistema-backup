@@ -176,10 +176,15 @@ repositório e o `Preparar` (DPAPI na conta) são os mesmos do agente.
   não houver anterior, a tarefa **permanece apontando para arquivos
   preservados e funcionais** — a limpeza só acontece quando o Agendador
   confirma que nada referencia o conjunto. A tarefa usa
-  `TASK_LOGON_PASSWORD` (**1**, não S4U) na mesma conta da sessão e só
-  é alterada se estiver marcada como do aplicativo — tarefa homônima
-  estranha é recusada. Salvar duas vezes atualiza a mesma tarefa, nunca
-  duplica.
+  `TASK_LOGON_PASSWORD` (**1**, não S4U) na mesma conta da sessão.
+  Cadastro novo usa **TASK_CREATE** (falha se uma homônima aparecer
+  entre a consulta e o registro — nunca sobrescreve) e atualização usa
+  **TASK_UPDATE**; "pertencer ao app" exige descrição **exata** do app,
+  **uma** ação PowerShell e `-File` no caminho normalizado do
+  `Backup-MacipCliente.ps1` instalado — homônima com descrição ou ação
+  divergentes é recusada e a consulta por texto é proibida (só o código
+  "tarefa inexistente" do próprio `GetTask` classifica ausência).
+  Salvar duas vezes atualiza a mesma tarefa, nunca duplica.
 - **Operar:** pasta protegida, próxima execução e último resultado com
   classificação em sucesso/falha/incompleto/em execução/**sem resultado
   novo**/nunca executou — um resultado antigo não conta como prova da
