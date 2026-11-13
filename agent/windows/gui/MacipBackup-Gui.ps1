@@ -51,6 +51,7 @@ $script:TaskMarker    = 'MACIP Backup'
 $script:TaskDescricao = "$($script:TaskMarker) - agente de backup do piloto"
 $script:TaskCreate    = 2   # TASK_CREATE   -- FALHA se a tarefa ja existir
 $script:TaskUpdate    = 4   # TASK_UPDATE   -- FALHA se a tarefa nao existir
+$script:PsExeEsperado = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
 $script:DumpTimeoutMs = 600000   # restauracao: 10 min -- alem disso Kill + parcial fora
 $script:Backend       = $null   # injetavel nos testes; padrao COM no Windows
 
@@ -241,14 +242,23 @@ function ConvertTo-CaminhoNormal {
     try { return [IO.Path]::GetFullPath($p2) } catch { return $p2 }
 }
 
+function Get-PadraoAcaoApp {
+    # Estrutura EXATA dos argumentos que Get-TaskActionArgs gera, ancorada
+    # e com o -File capturado: ele e o PRIMEIRO parametro efetivo; nada
+    # antes nem depois. -File citado dentro de -Command ou tokens extras
+    # nao casam. A igualdade do caminho e conferida depois, normalizada.
+    return '^-NoProfile -NonInteractive -File "([^"]+)" -Modo Backup -Config "[^"]+" -DiretorioEstado "[^"]+"$'
+}
+
 function Test-TarefaDoApp {
     # Propriedade EXIGE os campos esperados -- nunca so trecho de texto:
     #   1. descricao EXATA publicada pelo app;
     #   2. UMA unica acao de execucao (sem acoes ambiguas);
-    #   3. executavel = powershell.exe;
-    #   4. argumento -File apontando para o caminho ABSOLUTO e NORMALIZADO
-    #      do Backup-MacipCliente.ps1 desta instalacao (prefixo parecido
-    #      ou caminho em outro argumento nao comprovam nada).
+    #   3. executavel = caminho ABSOLUTO do PowerShell esperado (nao um
+    #      sufixo: outropowershell.exe e powershell.exe fora do lugar nao
+    #      valem; caminho relativo tambem nao);
+    #   4. argumentos casam o formato gerado pelo app, com -File no
+    #      Backup-MacipCliente.ps1 DESTA instalacao.
     param($Tarefa)
     if (-not $Tarefa) { return $false }
     try {
@@ -256,14 +266,10 @@ function Test-TarefaDoApp {
         if ([string]$def.RegistrationInfo.Description -cne $script:TaskDescricao) { return $false }
         if ([int]$def.Actions.Count -ne 1) { return $false }
         $acao = $def.Actions.Item(1)
-        if ([string]$acao.Path -notlike '*powershell.exe') { return $false }
+        if ((ConvertTo-CaminhoNormal -P ([string]$acao.Path)) -ine (ConvertTo-CaminhoNormal -P $script:PsExeEsperado)) { return $false }
         $args = [string]$acao.Arguments
-        if ($args -match '-File\s+"([^"]+)"') { $alvo = $Matches[1] }
-        elseif ($args -match '-File\s+(\S+)') { $alvo = $Matches[1] }
-        else { return $false }
-        $esperado = ConvertTo-CaminhoNormal -P $script:AgentePath
-        $real = ConvertTo-CaminhoNormal -P $alvo
-        return ($real -ieq $esperado)
+        if ($args -notmatch (Get-PadraoAcaoApp)) { return $false }
+        return ((ConvertTo-CaminhoNormal -P $Matches[1]) -ieq (ConvertTo-CaminhoNormal -P $script:AgentePath))
     } catch { return $false }
 }
 
@@ -290,7 +296,7 @@ function Write-TaskDef {
     $trg.DaysInterval = 1
     $trg.Enabled = $true
     $ps = if (Test-IsWindows) { Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe' }
-          else { 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' }
+          else { $script:PsExeEsperado }
     while ($Def.Actions.Count -gt 0) { $Def.Actions.Remove(1) }   # IActionCollection nao tem Clear()
     $act = $Def.Actions.Create(0)
     $act.Path = $ps
@@ -604,14 +610,15 @@ function Invoke-ResticDump {
         try { $p = [Diagnostics.Process]::Start($psi) }
         catch { throw "Nao foi possivel iniciar o restic ($exe): $($_.Exception.Message)" }
         # stdout e stderr drenados EM PARALELO -- um pipe cheio nao trava o
-        # filho. O prazo cobre a espera do processo E das leituras; uma
-        # falha de escrita e falha de restauracao MESMO com codigo 0.
-        $limite = [DateTime]::UtcNow.AddMilliseconds([int]$script:DumpTimeoutMs)
+        # filho. UM unico prazo (relogio monotonico) cobre o processo E as
+        # duas leituras; cada espera e conferida e so se le o resultado de
+        # operacao concluida -- nunca um .Result que possa bloquear de novo.
+        $relogio = [Diagnostics.Stopwatch]::StartNew()
+        $prazo = { [int][Math]::Max(0, [int]$script:DumpTimeoutMs - $relogio.ElapsedMilliseconds) }
         # seam de teste: falha de escrita apos a abertura do temporario
         if ($script:DumpStreamFail) { try { $fs.Close() } catch { } }
         $outTask = $p.StandardOutput.BaseStream.CopyToAsync($fs)
         $errTask = $p.StandardError.ReadToEndAsync()
-        $prazo = { [int][Math]::Max(0, ($limite - [DateTime]::UtcNow).TotalMilliseconds) }
         if (-not $p.WaitForExit((& $prazo))) {
             try { $p.Kill() } catch { }
             try { $fs.Close() } catch { }; $fs = $null
@@ -625,7 +632,11 @@ function Invoke-ResticDump {
         # erro de escrita no temporario (mesmo apos gravar bytes) = FALHA
         try { $outTask.GetAwaiter().GetResult() | Out-Null }
         catch { throw "Falha ao gravar o arquivo restaurado: $($_.Exception.Message)" }
-        try { $errTask.Wait((& $prazo)) | Out-Null } catch { }
+        if (-not $errTask.Wait((& $prazo))) {
+            # processo ja retornou mas o pipe de erro segue aberto (ex.: um
+            # neto vivo). NAO esperar de novo: falha, sem ler .Result.
+            throw 'Leitura do stderr do restic excedeu o tempo limite - parcial descartado.'
+        }
         # so fecha depois de confirmar a copia; fechamento falho = FALHA
         try { $fs.Close() } catch { throw "Falha ao fechar o arquivo restaurado: $($_.Exception.Message)" }
         $fs = $null

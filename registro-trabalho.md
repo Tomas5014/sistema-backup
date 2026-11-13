@@ -1520,3 +1520,44 @@ preservar. `run-gui-tests.ps1` **130/130**; agente **119/119**;
 `unittest` **5/5**; `git diff --check` limpo; arquivos ps1 ASCII.
 Pendente sem mudanca: VM Windows limpa, build NSIS com restic.exe
 aprovado e prova real de COM/DPAPI/junction — instalador NAO compilado.
+
+## Revisao 6 (branch feature/windows-backup-gui-pilot)
+
+1. **Acao validada de ponta a ponta:** a regra de propriedade (GUI
+   `Test-TarefaDoApp` e `Desinstalar-Tarefa.ps1` `Test-Propriedade`)
+   deixou o sufixo `*powershell.exe` e a busca solta por `-File`. Agora
+   exige: descricao EXATA do app; UMA unica acao de execucao;
+   `Action.Path` IGUAL ao caminho absoluto esperado
+   (`%WINDIR%\System32\WindowsPowerShell\v1.0\powershell.exe`); e
+   argumentos casando a estrutura ANCORADA gerada pelo app
+   (`-NoProfile -NonInteractive -File "<agente>" -Modo Backup -Config
+   "<c>" -DiretorioEstado "<e>"`), com o caminho do `-File` conferido
+   apos normalizacao. `C:\Temp\outropowershell.exe`, `powershell.exe`
+   fora do lugar ou relativo, `-File` dentro de `-Command`, prefixo
+   parecido e tokens extras sao recusados. A mesma regra vale em
+   atualizar/pausar/executar/repor na GUI. Na desinstalacao, a
+   RE-consulta final revalida a propriedade na definicao recem-lida —
+   tarefa trocada no meio do caminho = inconclusivo: tarefa nova e
+   executaveis preservados.
+2. **Prazo monotonico ate o fim:** `Invoke-ResticDump` usa UM deadline
+   em `Stopwatch` compartilhado pelo processo e pelas duas leituras
+   (stdout via `CopyToAsync`, stderr via `ReadToEndAsync`). Cada espera
+   recebe so o tempo restante e o retorno e conferido; `.Result` so e
+   lido de tarefa concluida — stderr preso por um neto apos codigo 0
+   nao bloqueia de novo. Timeout fecha recursos sem nova espera
+   ilimitada, remove so o parcial da tentativa e reporta falha sem
+   publicar.
+
+Regressoes novas: acao legitima com `Program Files` passa;
+`outropowershell.exe`, `powershell.exe` fora do caminho e relativo,
+`-File` dentro de `-Command` -> recusados; troca por tarefa alheia
+entre a 1a e a ultima consulta da desinstalacao -> codigo 4, tarefa
+alheia nunca parada/desabilitada, executaveis preservados; subprocesso
+que segura stderr aberto apos retornar 0 e fechar stdout -> FALHA
+dentro do limite (2s, medido <20s), sem arquivo final e com
+pre-existente intacto. `run-gui-tests.ps1` **145/145** (1 pulado:
+COM real fora do Windows); agente **119/119**; `unittest` **5/5**
+(2 pulados: pwsh fora do PATH do harness); `git diff --check` limpo;
+ps1 ASCII puro. Pendente sem mudanca: VM Windows limpa, `makensis`,
+`restic.exe` aprovado — instalador NAO compilado neste ambiente;
+COM/DPAPI/junction sem prova real.

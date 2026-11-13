@@ -202,8 +202,10 @@ repositório e o `Preparar` (DPAPI na conta) são os mesmos do agente.
   de listar/restaurar o destino e o ID do repositório são conferidos.
   `restic dump` traz **somente o arquivo escolhido** — nome com
   `[`/`]`/`*` é literal — gravado em **temporário exclusivo** com
-  `stdout`/`stderr` drenados em paralelo e **tempo limite** (processo
-  pendurado é morto); o arquivo só é **publicado no nome final depois
+  `stdout`/`stderr` drenados em paralelo e **um único prazo monotônico**
+  cobre processo e ambas as leituras (cada espera confere o retorno;
+  um neto que segure `stderr` aberto não trava — timeout sem nova
+  espera ilimitada); o arquivo só é **publicado no nome final depois
   de código 0** (`File.Move` não sobrescreve — colisão preserva o
   existente; falha remove só o parcial), e a tela só mostra sucesso
   quando o arquivo esperado existe no destino.
@@ -220,9 +222,12 @@ resolve o diretório comum com `SetShellVarContext all`, o **mesmo**
 caminho da interface, e cria o atalho no Menu Iniciar de todos os
 usuários (visível à conta dedicada do backup). Desinstalar delega a
 decisão ao `Desinstalar-Tarefa.ps1` (**consulta estruturada** via
-Schedule.Service: propriedade por marca+ação, desabilita primeiro,
-confirma sem instâncias ativas/pendentes) — sem confirmação, executáveis
-preservados e falha informada — e sempre preserva dados/estado.
+Schedule.Service: propriedade por descrição exata + ação única no
+formato do app — `powershell.exe` só no caminho absoluto esperado e
+`-File` efetivo no agente instalado; desabilita primeiro, confirma sem
+instâncias ativas/pendentes na definição recém-lida) — sem confirmação,
+executáveis preservados e falha informada — e sempre preserva
+dados/estado.
 
 Uso por script continua igual — a GUI não altera o agente.
 

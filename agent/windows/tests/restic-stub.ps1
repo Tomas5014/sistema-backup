@@ -43,6 +43,15 @@ elseif ($args -contains 'dump') {
     if (Test-Path (Join-Path $d 'dump-sleep')) {
         Start-Sleep -Seconds ([int](Get-Content (Join-Path $d 'dump-sleep') -Raw))
     }
+    # dump-stderr-open: um NETO fica com stderr aberto apos o pai sair --
+    # stdout fecha (o neto fecha a copia dele), stderr fica vivo por 30s.
+    if (Test-Path (Join-Path $d 'dump-stderr-open')) {
+        $psi2 = [Diagnostics.ProcessStartInfo]::new()
+        $psi2.FileName = (Get-Process -Id $PID).Path
+        $psi2.Arguments = '-NoProfile -Command "[Console]::OpenStandardOutput().Close(); Start-Sleep 30"'
+        $psi2.UseShellExecute = $false
+        $null = [Diagnostics.Process]::Start($psi2)
+    }
     if (Test-Path (Join-Path $d 'stderr-big')) {
         $linha = 'x' * 64
         for ($i = 0; $i -lt 6000; $i++) { [Console]::Error.WriteLine($linha) }

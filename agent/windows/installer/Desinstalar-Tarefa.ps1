@@ -14,6 +14,7 @@
 param(
     [string]$Nome = 'MACIP-Backup',
     [string]$DescricaoEsperada = 'MACIP Backup - agente de backup do piloto',
+    [string]$PsExeEsperado = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe',
     [string]$PrefixoAcao = '',          # $INSTDIR -- a acao precisa apontar p/ a instalacao
     $Svc = $null,                       # injetavel em teste; $null cria o COM real
     [switch]$SomenteVerificar           # sem -SomenteVerificar age (desabilita/encerra)
@@ -62,28 +63,34 @@ function ConvertTo-CaminhoNormal {
     try { return [IO.Path]::GetFullPath($p2) } catch { return $p2 }
 }
 
+function Get-PadraoAcaoApp {
+    # Estrutura EXATA dos argumentos que a GUI gera, ancorada e com o
+    # -File capturado: ele e o PRIMEIRO parametro efetivo; nada antes nem
+    # depois. -File citado dentro de -Command ou tokens extras nao casam.
+    # A igualdade do caminho e conferida depois, normalizada.
+    return '^-NoProfile -NonInteractive -File "([^"]+)" -Modo Backup -Config "[^"]+" -DiretorioEstado "[^"]+"$'
+}
+
 function Test-Propriedade {
     # Propriedade EXIGE os campos esperados (mesma regra da GUI):
     #   1. descricao EXATA publicada pelo app;
-    #   2. UMA unica acao (acoes ambiguas = estranha);
-    #   3. executavel = powershell.exe;
-    #   4. -File apontando para o caminho ABSOLUTO NORMALIZADO de
-    #      Backup-MacipCliente.ps1 DESTA instalacao ($PrefixoAcao).
-    # Prefixo parecido e caminho em outro argumento nao comprovam nada.
+    #   2. UMA unica acao de execucao (acoes ambiguas = estranha);
+    #   3. executavel = caminho ABSOLUTO do PowerShell esperado (sufixo
+    #      nao vale: outropowershell.exe e powershell.exe fora do lugar,
+    #      nem caminho relativo);
+    #   4. argumentos casam o formato gerado pelo app, com -File no
+    #      Backup-MacipCliente.ps1 DESTA instalacao.
     param($Tarefa)
     try {
         $def = $Tarefa.Definition
         if ([string]$def.RegistrationInfo.Description -cne $DescricaoEsperada) { return $false }
         if ([int]$def.Actions.Count -ne 1) { return $false }
         $acao = $def.Actions.Item(1)
-        if ([string]$acao.Path -notlike '*powershell.exe') { return $false }
+        if ((ConvertTo-CaminhoNormal -P ([string]$acao.Path)) -ine (ConvertTo-CaminhoNormal -P $PsExeEsperado)) { return $false }
         $args = [string]$acao.Arguments
-        if ($args -match '-File\s+"([^"]+)"') { $alvo = $Matches[1] }
-        elseif ($args -match '-File\s+(\S+)') { $alvo = $Matches[1] }
-        else { return $false }
-        $esperado = ConvertTo-CaminhoNormal -P ($PrefixoAcao.TrimEnd('\', '/') + '\Backup-MacipCliente.ps1')
-        $real = ConvertTo-CaminhoNormal -P $alvo
-        return ($real -ieq $esperado)
+        if ($args -notmatch (Get-PadraoAcaoApp)) { return $false }
+        $agente = $PrefixoAcao.TrimEnd('\', '/') + '\Backup-MacipCliente.ps1'
+        return ((ConvertTo-CaminhoNormal -P $Matches[1]) -ieq (ConvertTo-CaminhoNormal -P $agente))
     } catch { return $false }
 }
 
@@ -140,14 +147,19 @@ function Invoke-DesinstalacaoTarefa {
         try { $t.Stop('') } catch { }
         Start-Sleep -Seconds 2
     }
-    # 3. RE-CONSULTA: so libera quando confirmar desabilitada + sem
-    #    instancia ativa ou pendente (fresca, nao o objeto antigo).
+    # 3. RE-CONSULTA: a definicao FRESCA precisa continuar sendo a nossa
+    #    (se a tarefa foi trocada no meio do caminho, NAO e nossa: preserva
+    #    ela e os executaveis), desabilitada e sem instancia ativa/pendente.
     $info2 = Get-TarefaInfo -Svc $svc
     if ($info2.Status -ne 'encontrada') {
         Write-Saida "INCONCLUSIVO: re-consulta falhou ($($info2.Erro)) - executaveis preservados."
         return 4
     }
     $t2 = $info2.Tarefa
+    if (-not (Test-Propriedade -Tarefa $t2)) {
+        Write-Saida 'INCONCLUSIVO: a tarefa re-lida nao e mais a do app - tarefa e executaveis preservados.'
+        return 4
+    }
     if ($t2.Enabled) {
         Write-Saida 'INCONCLUSIVO: a tarefa nao ficou desabilitada - executaveis preservados.'
         return 4

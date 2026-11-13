@@ -69,7 +69,8 @@ try {
         $Def.RegistrationInfo.Description = $D.descricao
         $Def.Principal.UserId = $D.userId; $Def.Principal.LogonType = $D.logon
         $Def.Settings.Enabled = $D.enabled
-        $a = $Def.Actions.Create(0); $a.Arguments = $D.args; $a.Path = 'powershell.exe'
+        $a = $Def.Actions.Create(0); $a.Arguments = $D.args
+        $a.Path = $(if ($D.psPath) { $D.psPath } else { 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' })
         $tr = $Def.Triggers.Create(0); $tr.StartBoundary = $D.trigger
         return $Def
     }
@@ -291,10 +292,22 @@ try {
     # propriedade pela ACAO: marca certa na descricao + -File em outro lugar
     $script:Backend = New-BackendFalso
     $script:Backend.defData = @{ descricao='MACIP Backup - agente de backup do piloto'; userId='X'; logon=1
-                                 enabled=$true; args='-File "C:\outro\Backup-MacipCliente.ps1" -Modo Backup'; trigger='' }
+                                 enabled=$true; args='-NoProfile -NonInteractive -File "C:\outro\Backup-MacipCliente.ps1" -Modo Backup -Config "c" -DiretorioEstado "e"'; trigger='' }
     throws { Register-TarefaMacip -Horario '02:30' -Conta 'X' -SenhaConta 'y' -Config 'c' -Estado 'e' } 'marca na descricao mas -File estranho: recusado'
     $script:Backend.defData.args = '-Modo Backup "C:\Program Files\MACIP-Backup\Backup-MacipCliente.ps1"'
     throws { Register-TarefaMacip -Horario '02:30' -Conta 'X' -SenhaConta 'y' -Config 'c' -Estado 'e' } 'caminho so em outro argumento (sem -File): recusado'
+    # executavel parecido / fora do lugar / relativo -> recusado
+    $script:Backend.defData.args = Get-TaskActionArgs -Agente $script:AgentePath -Config 'c' -Estado 'e'
+    $script:Backend.defData.psPath = 'C:\Temp\outropowershell.exe'
+    throws { Register-TarefaMacip -Horario '02:30' -Conta 'X' -SenhaConta 'y' -Config 'c' -Estado 'e' } 'executavel parecido (outropowershell.exe): recusado'
+    $script:Backend.defData.psPath = 'C:\Windows\System32\powershell.exe'
+    throws { Register-TarefaMacip -Horario '02:30' -Conta 'X' -SenhaConta 'y' -Config 'c' -Estado 'e' } 'powershell.exe fora do caminho esperado: recusado'
+    $script:Backend.defData.psPath = 'powershell.exe'
+    throws { Register-TarefaMacip -Horario '02:30' -Conta 'X' -SenhaConta 'y' -Config 'c' -Estado 'e' } 'caminho relativo de powershell: recusado'
+    $script:Backend.defData.psPath = $null
+    # -Command que apenas MENCIONA -File -> recusado
+    $script:Backend.defData.args = '-NoProfile -Command "& ''C:\Program Files\MACIP-Backup\Backup-MacipCliente.ps1'' -File x"'
+    throws { Register-TarefaMacip -Horario '02:30' -Conta 'X' -SenhaConta 'y' -Config 'c' -Estado 'e' } '-File citado dentro de -Command: recusado'
 
     # ---- Executar agora: SID da tarefa == SID do preparo (estado real) ----
     # A conta do preparo (preparo.json em $b1.Estado) e a conta atual do teste.
@@ -302,7 +315,7 @@ try {
     $script:Backend = New-BackendFalso
     $script:Backend.defData = @{ descricao='MACIP Backup - agente de backup do piloto'; userId=$contaPrep
                                  logon=1; enabled=$true
-                                 args=('-File "{0}" -Modo Backup -DiretorioEstado "{1}" -Config "{2}"' -f $script:AgentePath, $b1.Estado, $b1.Config); trigger='' }
+                                 args=(Get-TaskActionArgs -Agente $script:AgentePath -Config $b1.Config -Estado $b1.Estado); trigger='' }
     $script:Backend.estado = 4
     throws { Start-TarefaAgora } 'execucao em andamento: novo disparo recusado'
     eq $script:Backend.runs 0 'em execucao: zero chamadas a Run'
@@ -323,7 +336,7 @@ try {
     # estado sem preparo.json -> sem identidade verificavel -> recusa
     $estadoVazio = Join-Path $tmp 'estado-sem-preparo'; New-Item -ItemType Directory $estadoVazio | Out-Null
     $script:Backend.defData.userId = $contaPrep
-    $script:Backend.defData.args = '-File "{0}" -Modo Backup -DiretorioEstado "{1}" -Config "{2}"' -f $script:AgentePath, $estadoVazio, $b1.Config
+    $script:Backend.defData.args = Get-TaskActionArgs -Agente $script:AgentePath -Config $b1.Config -Estado $estadoVazio
     throws { Start-TarefaAgora } 'estado sem preparo.json: disparo recusado'
     eq $script:Backend.runs 1 'sem preparo verificavel: zero chamadas novas a Run'
 
@@ -418,7 +431,7 @@ try {
     $script:Backend = New-BackendFalso
     $script:Backend.defData = @{ descricao='MACIP Backup - agente de backup do piloto'; userId=$contaPrep; logon=1
                                  enabled=$true
-                                 args=('-File "{0}" -Modo Backup -DiretorioEstado "{1}" -Config "{2}"' -f $script:AgentePath, $b1.Estado, $b1.Config); trigger='' }
+                                 args=(Get-TaskActionArgs -Agente $script:AgentePath -Config $b1.Config -Estado $b1.Estado); trigger='' }
     $script:Backend.inst = 1
     $builtG = Build-Configuracao -Perfil $null -ChavePath '' -SenhaRestic $null -Origem $origem -Exclusoes @() -Horario '10:30'
     $avisoG = Remove-ConjuntoNovo -Built $builtG
@@ -547,6 +560,22 @@ try {
     eq (Get-ChildItem -LiteralPath $dest10 -Force | Measure-Object).Count 0 'restaurar: falha de escrita -- nada publicado nem parcial'
     $script:DumpStreamFail = $false
 
+    # prazo vale ate o fim: neto segura stderr aberto depois do pai sair
+    # com codigo 0 e stdout fechado -> retorna FALHA dentro do limite,
+    # sem publicar e sem tocar arquivos preexistentes.
+    '1' | Set-Content -LiteralPath (Join-Path $stubDir 'dump-stderr-open') -Encoding Ascii -NoNewline
+    [IO.File]::WriteAllBytes((Join-Path $stubDir 'dump.bin'), [Text.Encoding]::UTF8.GetBytes('BYTES'))
+    $dest11 = Join-Path $tmp 'dest-stderr-open'; New-Item -ItemType Directory $dest11 | Out-Null
+    'PREVIO' | Set-Content -LiteralPath (Join-Path $dest11 'intacto.txt') -Encoding Ascii -NoNewline
+    $script:DumpTimeoutMs = 2000
+    $t0 = Get-Date
+    throws { Invoke-ResticDump -Cfg $cfgOp -Estado $estado -Snapshot ('c'*64) -Arquivo '/o/x.txt' -Destino $dest11 } 'restaurar: stderr preso -> falha dentro do prazo'
+    ok (((Get-Date) - $t0).TotalSeconds -lt 20) 'restaurar: stderr preso -- retornou sem travar'
+    eq (Get-ChildItem -LiteralPath $dest11 -File | Measure-Object).Count 1 'restaurar: stderr preso -- sem arquivo final nem parcial'
+    eq (Get-Content -LiteralPath (Join-Path $dest11 'intacto.txt') -Raw) 'PREVIO' 'restaurar: pre-existente intacto'
+    $script:DumpTimeoutMs = 600000
+    Remove-Item -LiteralPath (Join-Path $stubDir 'dump-stderr-open') -Force
+
     # arquivo BINARIO com nome de padrao: SHA-256 confere byte a byte
     $bin = New-Object byte[] 256
     for ($i = 0; $i -lt 256; $i++) { $bin[$i] = [byte]$i }
@@ -562,7 +591,8 @@ try {
     $PrefixoAcao = 'C:\Program Files\MACIP-Backup'
     function New-TarefaFalsa {
         param([string]$Desc = 'MACIP Backup - agente de backup do piloto',
-              [string]$ArgsAcao = '-NoProfile -File "C:\Program Files\MACIP-Backup\Backup-MacipCliente.ps1" -Modo Backup',
+              [string]$ArgsAcao = '-NoProfile -NonInteractive -File "C:\Program Files\MACIP-Backup\Backup-MacipCliente.ps1" -Modo Backup -Config "c" -DiretorioEstado "e"',
+              [string]$PsPath = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe',
               [int]$Instancias = 0, [bool]$FalhaEnabled = $false,
               [bool]$NaoPara = $false, [bool]$FalhaInstancias = $false, [bool]$NaoDesabilita = $false)
         $t = [pscustomobject]@{ _en = $true; nInst = $Instancias; falhaEn = $FalhaEnabled
@@ -572,7 +602,7 @@ try {
             param($v) if ($this.falhaEn) { throw 'falha ao desabilitar (simulada)' }
                       if ($this.naoDesab) { return }; $this._en = [bool]$v }
         $ri = [pscustomobject]@{ Description = $Desc }
-        $ac = [pscustomobject]@{ a1 = ([pscustomobject]@{ Path = 'powershell.exe'; Arguments = $ArgsAcao }) }
+        $ac = [pscustomobject]@{ a1 = ([pscustomobject]@{ Path = $PsPath; Arguments = $ArgsAcao }) }
         $ac | Add-Member ScriptProperty Count { return 1 }
         $ac | Add-Member ScriptMethod Item { param($i) return $this.a1 }
         $df = [pscustomobject]@{ RegistrationInfo = $ri; Actions = $ac }
@@ -583,8 +613,8 @@ try {
         $t | Add-Member ScriptMethod Stop { param($x) $this.stops++; if (-not $this.naoPara) { $this.nInst = 0 } }
         return $t
     }
-    function New-SvcFalso { param($Tarefa = $null, [string]$ErroGet = '', [int]$ErroDepois = 0)
-        $s = [pscustomobject]@{ t = $Tarefa; eg = $ErroGet; ed = $ErroDepois; chamadas = 0 }
+    function New-SvcFalso { param($Tarefa = $null, [string]$ErroGet = '', [int]$ErroDepois = 0, $Tarefa2 = $null, [int]$TrocaApos = 0)
+        $s = [pscustomobject]@{ t = $Tarefa; t2 = $Tarefa2; ta = $TrocaApos; eg = $ErroGet; ed = $ErroDepois; chamadas = 0 }
         $s | Add-Member ScriptMethod GetFolder { param($p) return $this }
         $s | Add-Member ScriptMethod GetTask { param($n)
             $this.chamadas++
@@ -598,6 +628,7 @@ try {
             if ($this.ed -gt 0 -and $this.chamadas -gt $this.ed) {
                 throw ([Runtime.InteropServices.COMException]::new('re-consulta negada', -2147024891))
             }
+            if ($this.t2 -and $this.chamadas -gt $this.ta) { return $this.t2 }
             if (-not $this.t) {
                 throw ([Runtime.InteropServices.COMException]::new('nao existe', -2147024894))
             }
@@ -632,8 +663,23 @@ try {
     eq (Invoke-DesinstalacaoTarefa) 4 'uninstall: Enabled nao ficou false -> preservar'
     $Svc = New-SvcFalso -Tarefa (New-TarefaFalsa -ArgsAcao '-Modo Backup "C:\Program Files\MACIP-Backup\Backup-MacipCliente.ps1"')
     eq (Invoke-DesinstalacaoTarefa) 3 'uninstall: caminho sem -File -> preservada'
+    $Svc = New-SvcFalso -Tarefa (New-TarefaFalsa -ArgsAcao '-NoProfile -Command "& ''C:\Program Files\MACIP-Backup\Backup-MacipCliente.ps1'' -File x"')
+    eq (Invoke-DesinstalacaoTarefa) 3 'uninstall: -File dentro de -Command -> preservada'
+    $Svc = New-SvcFalso -Tarefa (New-TarefaFalsa -PsPath 'C:\Temp\outropowershell.exe')
+    eq (Invoke-DesinstalacaoTarefa) 3 'uninstall: outropowershell.exe -> preservada'
+    $Svc = New-SvcFalso -Tarefa (New-TarefaFalsa -PsPath 'C:\Windows\System32\powershell.exe')
+    eq (Invoke-DesinstalacaoTarefa) 3 'uninstall: powershell.exe fora do caminho -> preservada'
+    $Svc = New-SvcFalso -Tarefa (New-TarefaFalsa -PsPath 'powershell.exe')
+    eq (Invoke-DesinstalacaoTarefa) 3 'uninstall: powershell relativo -> preservada'
     $Svc = New-SvcFalso -ErroGet 'Acesso negado'
     eq (Invoke-DesinstalacaoTarefa) 4 'uninstall: texto de erro qualquer -> inconclusivo (nao ausente)'
+    # troca por tarefa ALHEIA entre a 1a consulta e a verificacao final:
+    # preserva a tarefa nova e os executaveis (codigo 4, sem tocar nela)
+    $alheia = New-TarefaFalsa -Desc 'Manutencao da empresa' -ArgsAcao '-File "C:\outro\x.ps1"'
+    $Svc = New-SvcFalso -Tarefa (New-TarefaFalsa) -Tarefa2 $alheia -TrocaApos 1
+    eq (Invoke-DesinstalacaoTarefa) 4 'uninstall: tarefa trocada no meio -> preservar'
+    eq $alheia.stops 0 'uninstall: tarefa alheia nunca e parada'
+    eq ([bool]$alheia._en) $true 'uninstall: tarefa alheia nunca e desabilitada'
 
     # ---- agendamento COM real (so no Windows) ----
     if (Test-IsWindows) {
