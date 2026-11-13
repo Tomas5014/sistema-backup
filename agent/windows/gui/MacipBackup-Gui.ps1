@@ -629,13 +629,11 @@ function Invoke-ResticConsulta {
     }
 }
 
-function Confirm-DestinoOperacional {
-    # Antes de listar ou restaurar: MESMA verificacao do backup -- preparo
-    # vigente (conta, repo, vinculos) + destino responde + ID aprovado.
-    # A consulta ao repositorio tem prazo (servidor que aceita SSH mas
-    # nao responde SFTP nao pode travar a janela).
+function Confirm-DestinoComPrazo {
+    # 'cat config' com prazo (Invoke-ResticConsulta): usado na ativacao,
+    # no preparo ao salvar e antes de listar/restaurar. Um servidor que
+    # aceita SSH mas nao responde SFTP nao trava a janela nem o preparo.
     param([pscustomobject]$Cfg, [string]$Estado)
-    [void](Confirm-PreparoVigente -Estado $Estado -Cfg $Cfg)
     $resp = Invoke-ResticConsulta -Cfg $Cfg -Estado $Estado -Comando @('cat', 'config') -PrazoMs ([int]$script:ConsultaTimeoutMs)
     if ($resp.Codigo -ne 0) {
         throw ('Repositorio inacessivel ou identidade recusada (restic codigo {0}: {1}). ' +
@@ -651,6 +649,14 @@ function Confirm-DestinoOperacional {
         throw 'Destino divergente do aprovado pela MAC IP (repositorio_id nao confere) - recusado.'
     }
     return $id
+}
+
+function Confirm-DestinoOperacional {
+    # Antes de listar ou restaurar: MESMA verificacao do backup -- preparo
+    # vigente (conta, repo, vinculos) + destino responde + ID aprovado.
+    param([pscustomobject]$Cfg, [string]$Estado)
+    [void](Confirm-PreparoVigente -Estado $Estado -Cfg $Cfg)
+    return (Confirm-DestinoComPrazo -Cfg $Cfg -Estado $Estado)
 }
 
 function Get-Snapshots {
@@ -916,7 +922,7 @@ function Test-ConexaoDestino {
         }
         if (-not (Test-IsWindows)) { & chmod +x (Join-Path $tmp $script:ResticExeNome) 2>$null | Out-Null }
         Protect-ResticPassword -Senha $SenhaRestic -Destino (Join-Path $tmp 'restic.dpapi')
-        $id = Confirm-Destino -Cfg $cfg -Estado $tmp
+        $id = Confirm-DestinoComPrazo -Cfg $cfg -Estado $tmp
         return $id
     } finally {
         Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
@@ -981,8 +987,11 @@ function Build-Configuracao {
             # perfil novo: preparo completo num estado NOVO (o anterior fica intacto)
             if (-not $SenhaRestic) { throw 'Informe a senha Restic na aba Ativar.' }
             $estadoNovo = Join-Path $script:BaseDir "estado-$n"
+            # a conferencia do destino usa o prazo da GUI (SSH sem SFTP
+            # nao pode segurar o preparo nem a janela)
             Invoke-AgentePreparar -Config $jsonPath -DiretorioEstado $estadoNovo `
-                -ResticExe (Get-PreRequisitos).ResticExe -SenhaRestic $SenhaRestic | Out-Null
+                -ResticExe (Get-PreRequisitos).ResticExe -SenhaRestic $SenhaRestic `
+                -ConfirmaDestino ${function:Confirm-DestinoComPrazo} | Out-Null
         }
         $estado = if ($estadoNovo) { $estadoNovo } else { Get-EstadoAtual }
         if (-not $estado) { throw 'Sem estado preparado - conclua a ativacao primeiro.' }
@@ -1106,6 +1115,62 @@ function Publish-Configuracao {
     }
 }
 
+# O que prova a ativacao: perfil + chave + senha usados na validacao.
+# Senha so entra no HASH -- nunca em argumento, mensagem ou log.
+function Get-TokenAtivacao {
+    param($Perfil, [string]$ChavePath, [string]$SenhaTxt)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    $hashChave = ''
+    if ($ChavePath -and (Test-Path -LiteralPath $ChavePath -PathType Leaf)) {
+        $hashChave = (Get-FileHash -LiteralPath $ChavePath -Algorithm SHA256).Hash
+    }
+    $bytes = [Text.Encoding]::UTF8.GetBytes(($Perfil | ConvertTo-Json -Compress) + '|' + $ChavePath + '|' + $hashChave + '|' + $SenhaTxt)
+    return ([BitConverter]::ToString($sha.ComputeHash($bytes)))
+}
+
+function Test-AtivacaoVigente {
+    # A prova so vale para os dados capturados na validacao: perfil, chave
+    # ou senha diferentes (ou prova ausente) exigem "Validar e continuar".
+    param($Perfil, [string]$ChavePath, [string]$SenhaTxt)
+    $tok = Get-TokenAtivacao -Perfil $Perfil -ChavePath $ChavePath -SenhaTxt $SenhaTxt
+    if (-not $script:ativacaoToken -or $tok -cne $script:ativacaoToken) {
+        throw 'Perfil, chave ou senha alterados apos a validacao - clique "Validar e continuar" de novo na aba 1.'
+    }
+}
+
+# ---------- ultimo backup confirmado (evidencia propria) ----------
+
+function Read-UltimoConfirmado {
+    # ultimo-confirmado.json: evidencia SEPARADA do ultimo-resultado.json
+    # (que registra a tentativa mais recente). Um falha posterior nao
+    # apaga o sucesso confirmado; repositorio divergente nao herda.
+    param([string]$Estado, [string]$RepositorioId)
+    $f = Join-Path $Estado 'ultimo-confirmado.json'
+    if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { return $null }
+    try { $c = Get-Content -LiteralPath $f -Raw | ConvertFrom-Json } catch { return $null }
+    if ($RepositorioId -and $c.repositorio_id -and ([string]$c.repositorio_id -cne $RepositorioId)) { return $null }
+    return $c
+}
+
+function Update-UltimoConfirmado {
+    # So grava com codigo 0 + snapshot valido + data de conclusao, e so
+    # se a conclusao for mais recente que a guardada.
+    param([string]$Estado, $Res, [string]$RepositorioId)
+    if (-not (Test-ResConfirmado -Res $Res)) { return }
+    if (-not $Res.fim_utc) { return }
+    try { $fim = [DateTimeOffset]::Parse([string]$Res.fim_utc) } catch { return }
+    $cur = Read-UltimoConfirmado -Estado $Estado -RepositorioId $RepositorioId
+    if ($cur -and $cur.fim_utc) {
+        try { if ([DateTimeOffset]::Parse([string]$cur.fim_utc) -ge $fim) { return } } catch { }
+    }
+    [ordered]@{
+        fim_utc        = [string]$Res.fim_utc
+        inicio_utc     = [string]$Res.inicio_utc
+        snapshot       = [string]$Res.snapshot
+        repositorio_id = [string]$RepositorioId
+    } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $Estado 'ultimo-confirmado.json') -Encoding UTF8
+}
+
 # ---------- execucao fora da thread da janela ----------
 
 function Invoke-Assincrono {
@@ -1116,15 +1181,25 @@ function Invoke-Assincrono {
     # resultado volta como objeto; erros do trabalho viram excecao aqui.
     param([string]$Funcao, [hashtable]$Params, [int]$PrazoMs = 300000, $Form)
     $guiPath = $PSCommandPath
+    # O runspace dot-source o arquivo de novo: os override injetaveis dos
+    # testes (stub do restic, ssh, prazos) precisam viajar junto -- senao o
+    # trabalhador volta aos binarios/prazos de producao e falha diferente.
+    $scriptVars = @{
+        ResticExeNome     = $script:ResticExeNome
+        SshExe            = $script:SshExe
+        ConsultaTimeoutMs = $script:ConsultaTimeoutMs
+        DumpTimeoutMs     = $script:DumpTimeoutMs
+    }
     $ps = [powershell]::Create()
     $async = $null
     try {
-        [void]$ps.AddScript('param($GuiPath,$Base,$Agente,$Fn,$P) . $GuiPath -BaseDir $Base -AgentePath $Agente; & $Fn @P')
+        [void]$ps.AddScript('param($GuiPath,$Base,$Agente,$Fn,$P,$Vars) . $GuiPath -BaseDir $Base -AgentePath $Agente; foreach ($k in $Vars.Keys) { Set-Variable -Scope Script -Name $k -Value $Vars[$k] }; & $Fn @P')
         [void]$ps.AddParameter('GuiPath', $guiPath)
         [void]$ps.AddParameter('Base', $script:BaseDir)
         [void]$ps.AddParameter('Agente', $script:AgentePath)
         [void]$ps.AddParameter('Fn', $Funcao)
         [void]$ps.AddParameter('P', $Params)
+        [void]$ps.AddParameter('Vars', $scriptVars)
         $async = $ps.BeginInvoke()
         $relogio = [Diagnostics.Stopwatch]::StartNew()
         while (-not $async.IsCompleted) {
@@ -1135,12 +1210,22 @@ function Invoke-Assincrono {
             }
             if ($Form) { [System.Windows.Forms.Application]::DoEvents() } else { Start-Sleep -Milliseconds 50 }
         }
-        $out = $null
-        try { $out = $ps.EndInvoke($async) } catch { }
+        $out = $null; $endErr = $null
+        try { $out = $ps.EndInvoke($async) }
+        catch {
+            $endErr = $_.Exception
+            while ($endErr.InnerException) { $endErr = $endErr.InnerException }
+            $endErr = $endErr.Message
+        }
         if ($ps.Streams.Error.Count -gt 0) { throw ([string]$ps.Streams.Error[0].Exception.Message) }
+        if ($endErr) { throw $endErr }
         if ($ps.HadErrors) { throw 'A operacao falhou (detalhes indisponiveis no runspace).' }
-        if ($out -and $out.Count -ge 1) { return $out[0] }
-        return $out
+        # Listagens devolvem TODOS os itens (0 -> $null, 1 -> o objeto,
+        # N -> todos) -- antes so $out[0] voltava e a aba Restaurar perdia
+        # pontos/arquivos.
+        if ($null -eq $out -or $out.Count -eq 0) { return $null }
+        if ($out.Count -eq 1) { return $out[0] }
+        return @($out)
     } finally { $ps.Dispose() }
 }
 
@@ -1205,6 +1290,8 @@ function Show-Gui {
     $lblAtv = New-Label $t1 '' 10 230 520
     $btValidar = New-Button $t1 'Validar e continuar' 10 196 170
     $script:ativacaoToken = $null     # prova de que ESTA combinacao perfil+chave+senha validou
+    $script:OpRede = $false           # trava: uma operacao de rede por vez
+    $entradasAtv = @($tbPerfil, $btPerfil, $tbChave, $btChave, $tbSenha)
 
     $btPerfil.Add_Click({
         $dlg = New-Object "$W.OpenFileDialog"
@@ -1226,35 +1313,42 @@ function Show-Gui {
         $dlg.Title = 'Chave privada SSH fornecida pela MAC IP'
         if ($dlg.ShowDialog() -eq 'OK') { $tbChave.Text = $dlg.FileName }
     })
-    # O que prova a ativacao: perfil + chave + senha usados na validacao.
-    # Se qualquer um mudar depois, a prova expira (conferida ao salvar).
-    function Get-TokenAtivacao {
-        param($Perfil, [string]$ChavePath, [string]$SenhaTxt)
-        $sha = [Security.Cryptography.SHA256]::Create()
-        $hashChave = ''
-        if ($ChavePath -and (Test-Path -LiteralPath $ChavePath -PathType Leaf)) {
-            $hashChave = (Get-FileHash -LiteralPath $ChavePath -Algorithm SHA256).Hash
-        }
-        $bytes = [Text.Encoding]::UTF8.GetBytes(($Perfil | ConvertTo-Json -Compress) + '|' + $ChavePath + '|' + $hashChave + '|' + $SenhaTxt)
-        return ([BitConverter]::ToString($sha.ComputeHash($bytes)))
-    }
+    # "Validar e continuar": captura perfil+chave+senha NO INSTANTE do
+    # clique e vincula a prova a eles. Durante a tentativa as entradas
+    # ficam travadas (OpRede impede clique repetido e a salvar concorrente);
+    # ao fim, o token so e aceito se os dados nao mudaram -- uma tentativa
+    # antiga nunca libera uma configuracao nova.
     $btValidar.Add_Click({
-        $btValidar.Enabled = $false; $lblAtv.ForeColor = 'DarkBlue'; $lblAtv.Text = 'Validando destino...'
+        if ($script:OpRede) { return }
+        if (-not $script:perfilAtual) { $lblAtv.ForeColor='DarkRed'; $lblAtv.Text='Importe o perfil primeiro.'; return }
+        if (-not $tbChave.Text) { $lblAtv.ForeColor='DarkRed'; $lblAtv.Text='Escolha o arquivo da chave privada.'; return }
+        if (-not $tbSenha.Text) { $lblAtv.ForeColor='DarkRed'; $lblAtv.Text='Informe a senha Restic.'; return }
+        $script:OpRede = $true
+        $btValidar.Enabled = $false; $btSalvar.Enabled = $false
+        foreach ($c in $entradasAtv) { $c.Enabled = $false }
+        # captura do que vai ser validado -- NAO o que estiver na tela depois
+        $perfilV = $script:perfilAtual; $chaveV = [string]$tbChave.Text; $senhaV = [string]$tbSenha.Text
+        $tokenV = Get-TokenAtivacao -Perfil $perfilV -ChavePath $chaveV -SenhaTxt $senhaV
+        $lblAtv.ForeColor = 'DarkBlue'; $lblAtv.Text = 'Validando destino...'
         try {
-            if (-not $script:perfilAtual) { throw 'Importe o perfil primeiro.' }
-            if (-not $tbChave.Text) { throw 'Escolha o arquivo da chave privada.' }
-            if (-not $tbSenha.Text) { throw 'Informe a senha Restic.' }
             $id = Invoke-Assincrono -Funcao 'Test-ConexaoDestino' -Form $form -PrazoMs ([int]$script:ConsultaTimeoutMs + 30000) -Params @{
-                Perfil = $script:perfilAtual; ChavePath = $tbChave.Text
-                SenhaRestic = (ConvertTo-SecureString $tbSenha.Text -AsPlainText -Force) }
-            $script:ativacaoToken = Get-TokenAtivacao -Perfil $script:perfilAtual -ChavePath $tbChave.Text -SenhaTxt $tbSenha.Text
+                Perfil = $perfilV; ChavePath = $chaveV
+                SenhaRestic = (ConvertTo-SecureString $senhaV -AsPlainText -Force) }
+            # so aceita se os dados continuam exatamente os capturados
+            if ($tokenV -ne (Get-TokenAtivacao -Perfil $script:perfilAtual -ChavePath $tbChave.Text -SenhaTxt $tbSenha.Text)) {
+                throw 'Os dados mudaram durante a validacao - valide de novo.'
+            }
+            $script:ativacaoToken = $tokenV
             $lblAtv.ForeColor = 'DarkGreen'
             $lblAtv.Text = "Destino validado - identidade do servidor e ID do repositorio conferem ($($id.Substring(0,12))...)."
             $tabs.SelectedTab = $t2     # avanca so com a prova
         } catch {
             $script:ativacaoToken = $null
             $lblAtv.ForeColor = 'DarkRed'; $lblAtv.Text = "Recusado: $($_.Exception.Message)"
-        } finally { $btValidar.Enabled = $true }
+        } finally {
+            $script:OpRede = $false; $btValidar.Enabled = $true; $btSalvar.Enabled = $true
+            foreach ($c in $entradasAtv) { $c.Enabled = $true }
+        }
     })
 
     # ----- Tab 2: Configurar -----
@@ -1291,25 +1385,29 @@ function Show-Gui {
     }
 
     $btSalvar.Add_Click({
-        $btSalvar.Enabled = $false; $lblCfg.ForeColor = 'DarkBlue'; $lblCfg.Text = 'Salvando...'
+        if ($script:OpRede) { return }        # clique repetido / validacao em curso: ignora
+        $script:OpRede = $true
+        $btSalvar.Enabled = $false; $btValidar.Enabled = $false
+        foreach ($c in $entradasAtv) { $c.Enabled = $false }
+        $lblCfg.ForeColor = 'DarkBlue'; $lblCfg.Text = 'Salvando...'
         $built = $null
         try {
             $excl = @($tbExcl.Lines | Where-Object { $_ -and $_.Trim() -ne '' })
             if (-not $tbOrigem.Text) { throw 'Escolha a pasta a proteger.' }
             if ($tbHora.Text -cnotmatch '^([01][0-9]|2[0-3]):[0-5][0-9]$') { throw 'Horario invalido (use HH:mm).' }
-            # perfil novo exige validacao VIGENTE: se perfil, chave ou senha
-            # mudaram depois do "Validar e continuar", a prova expirou.
+            # perfil novo exige validacao VIGENTE -- conferida ANTES e
+            # DEPOIS do build (uma tentativa vencida nao publica nada)
             if ($script:perfilAtual) {
-                $tok = Get-TokenAtivacao -Perfil $script:perfilAtual -ChavePath $tbChave.Text -SenhaTxt $tbSenha.Text
-                if (-not $script:ativacaoToken -or $tok -ne $script:ativacaoToken) {
-                    throw 'Perfil, chave ou senha alterados apos a validacao - clique "Validar e continuar" de novo na aba 1.'
-                }
+                Test-AtivacaoVigente -Perfil $script:perfilAtual -ChavePath $tbChave.Text -SenhaTxt $tbSenha.Text
             }
             # FASE 1 (consulta o destino no preparo): fora da thread da janela
             $built = Invoke-Assincrono -Funcao 'Build-Configuracao' -Form $form -PrazoMs 180000 -Params @{
                 Perfil = $script:perfilAtual; ChavePath = $tbChave.Text
                 SenhaRestic = $(if ($tbSenha.Text) { ConvertTo-SecureString $tbSenha.Text -AsPlainText -Force } else { $null })
                 Origem = $tbOrigem.Text; Exclusoes = $excl; Horario = $tbHora.Text }
+            if ($script:perfilAtual) {
+                Test-AtivacaoVigente -Perfil $script:perfilAtual -ChavePath $tbChave.Text -SenhaTxt $tbSenha.Text
+            }
             # credencial do Windows na janela nativa; cancelar => desfaz a fase 1
             $cred = $host.UI.PromptForCredential('MAC IP Backup',
                 "Senha do Windows da conta $conta (a tarefa roda mesmo sem sessao aberta)",
@@ -1333,7 +1431,10 @@ function Show-Gui {
             # depois de Publish-Configuracao ela e a unica responsavel.
             if ($built -and -not $built.Publicado) { Remove-ConjuntoNovo -Built $built | Out-Null }
             $lblCfg.ForeColor = 'DarkRed'; $lblCfg.Text = "Erro: $($_.Exception.Message)"
-        } finally { $btSalvar.Enabled = $true }
+        } finally {
+            $script:OpRede = $false; $btSalvar.Enabled = $true; $btValidar.Enabled = $true
+            foreach ($c in $entradasAtv) { $c.Enabled = $true }
+        }
     })
 
     # ----- Tab 3: Operar -----
@@ -1359,10 +1460,19 @@ function Show-Gui {
             }
             $estado = Get-EstadoAtual
             $res = if ($estado) { Read-UltimoResultado -Estado $estado } else { $null }
-            # Ultimo backup CONFIRMADO e evidencia propria: data/hora e
-            # snapshot vem do resultado, nao do disparo atual.
-            $lblUlt.Text = 'Ultimo backup confirmado: ' + $(if (Test-ResConfirmado -Res $res) {
-                ('{0} (snapshot {1})' -f $res.fim_utc, ([string]$res.snapshot).Substring(0,12))
+            # Ultimo backup CONFIRMADO: evidencia propria persistida em
+            # ultimo-confirmado.json -- um falha posterior ou ausencia de
+            # novo resultado nao apaga; repositorio trocado nao herda.
+            $repoId = ''
+            if ($cfgPath -and (Test-Path -LiteralPath $cfgPath -PathType Leaf)) {
+                try { $repoId = [string](Read-AgenteConfig -Caminho $cfgPath).repositorio_id } catch { }
+            }
+            if ($estado -and (Test-ResConfirmado -Res $res)) {
+                Update-UltimoConfirmado -Estado $estado -Res $res -RepositorioId $repoId
+            }
+            $conf = if ($estado) { Read-UltimoConfirmado -Estado $estado -RepositorioId $repoId } else { $null }
+            $lblUlt.Text = 'Ultimo backup confirmado: ' + $(if ($conf) {
+                ('{0} (snapshot {1})' -f $conf.fim_utc, ([string]$conf.snapshot).Substring(0,12))
             } else { 'nenhum ainda' })
             if (-not $info) {
                 $lblStatus.ForeColor = 'DarkRed'; $lblStatus.Text = 'Situacao: ' + $script:RotulosStatus.sem_tarefa

@@ -90,6 +90,11 @@ class TestWindowsAgentPs1(unittest.TestCase):
         # conjunto novo (config-N/estado-N) nao toca o conjunto ativo
         self.assertIn("config-$n", fonte)
         self.assertIn("estado-$n", fonte)
+        # ultimo backup confirmado: evidencia separada do ultimo resultado
+        self.assertIn("ultimo-confirmado.json", fonte)
+        # prova de validacao vinculada a perfil+chave+senha capturados
+        self.assertIn("Get-TokenAtivacao", fonte)
+        self.assertIn("Test-AtivacaoVigente", fonte)
 
     def test_contrato_instalador(self):
         """Contrato estatico do instalador NSIS."""
@@ -121,6 +126,9 @@ class TestWindowsAgentPs1(unittest.TestCase):
         # registro em "Aplicativos instalados" do Windows
         self.assertIn('CurrentVersion\\Uninstall\\MACIP-Backup', nsi)
         self.assertIn('UninstallString', nsi)
+        # UninstallString COM aspas no caminho completo (Program Files tem
+        # espaco): sem elas, "C:\Program" seria executado como programa
+        self.assertIn('\'"$INSTDIR\\desinstalar.exe"\'', nsi)
         self.assertIn('DeleteRegKey HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\MACIP-Backup"', nsi)
         # o script estruturado verifica marca + acao + instancias via COM
         desinst = (AGENT_DIR / "installer" / "Desinstalar-Tarefa.ps1").read_text(

@@ -79,7 +79,9 @@ Section "Instalar"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\MACIP-Backup" "DisplayVersion" "${VERSAO}"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\MACIP-Backup" "Publisher" "MAC IP"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\MACIP-Backup" "InstallLocation" "$INSTDIR"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\MACIP-Backup" "UninstallString" "$INSTDIR\desinstalar.exe"
+  ; aspas obrigatorias: Program Files tem espaco e o Windows executa o
+  ; valor da UninstallString como linha de comando
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\MACIP-Backup" "UninstallString" '"$INSTDIR\desinstalar.exe"'
   WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\MACIP-Backup" "NoModify" 1
   WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\MACIP-Backup" "NoRepair" 1
 SectionEnd

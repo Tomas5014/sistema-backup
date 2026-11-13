@@ -517,8 +517,66 @@ try {
     $t0 = Get-Date
     throws { Get-Snapshots -Estado $estado -Config $b1.Config } 'SFTP sem resposta: consulta falha dentro do prazo'
     ok (((Get-Date) - $t0).TotalSeconds -lt 15) 'SFTP sem resposta: nao travou (Kill no estouro)'
+    # mesmo prazo na ATIVACAO (Test-ConexaoDestino usa Confirm-DestinoComPrazo)
+    $t0 = Get-Date
+    throws { Test-ConexaoDestino -Perfil $p -ChavePath $chaveLab -SenhaRestic (ConvertTo-SecureString 'x' -AsPlainText -Force) } 'SFTP sem resposta: ativacao falha dentro do prazo'
+    ok (((Get-Date) - $t0).TotalSeconds -lt 15) 'SFTP sem resposta: ativacao nao travou'
+    # e no PREPARO ao salvar (Build -> Invoke-AgentePreparar -ConfirmaDestino)
+    $t0 = Get-Date
+    throws { Build-Configuracao -Perfil $p -ChavePath $chaveLab -SenhaRestic (ConvertTo-SecureString 'x' -AsPlainText -Force) -Origem $origem -Exclusoes @() -Horario '02:30' } 'SFTP sem resposta: preparo falha dentro do prazo'
+    ok (((Get-Date) - $t0).TotalSeconds -lt 20) 'SFTP sem resposta: preparo nao travou a janela'
     $script:ConsultaTimeoutMs = 60000
     Remove-Item -LiteralPath (Join-Path $stubDir 'cat-sleep') -Force
+
+    # ---- Invoke-Assincrono: listagens devolvem TODOS os itens ----
+    @'
+{"id":"1111111111111111111111111111111111111111111111111111111111111111","short_id":"11111111","time":"2026-01-01T03:00:00Z"}
+{"id":"2222222222222222222222222222222222222222222222222222222222222222","short_id":"22222222","time":"2026-01-02T03:00:00Z"}
+'@ | Set-Content -LiteralPath (Join-Path $stubDir 'snaps.jsonl') -Encoding Ascii
+    $snapsAsync = Invoke-Assincrono -Funcao 'Get-Snapshots' -Params @{ Estado = $estado; Config = $b1.Config }
+    eq @($snapsAsync).Count 2 'assincrono: dois pontos devolvidos (nao so o primeiro)'
+    eq ([string]$snapsAsync[1].id).Substring(0,1) '2' 'assincrono: SEGUNDO ponto acessivel'
+    $arqsAsync = Invoke-Assincrono -Funcao 'Get-ArquivosSnapshot' -Params @{ Estado = $estado; Config = $b1.Config; Snapshot = '2222' }
+    eq @($arqsAsync).Count 2 'assincrono: dois arquivos devolvidos no ponto'
+    # restaura o SEGUNDO arquivo via assincrono -> SHA-256 conferido
+    [IO.File]::WriteAllBytes((Join-Path $stubDir 'dump.bin'), [Text.Encoding]::UTF8.GetBytes('SEGUNDO-ARQUIVO'))
+    $destS2 = Join-Path $tmp 'dest-segundo'
+    $alvoS2 = Invoke-Assincrono -Funcao 'Restore-Arquivo' -Params @{
+        Estado = $estado; Config = $b1.Config; Snapshot = $snapOk
+        Arquivo = '/o/a[1].txt'; Destino = $destS2; Origem = $origem }
+    eq (Get-FileHash -LiteralPath $alvoS2 -Algorithm SHA256).Hash.ToLower() `
+       ([BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes('SEGUNDO-ARQUIVO'))).Replace('-','').ToLower()) 'assincrono: restaurar segundo arquivo -- SHA-256 confere'
+    # operacao de unico objeto devolve o objeto; vazio devolve $null
+    Remove-Item -LiteralPath (Join-Path $stubDir 'snaps.jsonl') -Force
+    $vazio = Invoke-Assincrono -Funcao 'Get-Snapshots' -Params @{ Estado = $estado; Config = $b1.Config }
+    ok ($null -eq $vazio -or @($vazio).Count -eq 0) 'assincrono: listagem vazia -> sem itens'
+
+    # ---- token de ativacao: prova vale so para os dados capturados ----
+    $script:ativacaoToken = Get-TokenAtivacao -Perfil $p -ChavePath $chaveLab -SenhaTxt 'segredo1'
+    ok $true 'token de ativacao capturado'
+    Test-AtivacaoVigente -Perfil $p -ChavePath $chaveLab -SenhaTxt 'segredo1'
+    ok $true 'mesmos dados: prova vigente'
+    throws { Test-AtivacaoVigente -Perfil $p -ChavePath $chaveLab -SenhaTxt 'outra' } 'senha mudou: prova expirada'
+    $p2 = [pscustomobject]@{ repositorio='sftp://u@h//repo2'; repositorio_id=('b'*64); known_hosts='h ssh-ed25519 AAAAx' }
+    throws { Test-AtivacaoVigente -Perfil $p2 -ChavePath $chaveLab -SenhaTxt 'segredo1' } 'perfil mudou: prova expirada'
+    throws { Test-AtivacaoVigente -Perfil $p -ChavePath (Join-Path $tmp 'chave2') -SenhaTxt 'segredo1' } 'chave mudou: prova expirada'
+    $script:ativacaoToken = $null
+    throws { Test-AtivacaoVigente -Perfil $p -ChavePath $chaveLab -SenhaTxt 'segredo1' } 'sem validacao: salvar recusado'
+
+    # ---- ultimo-confirmado.json: sobrevive a falha e a reabertura ----
+    $resOk = [pscustomobject]@{ status='sucesso'; codigo_restic=0; snapshot=$snapOk; inicio_utc='2026-01-01T03:00:00Z'; fim_utc='2026-01-01T03:10:00Z' }
+    Update-UltimoConfirmado -Estado $estado -Res $resOk -RepositorioId $idValido
+    $conf1 = Read-UltimoConfirmado -Estado $estado -RepositorioId $idValido
+    eq $conf1.snapshot $snapOk 'confirmado persistido: snapshot guardado'
+    # falha posterior NAO apaga
+    Update-UltimoConfirmado -Estado $estado -Res ([pscustomobject]@{ status='falha'; codigo_restic=1; fim_utc='2026-01-02T03:00:00Z' }) -RepositorioId $idValido
+    eq (Read-UltimoConfirmado -Estado $estado -RepositorioId $idValido).snapshot $snapOk 'falha posterior: confirmado anterior preservado'
+    # sucesso mais ANTIGO nao regride a data
+    Update-UltimoConfirmado -Estado $estado -Res ([pscustomobject]@{ status='sucesso'; codigo_restic=0; snapshot=('d'*64); fim_utc='2025-12-01T03:00:00Z' }) -RepositorioId $idValido
+    eq (Read-UltimoConfirmado -Estado $estado -RepositorioId $idValido).snapshot $snapOk 'sucesso mais antigo: data nao regride'
+    # repositorio TROCADO nao herda o sucesso do anterior
+    ok ($null -eq (Read-UltimoConfirmado -Estado $estado -RepositorioId ('b'*64))) 'repo divergente: confirmado nao herdado'
+    Remove-Item -LiteralPath (Join-Path $estado 'ultimo-confirmado.json') -Force
 
     # Restore-Arquivo: destino = origem / dentro da origem / junction
     throws { Restore-Arquivo -Estado $estado -Config $b1.Config -Snapshot ('c'*64) -Arquivo '/o/amostra.txt' -Destino $origem -Origem $origem } 'restaurar: destino = origem recusado'

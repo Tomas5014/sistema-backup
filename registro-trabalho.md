@@ -1604,3 +1604,62 @@ dois links encadeados -> recusado; "cat" que nao responde -> falha
 **119/119**; `unittest` **5/5**; `git diff --check` limpo; ASCII.
 Pendente sem mudanca: VM Windows, makensis, restic.exe aprovado —
 instalador NAO compilado; COM/DPAPI/agendamento sem prova real.
+
+## Revisao 8 (branch feature/windows-backup-gui-pilot)
+
+1. **Todas as listagens preservadas:** `Invoke-Assincrono` devolvia so
+   `$out[0]` — a aba Restaurar perdia pontos e arquivos a partir do
+   segundo item. Agora devolve o objeto unico, `$null` no vazio ou
+   TODOS os itens (0/1/N preservados). Regressao cobre o caminho que
+   alimenta a tela: dois pontos listados, segundo ponto escolhido,
+   dois arquivos listados nele, segundo arquivo restaurado com SHA-256
+   conferido. Correcao correlata: o runspace dot-source o arquivo de
+   novo e perdia os overrides injetaveis da sessao (`ResticExeNome`,
+   `SshExe`, prazos) — agora eles viajam para o trabalhador.
+2. **Validacao vinculada aos dados testados:** `Get-TokenAtivacao`
+   captura perfil (JSON) + caminho e SHA-256 da chave + senha (so no
+   hash — nunca em argumento, mensagem ou log) no instante do clique.
+   `OpRede` trava as entradas e ignora cliques repetidos durante a
+   tentativa; ao fim, o token so e aceito se os dados continuam os
+   capturados — tentativa antiga nunca libera configuracao nova.
+   `Test-AtivacaoVigente` e conferida ANTES e DEPOIS do build ao
+   salvar. Prazo aplicado direto as consultas Restic: ativacao usa
+   `Test-ConexaoDestino` -> `Confirm-DestinoComPrazo` e o preparo ao
+   salvar recebe o mesmo `Confirm-DestinoComPrazo` por scriptblock
+   injetado (`Invoke-AgentePreparar -ConfirmaDestino`; o uso por
+   script segue com `Confirm-Destino` padrao). Falha preserva
+   configuracao e tarefa anteriores e reabilita os controles
+   (finally). Regressoes: senha/perfil/chave trocados -> prova
+   expirada; sem validacao -> salvar recusado; SSH que aceita mas nao
+   responde SFTP -> falha dentro do prazo na ativacao E no preparo,
+   sem travar a janela.
+3. **Ultimo backup confirmado separado:** `ultimo-confirmado.json` e
+   evidencia propria, independente de `ultimo-resultado.json`
+   (tentativa mais recente). So grava com codigo 0 + snapshot de 64
+   hex + `fim_utc` valido e mais recente que o guardado; falha,
+   incompleto ou ausencia de resultado posteriores nao apagam —
+   persistido em arquivo, sobrevive a reabertura. `repositorio_id`
+   vinculado: destino novo nao herda confirmado do anterior.
+   Regressoes: falha posterior preserva; sucesso mais antigo nao
+   regride a data; repositorio divergente nao herda.
+4. **UninstallString com aspas:** `macip-backup.nsi` grava
+   `UninstallString` como `"$INSTDIR\desinstalar.exe"` (aspas literais
+   no valor) — `Program Files` tem espaco e o Windows executa o valor
+   como linha de comando. Contrato estatico Python passou a exigir a
+   forma com aspas. Protecoes mantidas: propriedade revalidada na
+   definicao recem-lida, desabilitada + sem instancias ativas ou
+   pendentes ou preserva executaveis e registro; ProgramData
+   (configuracao, DPAPI, resultados) e repositorio intactos.
+
+Verificacao: `run-gui-tests.ps1` **179 ok, 0 falha** (1 pulado: COM
+real fora do Windows) — pwsh 7.4.6, simulado; agente **119/119**;
+`unittest` **5/5** (2 pulados: pwsh fora do PATH do harness — suites
+rodadas direto); `git diff --check` limpo; ps1 ASCII puro.
+Separacao de prova: tudo acima e SIMULADO em pwsh 7/Linux — sem prova
+real de COM/DPAPI/WinForms/PS 5.1/NSIS. Restic real: prova de
+`ls --json`/`dump`/SHA-256 do ciclo anterior mantida; VM Windows
+limpa e SFTP de laboratorio continuam ausentes. Instalador NAO
+compilado: sem `makensis` nem `payload\restic.exe` aprovado neste
+ambiente — `BUILD.md` mantem o primeiro passo reproduzivel (copiar o
+restic.exe aprovado para `installer\payload\`, `makensis /DVERSAO=...`,
+registrar versoes e SHA-256 dos binarios).

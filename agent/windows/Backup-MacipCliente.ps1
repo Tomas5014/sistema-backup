@@ -310,7 +310,11 @@ function Resolve-Contexto {
 }
 
 function Invoke-AgentePreparar {
-    param([string]$Config, [string]$DiretorioEstado, [string]$ResticExe, [securestring]$SenhaRestic)
+    # -ConfirmaDestino: scriptblock opcional ($cfg, $estado) -> repoId. A
+    # GUI injeta a versao com prazo; o uso por script segue com
+    # Confirm-Destino padrao (sem prazo, como antes).
+    param([string]$Config, [string]$DiretorioEstado, [string]$ResticExe, [securestring]$SenhaRestic,
+          [scriptblock]$ConfirmaDestino)
     $ctx = Resolve-Contexto -Config $Config -DiretorioEstado $DiretorioEstado
     $cfg = $ctx.Cfg; $estado = $ctx.Estado
     $ident = Get-IdentidadeAtual
@@ -353,7 +357,8 @@ function Invoke-AgentePreparar {
         $cfg | Add-Member -NotePropertyName ssh_exe -NotePropertyValue $ssh -Force
         $cfg | Add-Member -NotePropertyName ssh_config -NotePropertyValue (Write-SshConfig -Cfg $cfg -Estado $estado) -Force
 
-        $repoId = Confirm-Destino -Cfg $cfg -Estado $estado
+        $repoId = if ($ConfirmaDestino) { & $ConfirmaDestino $cfg $estado }
+                  else { Confirm-Destino -Cfg $cfg -Estado $estado }
 
         $scriptAbs = $PSCommandPath
         [ordered]@{
@@ -428,7 +433,7 @@ function Invoke-AgenteBackup {
         # O ssh efetivo le o ssh_config do ESTADO: confere caminhos,
         # hashes dos arquivos apontados e o hash do proprio ssh_config
         # que sera passado ao SSH. Copia identica em outro caminho nao
-        # basta — o caminho registrado e o efetivo precisam coincidir.
+        # basta -- o caminho registrado e o efetivo precisam coincidir.
         foreach ($f in 'repositorio', 'repositorio_id', 'identidade_ssh', 'identidade_sha256',
                  'known_hosts', 'known_hosts_sha256', 'ssh_config_sha256') {
             if (-not ($prep.PSObject.Properties.Name -contains $f) -or -not $prep.$f) {
