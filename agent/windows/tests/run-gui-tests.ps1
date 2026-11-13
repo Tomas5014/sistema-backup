@@ -564,18 +564,22 @@ try {
     throws { Test-AtivacaoVigente -Perfil $p -ChavePath $chaveLab -SenhaTxt 'segredo1' } 'sem validacao: salvar recusado'
 
     # ---- ultimo-confirmado.json: sobrevive a falha e a reabertura ----
-    $resOk = [pscustomobject]@{ status='sucesso'; codigo_restic=0; snapshot=$snapOk; inicio_utc='2026-01-01T03:00:00Z'; fim_utc='2026-01-01T03:10:00Z' }
-    Update-UltimoConfirmado -Estado $estado -Res $resOk -RepositorioId $idValido
-    $conf1 = Read-UltimoConfirmado -Estado $estado -RepositorioId $idValido
+    # (a gravacao e feita pelo AGENTE -- funcoes Read/Update-Confirmado)
+    Update-Confirmado -Estado $estado -RepositorioId $idValido -Snapshot $snapOk `
+        -InicioUtc '2026-01-01T03:00:00Z' -FimUtc '2026-01-01T03:10:00Z'
+    $conf1 = Read-Confirmado -Estado $estado -RepositorioId $idValido
     eq $conf1.snapshot $snapOk 'confirmado persistido: snapshot guardado'
-    # falha posterior NAO apaga
-    Update-UltimoConfirmado -Estado $estado -Res ([pscustomobject]@{ status='falha'; codigo_restic=1; fim_utc='2026-01-02T03:00:00Z' }) -RepositorioId $idValido
-    eq (Read-UltimoConfirmado -Estado $estado -RepositorioId $idValido).snapshot $snapOk 'falha posterior: confirmado anterior preservado'
+    # registro invalido NAO substitui (snapshot fora do formato)
+    throws { Update-Confirmado -Estado $estado -RepositorioId $idValido -Snapshot 'xx' -FimUtc '2026-01-02T03:00:00Z' } 'confirmado: snapshot invalido recusado'
+    eq (Read-Confirmado -Estado $estado -RepositorioId $idValido).snapshot $snapOk 'confirmado anterior preservado'
     # sucesso mais ANTIGO nao regride a data
-    Update-UltimoConfirmado -Estado $estado -Res ([pscustomobject]@{ status='sucesso'; codigo_restic=0; snapshot=('d'*64); fim_utc='2025-12-01T03:00:00Z' }) -RepositorioId $idValido
-    eq (Read-UltimoConfirmado -Estado $estado -RepositorioId $idValido).snapshot $snapOk 'sucesso mais antigo: data nao regride'
+    Update-Confirmado -Estado $estado -RepositorioId $idValido -Snapshot ('d'*64) -FimUtc '2025-12-01T03:00:00Z'
+    eq (Read-Confirmado -Estado $estado -RepositorioId $idValido).snapshot $snapOk 'sucesso mais antigo: data nao regride'
     # repositorio TROCADO nao herda o sucesso do anterior
-    ok ($null -eq (Read-UltimoConfirmado -Estado $estado -RepositorioId ('b'*64))) 'repo divergente: confirmado nao herdado'
+    ok ($null -eq (Read-Confirmado -Estado $estado -RepositorioId ('b'*64))) 'repo divergente: confirmado nao herdado'
+    # registro corrompido nao e apresentado como confirmado
+    'lixo nao-json' | Set-Content -LiteralPath (Join-Path $estado 'ultimo-confirmado.json') -Encoding Ascii
+    ok ($null -eq (Read-Confirmado -Estado $estado -RepositorioId $idValido)) 'confirmado corrompido: nao apresentado'
     Remove-Item -LiteralPath (Join-Path $estado 'ultimo-confirmado.json') -Force
 
     # Restore-Arquivo: destino = origem / dentro da origem / junction

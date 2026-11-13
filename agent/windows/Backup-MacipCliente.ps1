@@ -272,6 +272,77 @@ function Write-Resultado {
     $Dados | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $Estado 'ultimo-resultado.json') -Encoding UTF8
 }
 
+function ConvertTo-DataUtc {
+    # Aceita DateTimeOffset, DateTime (ConvertFrom-Json do pwsh 7 ja
+    # converte datas ISO) ou texto -- sempre em cultura invariante:
+    # comparar via [string] local quebraria em culturas dd/MM/aaaa.
+    param($V)
+    if ($null -eq $V) { return $null }
+    if ($V -is [DateTimeOffset]) { return $V }
+    if ($V -is [DateTime]) { return [DateTimeOffset]$V }
+    try {
+        return [DateTimeOffset]::Parse([string]$V, [Globalization.CultureInfo]::InvariantCulture,
+            ([Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal))
+    } catch { return $null }
+}
+
+function Test-ConfirmadoValido {
+    # Um confirmado so vale com snapshot 64-hex, fim_utc parseavel e
+    # repositorio_id presente.
+    param($C)
+    return ($null -ne $C -and [string]$C.snapshot -cmatch '^[0-9a-f]{64}$' -and
+            [string]$C.repositorio_id -and ($null -ne (ConvertTo-DataUtc $C.fim_utc)))
+}
+
+function Read-Confirmado {
+    # ultimo-confirmado.json: evidencia do ULTIMO backup comprovado pelo
+    # proprio agente, separada de ultimo-resultado.json (tentativa mais
+    # recente). Registro invalido ou de outro repositorio nao aparece.
+    param([string]$Estado, [string]$RepositorioId)
+    $f = Join-Path $Estado 'ultimo-confirmado.json'
+    if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { return $null }
+    try { $c = Get-Content -LiteralPath $f -Raw | ConvertFrom-Json } catch { return $null }
+    if (-not (Test-ConfirmadoValido -C $c)) { return $null }
+    if ($RepositorioId -and ([string]$c.repositorio_id -cne $RepositorioId)) { return $null }
+    return $c
+}
+
+function Update-Confirmado {
+    # Grava a confirmacao por substituicao ATOMICA (tmp + Move): so com
+    # snapshot valido, fim_utc parseavel e repositorio_id verificado
+    # nesta execucao. NUNCA regride: sucesso mais antigo que o guardado
+    # e ignorado. Se a gravacao falhar, o arquivo anterior permanece e
+    # o erro sobe para o chamador diagnosticar.
+    param([string]$Estado, [string]$RepositorioId, [string]$Snapshot,
+          [string]$InicioUtc, [string]$FimUtc)
+    if ([string]$Snapshot -cnotmatch '^[0-9a-f]{64}$') { throw 'snapshot invalido para confirmado.' }
+    if (-not $RepositorioId) { throw 'repositorio_id ausente para confirmado.' }
+    $fim = ConvertTo-DataUtc $FimUtc
+    if (-not $fim) { throw 'fim_utc invalido para confirmado.' }
+    $cur = Read-Confirmado -Estado $Estado -RepositorioId $RepositorioId
+    $fimCur = if ($cur) { ConvertTo-DataUtc $cur.fim_utc } else { $null }
+    if ($fimCur -and $fimCur -ge $fim) { return }   # nao regride
+    $dest = Join-Path $Estado 'ultimo-confirmado.json'
+    $tmp  = "$dest.tmp"
+    # pasta homonima impediria a troca atomica silenciosamente: sem ela,
+    # Move-Item de arquivo sobre arquivo e a substituicao segura.
+    if (Test-Path -LiteralPath $dest -PathType Container) {
+        throw 'ultimo-confirmado.json e uma pasta; confirmado nao gravado.'
+    }
+    try {
+        [ordered]@{
+            fim_utc        = $FimUtc
+            inicio_utc     = $InicioUtc
+            snapshot       = $Snapshot
+            repositorio_id = $RepositorioId
+        } | ConvertTo-Json | Set-Content -LiteralPath $tmp -Encoding UTF8
+        Move-Item -LiteralPath $tmp -Destination $dest -Force
+    } catch {
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+        throw
+    }
+}
+
 function Get-HashArquivo {
     param([string]$Caminho)
     return (Get-FileHash -LiteralPath $Caminho -Algorithm SHA256).Hash.ToLower()
@@ -469,7 +540,7 @@ function Invoke-AgenteBackup {
 
         if ($gravar) { Write-Resultado -Estado $estado -Dados $res }
 
-        [void](Confirm-Destino -Cfg $cfg -Estado $estado)
+        $repoId = Confirm-Destino -Cfg $cfg -Estado $estado
 
         $argsRestic = @('backup', '--json', '--tag', 'macip-agente-windows')
         foreach ($padrao in $cfg.exclusoes) { $argsRestic += @('--exclude', $padrao) }
@@ -484,13 +555,28 @@ function Invoke-AgenteBackup {
         if (-not $snapshot) { throw 'Restic 0 mas sem ID de snapshot valido; nao marcado como sucesso.' }
         $res.snapshot = $snapshot
         $res.status = 'sucesso'
+        # A confirmacao e gravada pelo proprio AGENTE agora -- a janela
+        # pode nem abrir entre este sucesso e a proxima falha. So depois
+        # de codigo 0 + snapshot valido + ID do repositorio verificado
+        # nesta execucao. Se a gravacao falhar, o backup CONTINUA
+        # sucesso (o snapshot remoto existe): so a evidencia local fica
+        # sem atualizar, diagnosticada em confirmado_erro e no warning.
+        $res.fim_utc = [DateTime]::UtcNow.ToString('o')
+        try {
+            Update-Confirmado -Estado $estado -RepositorioId $repoId -Snapshot $snapshot `
+                -InicioUtc $res.inicio_utc -FimUtc $res.fim_utc
+        } catch {
+            $res.confirmado_erro = $_.Exception.Message
+            Write-Warning ('ultimo-confirmado.json nao atualizado (registro anterior ' +
+                "preservado): $($_.Exception.Message)")
+        }
     }
     catch {
         $res.status = 'falha'
         $res.erro = $_.Exception.Message
     }
     finally {
-        $res.fim_utc = [DateTime]::UtcNow.ToString('o')
+        if (-not $res.fim_utc) { $res.fim_utc = [DateTime]::UtcNow.ToString('o') }
         if ($gravar -and $estado) { Write-Resultado -Estado $estado -Dados $res }
     }
     return [pscustomobject]$res

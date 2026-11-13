@@ -190,6 +190,71 @@ eq ($bruto -match '"fim_utc"\s*:\s*"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}') $true 
 eq ([string]::IsNullOrEmpty($j.conta)) $false 'resultado: conta registrada'
 eq (Test-Path (Join-Path $lab.Estado 'ultimo-restic.log')) $true 'log do restic gravado'
 
+Write-Host '== ultimo-confirmado.json: o AGENTE grava, sem a janela =='
+# Cenario do defeito: sucesso de segunda + falha de terca com a GUI
+# fechada -- a evidencia do sucesso tem de estar no estado gravada
+# pelo proprio agente (esta secao exercita Invoke-AgenteBackup, o
+# caminho real; chamar a funcao de gravacao nao cobriria o defeito).
+$lab = New-Lab; Write-Config $lab
+Invoke-Preparar $lab | Out-Null
+$r = Invoke-Backup $lab
+eq $r.status 'sucesso' 'confirmado: primeiro backup sucesso'
+eq (Test-Path (Join-Path $lab.Estado 'ultimo-confirmado.json')) $true 'confirmado: agente gravou o arquivo'
+$conf = Read-Confirmado -Estado $lab.Estado -RepositorioId ('b' * 64)
+eq ([string]$conf.snapshot) ('c' * 64) 'confirmado: snapshot do sucesso'
+eq ([string]$conf.repositorio_id) ('b' * 64) 'confirmado: ID verificado nesta execucao'
+eq (-not [string]::IsNullOrEmpty([string]$conf.fim_utc)) $true 'confirmado: data de conclusao presente'
+eq ([string]$conf.fim_utc) ([string](Read-Resultado $lab).fim_utc) 'confirmado: fim = fim registrado no resultado'
+# falha DEPOIS (restic 1) -- a janela nunca abriu entre os dois
+'1' | Set-Content (Join-Path $lab.StubDir 'code') -Encoding Ascii -NoNewline
+$r = Invoke-Backup $lab
+eq $r.status 'falha' 'confirmado: segundo backup falha'
+eq ((Read-Resultado $lab).status) 'falha' 'confirmado: resultado recente indica falha'
+$conf = Read-Confirmado -Estado $lab.Estado -RepositorioId ('b' * 64)
+eq ([string]$conf.snapshot) ('c' * 64) 'confirmado: sucesso anterior preservado apos falha'
+eq (-not [string]::IsNullOrEmpty([string]$conf.fim_utc)) $true 'confirmado: data anterior preservada'
+# retorno INCOMPLETO (restic 3): tambem nao apaga
+'3' | Set-Content (Join-Path $lab.StubDir 'code') -Encoding Ascii -NoNewline
+$r = Invoke-Backup $lab
+eq $r.status 'falha' 'confirmado: backup incompleto falha'
+eq ([int](Read-Resultado $lab).codigo_restic) 3 'confirmado: resultado recente = incompleto'
+eq ([string](Read-Confirmado -Estado $lab.Estado -RepositorioId ('b' * 64)).snapshot) ('c' * 64) 'confirmado: preservado apos incompleto'
+# sucesso MAIS NOVO atualiza; outro repositorio nao herda
+'0' | Set-Content (Join-Path $lab.StubDir 'code') -Encoding Ascii -NoNewline
+('d' * 64) | Set-Content (Join-Path $lab.StubDir 'snapshot') -Encoding Ascii -NoNewline
+$r = Invoke-Backup $lab
+eq $r.status 'sucesso' 'confirmado: novo sucesso'
+eq ([string](Read-Confirmado -Estado $lab.Estado -RepositorioId ('b' * 64)).snapshot) ('d' * 64) 'confirmado: sucesso mais novo atualiza'
+ok ($null -eq (Read-Confirmado -Estado $lab.Estado -RepositorioId ('e' * 64))) 'confirmado: outro repositorio nao herda'
+# rc=0 SEM snapshot valido: nem sucesso nem confirmado novo
+Remove-Item (Join-Path $lab.StubDir 'snapshot') -Force
+$r = Invoke-Backup $lab
+eq $r.status 'falha' 'confirmado: rc=0 sem snapshot falha'
+eq ([string](Read-Confirmado -Estado $lab.Estado -RepositorioId ('b' * 64)).snapshot) ('d' * 64) 'confirmado: preservado sem snapshot valido'
+('c' * 64) | Set-Content (Join-Path $lab.StubDir 'snapshot') -Encoding Ascii -NoNewline
+# sucesso mais ANTIGO nao regride (gravacao direta simula relogio atrasado)
+Update-Confirmado -Estado $lab.Estado -RepositorioId ('b' * 64) -Snapshot ('a' * 64) `
+    -InicioUtc '2020-01-01T00:00:00Z' -FimUtc '2020-01-01T00:10:00Z'
+eq ([string](Read-Confirmado -Estado $lab.Estado -RepositorioId ('b' * 64)).snapshot) ('d' * 64) 'confirmado: registro nao regride'
+# gravacao do confirmado FALHOU: sucesso mantido, erro diagnosticado
+$lab = New-Lab; Write-Config $lab
+Invoke-Preparar $lab | Out-Null
+$r = Invoke-Backup $lab
+eq $r.status 'sucesso' 'conf-erro: primeiro sucesso'
+$confAntes = Get-Content (Join-Path $lab.Estado 'ultimo-confirmado.json') -Raw
+if (-not $IsWindowsAlvo) {
+    # diretorio so de leitura: bloqueia CRIAR o temporario do confirmado;
+    # os arquivos existentes (resultado, log) seguem gravaveis.
+    & chmod a-w $lab.Estado
+    $r = Invoke-Backup $lab
+    & chmod u+w $lab.Estado
+    eq $r.status 'sucesso' 'conf-erro: backup continua sucesso'
+    eq (-not [string]::IsNullOrEmpty([string]$r.confirmado_erro)) $true 'conf-erro: falha visivel no retorno'
+    eq (-not [string]::IsNullOrEmpty([string](Read-Resultado $lab).confirmado_erro)) $true 'conf-erro: diagnostico em ultimo-resultado'
+    eq (Get-Content (Join-Path $lab.Estado 'ultimo-confirmado.json') -Raw) $confAntes 'conf-erro: arquivo anterior byte a byte'
+    eq (Test-Path (Join-Path $lab.Estado 'ultimo-confirmado.json.tmp')) $false 'conf-erro: temporario limpo'
+}
+
 Write-Host '== senha: nunca em argv/log/resultado; env restaurada =='
 $conteudo = (Read-Args $lab) + (Get-Content (Join-Path $lab.Estado 'ultimo-resultado.json') -Raw) +
             (Get-Content (Join-Path $lab.Estado 'ultimo-restic.log') -Raw)

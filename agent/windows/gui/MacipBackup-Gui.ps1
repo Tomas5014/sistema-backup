@@ -1139,37 +1139,11 @@ function Test-AtivacaoVigente {
 }
 
 # ---------- ultimo backup confirmado (evidencia propria) ----------
-
-function Read-UltimoConfirmado {
-    # ultimo-confirmado.json: evidencia SEPARADA do ultimo-resultado.json
-    # (que registra a tentativa mais recente). Um falha posterior nao
-    # apaga o sucesso confirmado; repositorio divergente nao herda.
-    param([string]$Estado, [string]$RepositorioId)
-    $f = Join-Path $Estado 'ultimo-confirmado.json'
-    if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { return $null }
-    try { $c = Get-Content -LiteralPath $f -Raw | ConvertFrom-Json } catch { return $null }
-    if ($RepositorioId -and $c.repositorio_id -and ([string]$c.repositorio_id -cne $RepositorioId)) { return $null }
-    return $c
-}
-
-function Update-UltimoConfirmado {
-    # So grava com codigo 0 + snapshot valido + data de conclusao, e so
-    # se a conclusao for mais recente que a guardada.
-    param([string]$Estado, $Res, [string]$RepositorioId)
-    if (-not (Test-ResConfirmado -Res $Res)) { return }
-    if (-not $Res.fim_utc) { return }
-    try { $fim = [DateTimeOffset]::Parse([string]$Res.fim_utc) } catch { return }
-    $cur = Read-UltimoConfirmado -Estado $Estado -RepositorioId $RepositorioId
-    if ($cur -and $cur.fim_utc) {
-        try { if ([DateTimeOffset]::Parse([string]$cur.fim_utc) -ge $fim) { return } } catch { }
-    }
-    [ordered]@{
-        fim_utc        = [string]$Res.fim_utc
-        inicio_utc     = [string]$Res.inicio_utc
-        snapshot       = [string]$Res.snapshot
-        repositorio_id = [string]$RepositorioId
-    } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $Estado 'ultimo-confirmado.json') -Encoding UTF8
-}
+# ultimo-confirmado.json e gravado pelo AGENTE a cada sucesso real
+# (Read-Confirmado/Update-Confirmado vem do Backup-MacipCliente.ps1
+# dot-sourced). A interface so LE e, para resultados de agentes
+# antigos que nao gravavam o confirmado, faz o backfill na leitura --
+# nao depende de a janela ter sido aberta antes.
 
 # ---------- execucao fora da thread da janela ----------
 
@@ -1461,16 +1435,19 @@ function Show-Gui {
             $estado = Get-EstadoAtual
             $res = if ($estado) { Read-UltimoResultado -Estado $estado } else { $null }
             # Ultimo backup CONFIRMADO: evidencia propria persistida em
-            # ultimo-confirmado.json -- um falha posterior ou ausencia de
-            # novo resultado nao apaga; repositorio trocado nao herda.
+            # ultimo-confirmado.json PELO AGENTE a cada sucesso real -- a
+            # tela so le; uma falha posterior ou ausencia de novo
+            # resultado nao apaga; repositorio trocado nao herda.
             $repoId = ''
             if ($cfgPath -and (Test-Path -LiteralPath $cfgPath -PathType Leaf)) {
                 try { $repoId = [string](Read-AgenteConfig -Caminho $cfgPath).repositorio_id } catch { }
             }
             if ($estado -and (Test-ResConfirmado -Res $res)) {
-                Update-UltimoConfirmado -Estado $estado -Res $res -RepositorioId $repoId
+                # backfill: agentes antigos gravavam so ultimo-resultado.
+                try { Update-Confirmado -Estado $estado -RepositorioId $repoId -Snapshot ([string]$res.snapshot) `
+                        -InicioUtc ([string]$res.inicio_utc) -FimUtc ([string]$res.fim_utc) } catch { }
             }
-            $conf = if ($estado) { Read-UltimoConfirmado -Estado $estado -RepositorioId $repoId } else { $null }
+            $conf = if ($estado) { Read-Confirmado -Estado $estado -RepositorioId $repoId } else { $null }
             $lblUlt.Text = 'Ultimo backup confirmado: ' + $(if ($conf) {
                 ('{0} (snapshot {1})' -f $conf.fim_utc, ([string]$conf.snapshot).Substring(0,12))
             } else { 'nenhum ainda' })

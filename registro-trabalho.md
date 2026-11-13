@@ -1663,3 +1663,52 @@ compilado: sem `makensis` nem `payload\restic.exe` aprovado neste
 ambiente — `BUILD.md` mantem o primeiro passo reproduzivel (copiar o
 restic.exe aprovado para `installer\payload\`, `makensis /DVERSAO=...`,
 registrar versoes e SHA-256 dos binarios).
+
+## Revisao 9 (branch feature/windows-backup-gui-pilot)
+
+**Defeito corrigido — ultimo sucesso perdido com a janela fechada:**
+`ultimo-confirmado.json` so era gravado quando a interface lia um
+resultado de sucesso; sucesso de segunda + falha de terca sem abrir a
+GUI fazia o falha substituir o resultado e o confirmado nunca existir.
+
+- O AGENTE (`Invoke-AgenteBackup`) agora grava o confirmado ele mesmo:
+  so com codigo Restic `0`, snapshot de 64 hex, `fim_utc` e o
+  `repositorio_id` retornado pelo `Confirm-Destino` DESTA execucao.
+  Substituicao atomica (tmp + `Move-Item`, com guarda contra pasta
+  homonima). Falha/incompleto/resultado invalido nao apagam; sucesso
+  mais antigo nao regride (`ConvertTo-DataUtc`: DateTime/DateTimeOffset
+  do ConvertFrom-Json do pwsh 7 ou texto em cultura invariante —
+  corrigido um defeito latente de cultura: `[DateTimeOffset]::Parse`
+  sobre `[string]` local falhava em culturas dd/MM/aaaa e regravava
+  por cima). Se a gravacao do confirmado falhar, o backup CONTINUA
+  sucesso, o arquivo anterior permanece byte a byte, o temporario e
+  limpo e o erro vai para `confirmado_erro` no ultimo-resultado.json
+  + Write-Warning.
+- GUI: `Read-UltimoConfirmado`/`Update-UltimoConfirmado` locais
+  removidos — le `Read-Confirmado` do agente (valida snapshot 64-hex +
+  fim parseavel + repositorio_id do repositorio ATIVO) e faz backfill
+  com `Update-Confirmado` para resultados de agentes antigos. A tela
+  mostra "Falhou" neste disparo e "Ultimo backup confirmado" anterior
+  ao mesmo tempo, sem depender de abertura anterior da janela.
+
+Regressao OBRIGATORIA (caminho real do agente, janela fechada —
+`Invoke-AgenteBackup` na suite do agente): sucesso -> confirmado com
+snapshot/ID/fim; falha (restic 1) -> resultado recente = falha E
+confirmado preservado; incompleto (restic 3) -> preservado; novo
+sucesso -> atualiza; rc=0 sem snapshot -> falha, confirmado preservado;
+sucesso com fim mais antigo -> nao regride; outro repositorio -> nao
+herda; dir so de leitura na gravacao -> sucesso mantido + confirmado_erro
++ anterior byte a byte + tmp limpo. Na GUI: registro corrompido/invalido
+nao e apresentado; snapshot invalido na gravacao -> recusado.
+
+Verificacao: agente **144 ok, 0 falha** (pwsh 7.4.6, simulado); GUI
+**181 ok, 0 falha** (1 pulado: COM real fora do Windows); `unittest`
+**5/5** (2 pulados: pwsh fora do PATH do harness — suites rodadas
+direto); `git diff --check` limpo; linhas novas em ASCII.
+Separacao de prova: SIMULADO em pwsh 7/Linux — sem prova real de
+COM/DPAPI/WinForms/PS 5.1/NSIS. Restic real: prova do ciclo anterior
+mantida. Instalador NAO compilado: sem makensis nem payload\restic.exe
+aprovado — BUILD.md mantem o primeiro passo reproduzivel. Pendente na
+VM: sucesso -> falha com a janela fechada e SFTP sem resposta durante a
+configuracao (janela deve voltar a aceitar comandos e nada publica
+depois do timeout).

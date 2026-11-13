@@ -196,14 +196,18 @@ repositório e o `Preparar` (DPAPI na conta) são os mesmos do agente.
   sucesso antigo, mesmo dentro de minutos, não conta. Resultado ausente
   com disparo registrado é "sem resultado deste disparo" (o código do
   Agendador prova falha de inicialização quando não `0`), nunca
-  "nunca executou". O confirmado vem de `ultimo-confirmado.json`
-  (evidência separada de `ultimo-resultado.json`, que registra a
-  tentativa mais recente): só é atualizado com código `0` + snapshot
-  válido + `fim_utc` mais recente que o guardado — falha, execução
-  incompleta ou ausência de resultado novos **não apagam** o sucesso
-  anterior, que continua na tela inclusive ao reabrir a GUI. Trocar de
-  destino/repositório não herda o confirmado antigo (vinculado por
-  `repositorio_id`). Salvar com a tarefa pausada **preserva a pausa** —
+  "nunca executou". O confirmado vem de `ultimo-confirmado.json`,
+  **gravado pelo próprio agente** a cada sucesso real (código `0` +
+  snapshot válido + `fim_utc` + `repositorio_id` verificado naquela
+  execução, por substituição atômica) — não depende de a janela ter
+  sido aberta: um sucesso seguido de falha com a GUI fechada mantém a
+  data e o snapshot do sucesso. Falha, incompleto, resultado inválido
+  ou sucesso mais antigo **não apagam nem regridem** o registro; se a
+  gravação falhar, o backup continua sucesso e o erro fica em
+  `confirmado_erro` do `ultimo-resultado.json`. Trocar de destino não
+  herda o confirmado (vinculado por `repositorio_id`); registro
+  inválido ou corrompido não é exibido. Salvar com a tarefa pausada
+  **preserva a pausa** —
   só *Retomar* religa. *Executar agora* dispara a
   **mesma** tarefa validada por **SID**: a conta em
   `Definition.Principal.UserId` precisa resolver para o mesmo SID do
