@@ -1,4 +1,4 @@
-﻿#requires -Version 5.1
+#requires -Version 5.1
 # Testes da interface MAC IP Backup -- mesma infra da suite do agente.
 # Roda em pwsh no Linux: DPAPI e Agendador sao substituidos (backend
 # injetavel com memoria de tarefa); no Windows roda a prova COM real.
@@ -88,13 +88,19 @@ try {
         # defData = a tarefa "gravada" (definicoes devolvidas por Get() sao
         # NOVAS a cada chamada -- mutacoes locais nao vazam para o gravado,
         # como no COM real).
-        param([string]$FalharEm = '', [bool]$TemEstranha = $false)
+        param([string[]]$FalharEm = @(), [bool]$TemEstranha = $false)
         $b = [pscustomobject]@{ defData = $null; registros = 0; falha = $FalharEm; estado = 1; runs = 0 }
         if ($TemEstranha) {
             $b.defData = @{ descricao='Manutencao da empresa'; userId='OUTRO\usuario'; logon=1
                             enabled=$true; args='-File C:\outra\coisa.ps1'; trigger='' }
         }
         $b | Add-Member ScriptMethod Get {
+            if ($this.falha -contains 'gettask') { throw 'Acesso negado a tarefa (simulado)' }
+            # falha temporizada: consulta quebra SOMENTE apos um registro ter
+            # acontecido (cenario "acesso negado logo apos registrar").
+            if (($this.falha -contains 'gettask-pos-reg') -and ($this.registros -gt 0)) {
+                throw 'Acesso negado a tarefa (simulado)'
+            }
             if (-not $this.defData) { return $null }
             $d = Set-DefData -Def (New-DefFalsa) -D $this.defData
             # formato REAL do COM: Principal fica em Definition.Principal --
@@ -113,13 +119,13 @@ try {
             return (New-DefFalsa)   # sempre copia nova -- o registrado fica intacto
         }
         $b | Add-Member ScriptMethod Registrar { param($Def,$Conta,$SenhaConta)
-            if ($this.falha -eq 'registrar') { throw 'Permissao negada (simulada)' }
+            if ($this.falha -contains 'registrar') { throw 'Permissao negada (simulada)' }
             $this.registros++
             $this.defData = Get-DefData -Def $Def
             $this.defData.userId = $Conta
         }
         $b | Add-Member ScriptMethod RegistrarXml { param([string]$Xml,$Conta,$SenhaConta)
-            if ($this.falha -eq 'registrarxml') { throw 'Falha rollback (simulada)' }
+            if ($this.falha -contains 'registrarxml') { throw 'Falha rollback (simulada)' }
             $d = $Xml | ConvertFrom-Json
             $this.defData = @{ descricao=[string]$d.descricao; userId=[string]$d.userId; logon=[int]$d.logon
                                enabled=[bool]$d.enabled; args=[string]$d.args; trigger=[string]$d.trigger }
@@ -201,7 +207,7 @@ try {
     $defAntiga = $script:Backend.Get().Definition
     $script:Backend = New-BackendFalso
     $script:Backend.Registrar($defAntiga, 'LAB\operador', 'w')   # restaura a "anterior"
-    $script:Backend.falha = 'registrar'
+    $script:Backend.falha = @('registrar')
     throws { Publish-Configuracao -Built (Build-Configuracao -Perfil $null -ChavePath '' -SenhaRestic $null -Origem $origem -Exclusoes @() -Horario '04:00') -Conta 'LAB\operador' -SenhaConta 'w' } 'falha COM no registro propaga erro'
     eq (Get-ConfigAtual) $configAntes 'registro falhou: config anterior preservada'
     eq (Get-EstadoAtual) $estadoAntes 'registro falhou: estado anterior preservado'
@@ -228,6 +234,13 @@ try {
     throws { Register-TarefaMacip -Horario '02:30' -Conta 'X' -SenhaConta 'y' -Config 'c' -Estado 'e' } 'tarefa homonima estranha: registro recusado'
     throws { Set-TarefaHabilitada $false } 'tarefa estranha: pausa recusada'
     throws { Start-TarefaAgora } 'tarefa estranha: executar agora recusado'
+
+    # ---- consulta INCONCLUSIVA: GUI nao cria nem altera sem confirmacao ----
+    $script:Backend = New-BackendFalso -FalharEm @('gettask')
+    throws { Register-TarefaMacip -Horario '02:30' -Conta 'X' -SenhaConta 'y' -Config 'c' -Estado 'e' } 'consulta negada: registro recusado (inconclusivo)'
+    eq $script:Backend.registros 0 'consulta negada: nenhum registro tentado'
+    throws { Set-TarefaHabilitada $false } 'consulta negada: pausa recusada'
+    throws { Start-TarefaAgora } 'consulta negada: executar agora recusado'
 
     # ---- Executar agora: SID da tarefa == SID do preparo (estado real) ----
     # A conta do preparo (preparo.json em $b1.Estado) e a conta atual do teste.
@@ -296,7 +309,7 @@ try {
     $script:Backend.Registrar($defAntiga3, $contaPrep, 'w')
     $script:FalhaSaveMeta = $true
     $builtC = Build-Configuracao -Perfil $null -ChavePath '' -SenhaRestic $null -Origem $origem -Exclusoes @() -Horario '08:00'
-    $script:Backend.falha = 'registrarxml'
+    $script:Backend.falha = @('registrarxml')
     throws { Publish-Configuracao -Built $builtC -Conta $contaPrep -SenhaConta 'w' } 'pub falhou (reposicao falhou): excecao propagada'
     ok (Test-Path -LiteralPath $builtC.Config -PathType Leaf) 'pub falhou (reposicao falhou): arquivos novos preservados'
     $argC = $script:Backend.Get().Definition.Actions.Item(1).Arguments
@@ -305,6 +318,33 @@ try {
     # continuam existindo: nada foi apagado sob nenhuma das duas defs.
     $cfgAnt = Get-ConfigAtual
     ok ($cfgAnt -eq $builtC.Config) 'pub falhou (reposicao falhou): sem config anterior na tarefa'
+    $script:FalhaSaveMeta = $false
+
+    # caso D: consulta negada logo APOS o registro (reposicao ok, limpeza
+    # nao consegue confirmar) -> conjunto novo PRESERVADO e aviso; tarefa
+    # reposta continua apontando para a config anterior.
+    $defAntiga4 = $script:Backend.Get().Definition
+    $cfgAntes4 = $defAntiga4.Actions.Item(1).Arguments
+    $script:Backend = New-BackendFalso
+    $script:Backend.Registrar($defAntiga4, $contaPrep, 'w')
+    $script:FalhaSaveMeta = $true
+    $builtD = Build-Configuracao -Perfil $null -ChavePath '' -SenhaRestic $null -Origem $origem -Exclusoes @() -Horario '08:30'
+    $script:Backend.falha = @('gettask-pos-reg') # consulta quebra SO depois do registro
+    throws { Publish-Configuracao -Built $builtD -Conta $contaPrep -SenhaConta 'w' } 'pub falhou (consulta negada pos-registro): excecao propagada'
+    ok (Test-Path -LiteralPath $builtD.Config -PathType Leaf) 'consulta negada pos-registro: conjunto novo preservado'
+    $script:Backend.falha = @()                 # consulta volta: confere estado real
+    eq (Get-ConfigAtual) $builtC.Config 'consulta negada pos-registro: tarefa reposta p/ config anterior'
+    $script:FalhaSaveMeta = $false
+
+    # caso E: reposicao E consulta ambas inconclusivas -> nada e removido
+    $script:Backend = New-BackendFalso
+    $script:Backend.Registrar($defAntiga4, $contaPrep, 'w')
+    $script:FalhaSaveMeta = $true
+    $builtE = Build-Configuracao -Perfil $null -ChavePath '' -SenhaRestic $null -Origem $origem -Exclusoes @() -Horario '09:30'
+    $script:Backend.falha = @('registrarxml', 'gettask-pos-reg')
+    throws { Publish-Configuracao -Built $builtE -Conta $contaPrep -SenhaConta 'w' } 'pub falhou (reposicao+consulta inconclusivas): excecao propagada'
+    ok (Test-Path -LiteralPath $builtE.Config -PathType Leaf) 'reposicao inconclusiva: arquivos preservados'
+    $script:Backend.falha = @()
     $script:FalhaSaveMeta = $false
 
     # ---- conta do preparo diverge da sessao: reuso de estado recusado ----
@@ -383,6 +423,42 @@ try {
         -Arquivo '/o/inexistente.txt' -Destino $dest4 -Origem $origem } 'restaurar: arquivo ausente no repositorio falha'
     eq (Get-ChildItem -LiteralPath $dest4 -Force | Measure-Object).Count 0 'restaurar: parcial removido, destino volta vazio'
 
+    # processo falha APOS gravar bytes (codigo != 0) -> parcial removido
+    [IO.File]::WriteAllBytes((Join-Path $stubDir 'dump.bin'), [Text.Encoding]::UTF8.GetBytes('PARCIAL'))
+    '1' | Set-Content -LiteralPath (Join-Path $stubDir 'dump-code') -Encoding Ascii -NoNewline
+    $dest6 = Join-Path $tmp 'dest-falha-bytes'
+    throws { Restore-Arquivo -Estado $estado -Config $b1.Config -Snapshot ('c'*64) `
+        -Arquivo '/o/parcial.txt' -Destino $dest6 -Origem $origem } 'restaurar: falha apos gravar bytes -> erro'
+    eq (Get-ChildItem -LiteralPath $dest6 -Force | Measure-Object).Count 0 'restaurar: falha apos bytes -- parcial removido'
+    Remove-Item -LiteralPath (Join-Path $stubDir 'dump-code') -Force
+
+    # stderr com volume suficiente para encher o pipe -> nao trava
+    'big' | Set-Content -LiteralPath (Join-Path $stubDir 'stderr-big') -Encoding Ascii -NoNewline
+    [IO.File]::WriteAllBytes((Join-Path $stubDir 'dump.bin'), [Text.Encoding]::UTF8.GetBytes('OK-PIPES'))
+    $dest7 = Join-Path $tmp 'dest-stderr'
+    $alvo7 = Restore-Arquivo -Estado $estado -Config $b1.Config -Snapshot ('c'*64) `
+        -Arquivo '/o/ok.txt' -Destino $dest7 -Origem $origem
+    eq (Get-Content -LiteralPath $alvo7 -Raw) 'OK-PIPES' 'restaurar: stderr grande drenado em paralelo'
+    Remove-Item -LiteralPath (Join-Path $stubDir 'stderr-big') -Force
+
+    # colisao no nome FINAL durante a publicacao -> arquivo existente intacto
+    $cfgOp = Get-CfgOperacional -Estado $estado -Config $b1.Config
+    $dest8 = Join-Path $tmp 'dest-colisao-pub'; New-Item -ItemType Directory $dest8 | Out-Null
+    'ORIGINAL' | Set-Content -LiteralPath (Join-Path $dest8 'a[1].txt') -Encoding Ascii -NoNewline
+    [IO.File]::WriteAllBytes((Join-Path $stubDir 'dump.bin'), [Text.Encoding]::UTF8.GetBytes('NOVO'))
+    throws { Invoke-ResticDump -Cfg $cfgOp -Estado $estado -Snapshot ('c'*64) -Arquivo '/o/a[1].txt' -Destino $dest8 } 'restaurar: colisao no destino -> recusado (sem sobrescrever)'
+    eq (Get-Content -LiteralPath (Join-Path $dest8 'a[1].txt') -Raw) 'ORIGINAL' 'restaurar: arquivo pre-existente intacto'
+    eq (Get-ChildItem -LiteralPath $dest8 -Force -File | Measure-Object).Count 1 'restaurar: parcial da tentativa removido na colisao'
+
+    # timeout: processo que nao termina -> Kill + parcial removido
+    '5' | Set-Content -LiteralPath (Join-Path $stubDir 'dump-sleep') -Encoding Ascii -NoNewline
+    $script:DumpTimeoutMs = 300
+    $dest9 = Join-Path $tmp 'dest-timeout'; New-Item -ItemType Directory $dest9 | Out-Null
+    throws { Invoke-ResticDump -Cfg $cfgOp -Estado $estado -Snapshot ('c'*64) -Arquivo '/o/lento.txt' -Destino $dest9 } 'restaurar: timeout -> erro e Kill'
+    eq (Get-ChildItem -LiteralPath $dest9 -Force | Measure-Object).Count 0 'restaurar: timeout -- parcial removido'
+    $script:DumpTimeoutMs = 600000
+    Remove-Item -LiteralPath (Join-Path $stubDir 'dump-sleep') -Force
+
     # arquivo BINARIO com nome de padrao: SHA-256 confere byte a byte
     $bin = New-Object byte[] 256
     for ($i = 0; $i -lt 256; $i++) { $bin[$i] = [byte]$i }
@@ -392,6 +468,59 @@ try {
         -Arquivo '/o/a[1].txt' -Destino $dest5 -Origem $origem
     eq (Get-FileHash -LiteralPath $alvo5 -Algorithm SHA256).Hash `
        ([BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($bin)).Replace('-','')) 'restaurar: binario a[1].txt -- SHA-256 confere'
+
+    # ---- desinstalacao estruturada (Desinstalar-Tarefa.ps1) ----
+    . (Join-Path $PSScriptRoot '..\installer\Desinstalar-Tarefa.ps1')
+    $PrefixoAcao = 'C:\Program Files\MACIP-Backup'
+    function New-TarefaFalsa {
+        param([string]$Desc = 'MACIP Backup - agente de backup do piloto',
+              [string]$ArgsAcao = '-NoProfile -File "C:\Program Files\MACIP-Backup\Backup-MacipCliente.ps1" -Modo Backup',
+              [int]$Instancias = 0, [bool]$FalhaEnabled = $false,
+              [bool]$NaoPara = $false, [bool]$FalhaInstancias = $false)
+        $t = [pscustomobject]@{ _en = $true; nInst = $Instancias; falhaEn = $FalhaEnabled
+                                naoPara = $NaoPara; falhaInst = $FalhaInstancias; stops = 0; State = 1 }
+        $t | Add-Member ScriptProperty Enabled { return $this._en } {
+            param($v) if ($this.falhaEn) { throw 'falha ao desabilitar (simulada)' }; $this._en = [bool]$v }
+        $ri = [pscustomobject]@{ Description = $Desc }
+        $ac = [pscustomobject]@{ a1 = ([pscustomobject]@{ Path = 'powershell.exe'; Arguments = $ArgsAcao }) }
+        $ac | Add-Member ScriptMethod Item { param($i) return $this.a1 }
+        $df = [pscustomobject]@{ RegistrationInfo = $ri; Actions = $ac }
+        $t | Add-Member NoteProperty Definition $df
+        $t | Add-Member ScriptMethod GetInstances { param($n)
+            if ($this.falhaInst) { throw 'acesso negado a instancias (simulado)' }
+            return (New-Object 'object[]' $this.nInst) }
+        $t | Add-Member ScriptMethod Stop { param($x) $this.stops++; if (-not $this.naoPara) { $this.nInst = 0 } }
+        return $t
+    }
+    function New-SvcFalso { param($Tarefa = $null, [string]$ErroGet = '')
+        $s = [pscustomobject]@{ t = $Tarefa; eg = $ErroGet }
+        $s | Add-Member ScriptMethod GetFolder { param($p) return $this }
+        $s | Add-Member ScriptMethod GetTask { param($n)
+            if ($this.eg) { throw $this.eg }
+            if (-not $this.t) { throw 'The system cannot find the file specified' }
+            return $this.t }
+        return $s
+    }
+    $Svc = New-SvcFalso -Tarefa (New-TarefaFalsa)
+    eq (Invoke-DesinstalacaoTarefa) 0 'uninstall: tarefa propria desabilitada -> remover'
+    $tFalsa = New-TarefaFalsa -Instancias 1
+    $Svc = New-SvcFalso -Tarefa $tFalsa
+    eq (Invoke-DesinstalacaoTarefa) 0 'uninstall: execucao em andamento -> encerrada, remover'
+    eq $tFalsa.stops 1 'uninstall: Stop() chamado para encerrar a instancia'
+    $Svc = New-SvcFalso
+    eq (Invoke-DesinstalacaoTarefa) 2 'uninstall: ausente confirmada -> remover'
+    $Svc = New-SvcFalso -ErroGet 'Acesso negado'
+    eq (Invoke-DesinstalacaoTarefa) 4 'uninstall: consulta negada -> preservar'
+    $Svc = New-SvcFalso -Tarefa (New-TarefaFalsa -Desc 'Manutencao da empresa')
+    eq (Invoke-DesinstalacaoTarefa) 3 'uninstall: homonima sem a marca -> preservada'
+    $Svc = New-SvcFalso -Tarefa (New-TarefaFalsa -ArgsAcao '-File "C:\outro\coisa.ps1"')
+    eq (Invoke-DesinstalacaoTarefa) 3 'uninstall: marca ok mas acao fora da instalacao -> preservada'
+    $Svc = New-SvcFalso -Tarefa (New-TarefaFalsa -Instancias 1 -NaoPara $true)
+    eq (Invoke-DesinstalacaoTarefa) 5 'uninstall: instancia que nao encerra -> preservar'
+    $Svc = New-SvcFalso -Tarefa (New-TarefaFalsa -FalhaEnabled $true)
+    eq (Invoke-DesinstalacaoTarefa) 4 'uninstall: falha ao desabilitar -> preservar'
+    $Svc = New-SvcFalso -Tarefa (New-TarefaFalsa -FalhaInstancias $true)
+    eq (Invoke-DesinstalacaoTarefa) 4 'uninstall: consulta de instancias negada -> preservar'
 
     # ---- agendamento COM real (so no Windows) ----
     if (Test-IsWindows) {

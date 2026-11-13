@@ -1441,3 +1441,41 @@ caminho inexato — o simulador nao substitui essa prova, ela existe.
 **Pendente (bloqueio):** VM Windows — COM/DPAPI/PromptForCredential
 reais, instalador compilado (sem makensis/restic.exe aprovado aqui),
 sessao encerrada, reinicio, cancelamento e desinstalacao na interface.
+
+## Revisao 4 (branch feature/windows-backup-gui-pilot)
+
+1. **Consulta COM estruturada:** `New-BackendCom.Get` nao engole mais
+   erro — `Get-TarefaInfo` classifica encontrada / ausente CONFIRMADA
+   (HRESULT -2147024894 ou "nao encontrado") / erro inconclusivo.
+   Cadastro novo exige ausencia confirmada; atualizacao exige a marca;
+   inconclusivo recusa registrar, pausar e executar agora.
+   `Test-ConjuntoEmUso` trata consulta negada como "em uso" = preserva.
+2. **Limpeza pos-salvar:** consulta negada logo apos registrar ->
+   conjunto novo preservado com aviso; reposicao + consulta ambas
+   inconclusivas -> nada removido. Um so dono da limpeza, confirmacao
+   no Agendador antes de apagar qualquer conjunto.
+3. **Desinstalacao estruturada:** `installer/Desinstalar-Tarefa.ps1`
+   (novo, empacotado) usa `Schedule.Service` — propriedade por marca em
+   `RegistrationInfo.Description` + acao apontando para $INSTDIR;
+   desabilita primeiro (`Enabled=false`), encerra instancias com
+   `Stop()`, confirma estado final. Codigos: 0 ok / 2 ausente / 3
+   homonima alheia (intocada, aborta) / 4 inconclusivo (preserva
+   executaveis) / 5 instancia ativa-pendente (preserva). O `.nsi` nao
+   usa mais `${StrContains}`/`StrFunc.nsh`/`schtasks`/`findstr` —
+   decisao pelo codigo de saida do script.
+4. **Restauracao anti-travamento:** `Invoke-ResticDump` grava em
+   temporario exclusivo `.~nome.part`; `stdout` via `CopyToAsync` +
+   `stderr` via `ReadToEndAsync` EM PARALELO (pipe cheio nao trava);
+   `WaitForExit(DumpTimeoutMs)` com `Kill` no estouro; publica com
+   `File.Move` (nao sobrescreve) somente apos codigo 0; falha remove
+   apenas o parcial da tentativa.
+
+Testes: `run-gui-tests.ps1` **109/109** — inclui consulta negada
+pos-registro, reposicao+consulta inconclusivas, 10 cenarios do script
+de desinstalacao com svc falso, falha apos bytes, stderr grande sem
+travar, colisao na publicacao com original intacto e timeout com Kill.
+Agente **119/119**; `unittest` **5/5**; `git diff --check` limpo.
+Restic real 0.18.1 (Linux): prova anterior de `ls --json`/`dump`/
+SHA-256 mantida. **Pendente:** mesma lista — VM Windows limpa, build
+NSIS com restic.exe aprovado, prova real de COM/DPAPI/junction;
+instalador segue nao compilado neste ambiente.

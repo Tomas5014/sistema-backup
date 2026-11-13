@@ -37,11 +37,25 @@ elseif ($args -contains 'ls') {
 }
 elseif ($args -contains 'dump') {
     # dump.bin: conteudo do arquivo "restaurado" (bytes, para Invoke-ResticDump)
+    # stderr-big: despeja volume grande em stderr (pipe cheio nao pode travar)
+    # dump-code:  codigo de saida apos gravar os bytes (falha apos dados)
+    # dump-sleep: segundos de espera antes de responder (teste de timeout)
+    if (Test-Path (Join-Path $d 'dump-sleep')) {
+        Start-Sleep -Seconds ([int](Get-Content (Join-Path $d 'dump-sleep') -Raw))
+    }
+    if (Test-Path (Join-Path $d 'stderr-big')) {
+        $linha = 'x' * 64
+        for ($i = 0; $i -lt 6000; $i++) { [Console]::Error.WriteLine($linha) }
+    }
     if (Test-Path (Join-Path $d 'dump.bin')) {
         $b = [IO.File]::ReadAllBytes((Join-Path $d 'dump.bin'))
         [Console]::OpenStandardOutput().Write($b, 0, $b.Length)
+        $global:LASTEXITCODE = 0
     } else { $global:LASTEXITCODE = 1 }
+    if (Test-Path (Join-Path $d 'dump-code')) {
+        $global:LASTEXITCODE = [int](Get-Content (Join-Path $d 'dump-code') -Raw)
+    }
 }
 # Em execucao como processo filho (pwsh -File via RESTIC_STUB_CHILD), o codigo
-# de saida real e o do processo — exit e obrigatorio (in-process & le $LASTEXITCODE).
+# de saida real e o do processo--exit e obrigatorio (in-process & le $LASTEXITCODE).
 if ($env:RESTIC_STUB_CHILD -eq '1') { exit ([int]$global:LASTEXITCODE) }

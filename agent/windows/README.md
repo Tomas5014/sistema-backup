@@ -196,9 +196,12 @@ repositório e o `Preparar` (DPAPI na conta) são os mesmos do agente.
   inexistente) e precisa ser **vazio e fora da pasta protegida**; antes
   de listar/restaurar o destino e o ID do repositório são conferidos.
   `restic dump` traz **somente o arquivo escolhido** — nome com
-  `[`/`]`/`*` é literal — gravado com **criação exclusiva** (colisão
-  nunca sobrescreve; falha no dump remove só o parcial criado), e a tela
-  só mostra sucesso quando o arquivo esperado existe no destino.
+  `[`/`]`/`*` é literal — gravado em **temporário exclusivo** com
+  `stdout`/`stderr` drenados em paralelo e **tempo limite** (processo
+  pendurado é morto); o arquivo só é **publicado no nome final depois
+  de código 0** (`File.Move` não sobrescreve — colisão preserva o
+  existente; falha remove só o parcial), e a tela só mostra sucesso
+  quando o arquivo esperado existe no destino.
 - **Conta:** a GUI roda na conta dedicada do backup — DPAPI, preparo e
   tarefa ficam na mesma identidade; se for aberta elevada em outra
   conta, a conta da tarefa registrada será a da sessão, e o aviso na
@@ -210,10 +213,11 @@ OpenSSH e copia agente + GUI + `restic.exe` aprovado, sem segredos).
 Dados ficam em `%ProgramData%\MacipBackup` (sem espaços) — o instalador
 resolve o diretório comum com `SetShellVarContext all`, o **mesmo**
 caminho da interface, e cria o atalho no Menu Iniciar de todos os
-usuários (visível à conta dedicada do backup). Desinstalar desabilita a
-tarefa **antes** de remover os executáveis — se a desativação não for
-confirmada, os arquivos ficam e a falha é informada — e sempre preserva
-dados/estado.
+usuários (visível à conta dedicada do backup). Desinstalar delega a
+decisão ao `Desinstalar-Tarefa.ps1` (**consulta estruturada** via
+Schedule.Service: propriedade por marca+ação, desabilita primeiro,
+confirma sem instâncias ativas/pendentes) — sem confirmação, executáveis
+preservados e falha informada — e sempre preserva dados/estado.
 
 Uso por script continua igual — a GUI não altera o agente.
 

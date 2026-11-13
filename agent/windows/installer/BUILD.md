@@ -30,8 +30,9 @@ a senha Restic (chave e senha por canal seguro, nunca junto ao pacote).
 
 - Verifica o Cliente OpenSSH do Windows e avisa se faltar (instalação
   continua; backup só funciona depois de ativado).
-- Copia `Backup-MacipCliente.ps1`, `MacipBackup-Gui.ps1`, exemplo de
-  perfil e `restic.exe` para `%ProgramFiles%\MACIP-Backup`.
+- Copia `Backup-MacipCliente.ps1`, `MacipBackup-Gui.ps1`,
+  `Desinstalar-Tarefa.ps1`, exemplo de perfil e `restic.exe` para
+  `%ProgramFiles%\MACIP-Backup`.
 - Cria `%ProgramData%\MacipBackup` (sem espaços — configuração e estado)
   via `SetShellVarContext all`: `$APPDATA` resolve para `%ProgramData%`,
   **o mesmo caminho que a interface usa** (`$env:ProgramData`). NSIS não
@@ -46,16 +47,20 @@ a senha Restic (chave e senha por canal seguro, nunca junto ao pacote).
   copiada e o `restic.dpapi`). A raiz `%ProgramData%\MacipBackup` fica
   com a herança padrão do ProgramData para que a conta dedicada consiga
   criar suas subpastas.
-- Desinstalação segura, nesta ordem: consulta `MACIP-Backup` via
-  `schtasks /Query /XML` — **ausência confirmada** ("não encontrado")
-  segue; **erro de acesso/consulta** informa a falha e preserva os
-  executáveis; tarefa **homônima sem a marca** `MACIP Backup` no XML
-  permanece intacta. Para a tarefa do app: `/End` para encerrar
-  execução, `/Change /DISABLE` conferido pelo código de retorno e uma
-  segunda consulta que rejeita remover arquivos enquanto houver
-  execução ativa. `%ProgramData%\MacipBackup` (configuração, estado,
-  resultados, senha protegida) e o repositório remoto são sempre
-  preservados.
+- Desinstalação segura: o desinstalador chama `Desinstalar-Tarefa.ps1`
+  (consulta **estruturada** via `Schedule.Service`/COM — sem `schtasks`,
+  XML textual ou `findstr`). O script confirma a propriedade nos campos
+  certos — a marca `MACIP Backup` em `RegistrationInfo.Description` **e**
+  a ação apontando para a instalação — e devolve um código: `0` tarefa do
+  app desabilitada e parada / `2` ausente confirmada → remove; `3`
+  homônima alheia → preservada intacta e desinstalação abortada; `4`
+  consulta inconclusiva ou falha ao desabilitar → preserva executáveis;
+  `5` instância ativa/pendente → preserva executáveis. Para a tarefa do
+  app ele **desabilita primeiro** (`Enabled = $false`, impedindo novos
+  disparos), encerra instâncias via `Stop()` se necessário e só libera
+  com o estado final confirmado. `%ProgramData%\MacipBackup`
+  (configuração, estado, resultados, senha protegida) e o repositório
+  remoto são sempre preservados.
 
 ## Status de compilação
 

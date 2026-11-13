@@ -48,6 +48,7 @@ $script:TaskName   = 'MACIP-Backup'
 $script:AgentePath = $AgentePath
 $script:LogonPassword = 1   # TASK_LOGON_PASSWORD = 1 (o 2 e S4U -- sem DPAPI/rede)
 $script:TaskMarker    = 'MACIP Backup'
+$script:DumpTimeoutMs = 600000   # restauracao: 10 min -- alem disso Kill + parcial fora
 $script:Backend       = $null   # injetavel nos testes; padrao COM no Windows
 
 . $AgentePath   # reusa Read-AgenteConfig, Write-SshConfig, Invoke-Restic, etc.
@@ -158,7 +159,9 @@ function New-BackendCom {
     }
     $b | Add-Member ScriptMethod Get {
         $this.Conectar()
-        try { return $this.svc.GetFolder('\').GetTask($script:TaskName) } catch { return $null }
+        # NAO engole erro aqui: Get-TarefaInfo decide se a falha e ausencia
+        # confirmada ou consulta inconclusiva (acesso negado etc).
+        return $this.svc.GetFolder('\').GetTask($script:TaskName)
     }
     $b | Add-Member ScriptMethod NewDef {
         param($TarefaExistente)
@@ -187,6 +190,29 @@ function New-BackendCom {
         $t = $this.Get(); if ($t) { return [string]$t.Xml } else { return $null }
     }
     return $b
+}
+
+function Get-TarefaInfo {
+    # Consulta estruturada a tarefa do app. Status:
+    #   encontrada  -> objeto em .Tarefa
+    #   ausente     -> ausencia CONFIRMADA (GetTask disse "nao existe"/null)
+    #   erro        -> consulta inconclusiva (acesso negado, falha COM...)
+    # A GUI so cadastra tarefa nova com ausencia confirmada e so atualiza
+    # tarefa com propriedade verificada; inconclusivo = recusa.
+    $b = Get-Backend
+    try {
+        $t = $b.Get()
+    } catch {
+        $hr = $null
+        try { $hr = $_.Exception.HResult } catch { }
+        $msg = [string]$_.Exception.Message
+        if ($hr -eq -2147024894 -or $msg -match 'cannot find|find the file|encontr|not found') {
+            return [pscustomobject]@{ Tarefa = $null; Status = 'ausente'; Erro = $msg }
+        }
+        return [pscustomobject]@{ Tarefa = $null; Status = 'erro'; Erro = $msg }
+    }
+    if ($t) { return [pscustomobject]@{ Tarefa = $t; Status = 'encontrada'; Erro = $null } }
+    return [pscustomobject]@{ Tarefa = $null; Status = 'ausente'; Erro = $null }
 }
 
 function Test-TarefaDoApp {
@@ -234,13 +260,18 @@ function Write-TaskDef {
 }
 
 function Register-TarefaMacip {
-    # Unico ponto que cria/altera a tarefa. Idempotente (CreateOrUpdate);
-    # recusa tarefa homonima que nao seja do app; devolve a def anterior
-    # para rollback.
+    # Unico ponto que cria/altera a tarefa. Idempotente (CreateOrUpdate).
+    # Novo cadastro EXIGE ausencia confirmada; atualizacao EXIGE a marca do
+    # app; consulta inconclusiva e homonima estranha sao recusadas.
+    # Devolve a def anterior (XML) para rollback.
     param([string]$Horario, [string]$Conta, [string]$SenhaConta, [string]$Config, [string]$Estado)
     $b = Get-Backend
-    $t = $b.Get()
-    if ($t -and -not (Test-TarefaDoApp -Tarefa $t)) {
+    $info = Get-TarefaInfo
+    if ($info.Status -eq 'erro') {
+        throw "Consulta da tarefa inconclusiva ($($info.Erro)) - o aplicativo nao altera nada sem confirmacao."
+    }
+    $t = $info.Tarefa
+    if ($info.Status -eq 'encontrada' -and -not (Test-TarefaDoApp -Tarefa $t)) {
         throw ("Ja existe uma tarefa '$($script:TaskName)' que NAO pertence ao MAC IP Backup. " +
             'Renomeie ou remova a tarefa estranha - o aplicativo nao a altera.')
     }
@@ -253,8 +284,9 @@ function Register-TarefaMacip {
 
 function Get-TaskArg {
     param([string]$Nome)
-    $t = (Get-Backend).Get()
-    if (-not $t) { return $null }
+    $info = Get-TarefaInfo
+    if ($info.Status -ne 'encontrada') { return $null }
+    $t = $info.Tarefa
     try {
         $args = [string]$t.Definition.Actions.Item(1).Arguments
         if ($args -match ('-' + $Nome + '\s+"([^"]+)"')) { return $Matches[1] }
@@ -282,8 +314,10 @@ function Get-ConfigAtual {
 
 function Set-TarefaHabilitada {
     param([bool]$On)
-    $t = (Get-Backend).Get()
-    if (-not $t) { throw "Tarefa $($script:TaskName) nao existe - salve a configuracao primeiro." }
+    $info = Get-TarefaInfo
+    if ($info.Status -eq 'erro') { throw "Consulta da tarefa inconclusiva ($($info.Erro)) - recusado." }
+    if ($info.Status -ne 'encontrada') { throw "Tarefa $($script:TaskName) nao existe - salve a configuracao primeiro." }
+    $t = $info.Tarefa
     if (-not (Test-TarefaDoApp -Tarefa $t)) { throw "Tarefa $($script:TaskName) nao pertence ao MAC IP Backup - recusado." }
     $t.Enabled = $On
 }
@@ -313,8 +347,10 @@ function Start-TarefaAgora {
     # Executar agora = a MESMA tarefa agendada, na MESMA conta registrada.
     # A conta da tarefa (Definition.Principal.UserId) e a conta do preparo
     # (preparo.json no estado que a TAREFA referencia) sao comparadas por SID.
-    $t = (Get-Backend).Get()
-    if (-not $t) { throw "Tarefa $($script:TaskName) nao existe - salve a configuracao primeiro." }
+    $info = Get-TarefaInfo
+    if ($info.Status -eq 'erro') { throw "Consulta da tarefa inconclusiva ($($info.Erro)) - recusado." }
+    if ($info.Status -ne 'encontrada') { throw "Tarefa $($script:TaskName) nao existe - salve a configuracao primeiro." }
+    $t = $info.Tarefa
     if (-not (Test-TarefaDoApp -Tarefa $t)) { throw "Tarefa $($script:TaskName) nao pertence ao MAC IP Backup - recusado." }
     if ([int]$t.State -eq 4) { throw 'Ja ha uma execucao em andamento.' }   # TASK_STATE_RUNNING
     $estado = Get-TaskArg -Nome 'DiretorioEstado'
@@ -332,8 +368,10 @@ function Start-TarefaAgora {
 }
 
 function Get-InfoTarefa {
-    $t = (Get-Backend).Get()
-    if (-not $t) { return $null }
+    $info = Get-TarefaInfo
+    if ($info.Status -eq 'erro') { throw "Consulta da tarefa inconclusiva: $($info.Erro)" }
+    if ($info.Status -ne 'encontrada') { return $null }
+    $t = $info.Tarefa
     $contaTarefa = ''
     try { $contaTarefa = [string]$t.Definition.Principal.UserId } catch { }
     return [pscustomobject]@{
@@ -478,60 +516,83 @@ function Get-NomeArquivoRestic {
 function Invoke-ResticDump {
     # 'restic dump <snap> <caminho>' escreve o conteudo do ARQUIVO EXATO no
     # stdout -- sem glob: um '*' no nome nao arrasta outros arquivos.
-    # stdout vai direto para o destino via stream (nao passa por string do
-    # PS -- preserva binario).
+    # stdout vai direto para um arquivo TEMPORARIO exclusivo; stderr e lido
+    # em paralelo (pipe cheio nao trava o filho). So depois de codigo 0 o
+    # arquivo e publicado no nome final -- mova falha se o destino existir
+    # (File.Move nao sobrescreve), nunca toca um arquivo pre-existente.
+    # Em qualquer falha remove APENAS o parcial desta tentativa.
     param([pscustomobject]$Cfg, [string]$Estado, [string]$Snapshot, [string]$Arquivo, [string]$Destino)
     $exe = Join-Path $Estado $script:ResticExeNome
     $senha = Read-ResticPassword -Caminho (Join-Path $Estado 'restic.dpapi')
     $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($senha)
-    $alvo = Join-Path $Destino (Get-NomeArquivoRestic -PathRestic $Arquivo)
-    $criado = $false
+    $nome = Get-NomeArquivoRestic -PathRestic $Arquivo
+    $alvo = Join-Path $Destino $nome
+    $tmp = Join-Path $Destino ('.~' + $nome + '.part')
+    $fs = $null; $p = $null
     try {
-        # Criacao EXCLUSIVA antes de disparar o restic: se o arquivo ja
-        # existir (ou aparecer entre a checagem e a gravacao), recusa sem
-        # tocar no conteudo existente.
+        # Temporario exclusivo ANTES de disparar o restic.
         try {
-            $fs = [IO.File]::Open($alvo, 'CreateNew', 'Write')
-            $criado = $true
+            $fs = [IO.File]::Open($tmp, 'CreateNew', 'Write')
         } catch [IO.IOException] {
+            $tmp = Join-Path $Destino ('.~' + $nome + '-' + [Guid]::NewGuid().ToString('N') + '.part')
+            $fs = [IO.File]::Open($tmp, 'CreateNew', 'Write')
+        }
+        $psi = [Diagnostics.ProcessStartInfo]::new()
+        $sftpCmd = 'sftp.command={0} -F {1} -s {2} sftp' -f $Cfg.ssh_exe, $Cfg.ssh_config, $Cfg.sftp_host
+        $resticArgs = '--repo "{0}" --cache-dir "{1}" -o "{2}" dump {3} "{4}"' -f `
+            $Cfg.repositorio, (Join-Path $Estado 'cache'), $sftpCmd, $Snapshot, $Arquivo
+        if (Test-IsWindows) {
+            $psi.FileName = $exe
+            $psi.Arguments = $resticArgs
+        } else {
+            # Em Windows o restic.exe e nativo. Fora do Windows (so em teste) o
+            # "exe" e um script ps1 -- roda pelo interpretador que hospeda a GUI.
+            $psi.FileName = (Get-Process -Id $PID).Path
+            $psi.Arguments = '-NoProfile -File "{0}" {1}' -f $exe, $resticArgs
+        }
+        $psi.UseShellExecute = $false
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.EnvironmentVariables['RESTIC_PASSWORD'] = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+        $psi.EnvironmentVariables.Remove('RESTIC_PASSWORD_FILE') | Out-Null
+        $psi.EnvironmentVariables.Remove('RESTIC_PASSWORD_COMMAND') | Out-Null
+        if (-not (Test-IsWindows)) { $psi.EnvironmentVariables['RESTIC_STUB_CHILD'] = '1' }
+        try { $p = [Diagnostics.Process]::Start($psi) }
+        catch { throw "Nao foi possivel iniciar o restic ($exe): $($_.Exception.Message)" }
+        # stdout e stderr drenados EM PARALELO -- um pipe cheio nao trava o
+        # filho -- e WaitForExit vigia o tempo: processo pendurado e morto.
+        $outTask = $p.StandardOutput.BaseStream.CopyToAsync($fs)
+        $errTask = $p.StandardError.ReadToEndAsync()
+        if (-not $p.WaitForExit([int]$script:DumpTimeoutMs)) {
+            try { $p.Kill() } catch { }
+            try { $fs.Close() } catch { }; $fs = $null
+            throw ("Restauracao excedeu o tempo limite de $([int]($script:DumpTimeoutMs / 60000)) " +
+                'minutos - arquivo parcial descartado.')
+        }
+        try { $outTask.Wait() } catch { }
+        try { $fs.Close() } catch { }; $fs = $null
+        try { $err = [string]$errTask.Result } catch { $err = '(stderr ilegivel)' }
+        if ($p.ExitCode -ne 0) { throw "Falha na restauracao (restic $($p.ExitCode)): $err" }
+        # Publica no nome final SOMENTE apos sucesso; File.Move falha se o
+        # destino existir -- um arquivo que apareceu durante o dump (e qualquer
+        # pre-existente) fica intacto.
+        try { [IO.File]::Move($tmp, $alvo) }
+        catch [IO.IOException] {
             throw "Ja existe arquivo em '$alvo' - a restauracao nunca sobrescreve."
         }
-        try {
-            $psi = [Diagnostics.ProcessStartInfo]::new()
-            $sftpCmd = 'sftp.command={0} -F {1} -s {2} sftp' -f $Cfg.ssh_exe, $Cfg.ssh_config, $Cfg.sftp_host
-            $resticArgs = '--repo "{0}" --cache-dir "{1}" -o "{2}" dump {3} "{4}"' -f `
-                $Cfg.repositorio, (Join-Path $Estado 'cache'), $sftpCmd, $Snapshot, $Arquivo
-            if (Test-IsWindows) {
-                $psi.FileName = $exe
-                $psi.Arguments = $resticArgs
-            } else {
-                # Em Windows o restic.exe e nativo. Fora do Windows (so em teste) o
-                # "exe" e um script ps1 -- roda pelo interpretador que hospeda a GUI.
-                $psi.FileName = (Get-Process -Id $PID).Path
-                $psi.Arguments = '-NoProfile -File "{0}" {1}' -f $exe, $resticArgs
-            }
-            $psi.UseShellExecute = $false
-            $psi.RedirectStandardOutput = $true
-            $psi.RedirectStandardError = $true
-            $psi.EnvironmentVariables['RESTIC_PASSWORD'] = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
-            $psi.EnvironmentVariables.Remove('RESTIC_PASSWORD_FILE') | Out-Null
-            $psi.EnvironmentVariables.Remove('RESTIC_PASSWORD_COMMAND') | Out-Null
-            if (-not (Test-IsWindows)) { $psi.EnvironmentVariables['RESTIC_STUB_CHILD'] = '1' }
-            $p = [Diagnostics.Process]::Start($psi)
-            try { $p.StandardOutput.BaseStream.CopyTo($fs) } finally { $fs.Close() }
-            $p.WaitForExit()
-            $err = $p.StandardError.ReadToEnd()
-            if ($p.ExitCode -ne 0) { throw "Falha na restauracao (restic $($p.ExitCode)): $err" }
-        } catch {
-            # so remove o arquivo parcial criado por ESTA tentativa
-            if ($criado) { Remove-Item -LiteralPath $alvo -Force -ErrorAction SilentlyContinue }
-            throw
+        if (-not (Test-Path -LiteralPath $alvo -PathType Leaf)) {
+            throw 'Restauracao falhou: arquivo esperado ausente no destino.'
         }
+        return $alvo
     } finally {
+        if ($fs) { try { $fs.Close() } catch { } }
+        if ($p) { $p.Dispose() }
         [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
         if ($senha) { $senha.Dispose() }
+        # falha -> remove APENAS o parcial desta tentativa (no sucesso $tmp
+        # ja nao existe; Test-Path torna o Remove inocuo).
+        if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
     }
-    return $alvo
 }
 
 function Restore-Arquivo {
@@ -722,8 +783,10 @@ function Test-ConjuntoEmUso {
     # argumentos) ou NAO foi possivel confirmar -- inclusive execucao ativa.
     param($Built)
     try {
-        $t = (Get-Backend).Get()
-        if (-not $t) { return $false }
+        $info = Get-TarefaInfo
+        if ($info.Status -eq 'erro') { return $true }    # consulta inconclusiva = preserva
+        if ($info.Status -ne 'encontrada') { return $false }
+        $t = $info.Tarefa
         if ([int]$t.State -eq 4) { return $true }        # em execucao pode depender dele
         $c = Get-TaskArg -Nome 'Config'
         $e = Get-TaskArg -Nome 'DiretorioEstado'

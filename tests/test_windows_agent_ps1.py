@@ -103,14 +103,23 @@ class TestWindowsAgentPs1(unittest.TestCase):
         # SetShellVarContext all: $APPDATA = %ProgramData% (mesmo caminho da GUI)
         self.assertIn("SetShellVarContext all", nsi)
         self.assertIn('$APPDATA\\MacipBackup', nsi)
-        # desinstalacao so remove executaveis apos desabilitar a tarefa
-        self.assertIn('/DISABLE', nsi)
+        # desinstalacao delega a verificacao estruturada ao script COM
+        # (Desinstalar-Tarefa.ps1) — nada de schtasks/XML/findstr/StrContains.
+        self.assertIn('Desinstalar-Tarefa.ps1', nsi)
+        self.assertIn('nsExec::ExecToStack', nsi)
+        self.assertNotIn('StrContains', codigo)
+        self.assertNotIn('StrFunc.nsh', codigo)
+        self.assertNotIn('/XML', codigo)
+        self.assertNotIn('findstr', codigo)
+        self.assertNotIn('schtasks', codigo)
         self.assertIn('MACIP-Backup', nsi)
-        # verificacao de propriedade pela marca no XML + distincao ausencia/erro
-        self.assertIn('/XML', nsi)
-        self.assertIn('MACIP Backup', nsi)
-        self.assertIn('/End', nsi)
-        self.assertIn('findstr', nsi)
+        # o script estruturado verifica marca + acao + instancias via COM
+        desinst = (AGENT_DIR / "installer" / "Desinstalar-Tarefa.ps1").read_text(
+            encoding="utf-8")
+        self.assertIn('Schedule.Service', desinst)
+        self.assertIn('GetInstances', desinst)
+        self.assertIn('RegistrationInfo.Description', desinst)
+        self.assertIn('MACIP Backup', desinst)
 
 
 if __name__ == "__main__":
