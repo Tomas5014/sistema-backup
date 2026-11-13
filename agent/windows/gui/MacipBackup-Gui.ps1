@@ -1224,16 +1224,20 @@ function Show-Gui {
     function New-Tab([string]$t) {
         $p = New-Object "$W.TabPage"; $p.Text = $t; $tabs.TabPages.Add($p); return $p
     }
+    # ATENCAO: o parametro $w (largura) destes helpers esconde o $W de
+    # System.Windows.Forms -- o PowerShell nao distingue maiusculas e
+    # "$W.Label" viraria "500.Label" (TypeNotFound). Por isso os tipos
+    # aqui sao escritos COMPLETOS, nunca via a variavel.
     function New-Label([System.Windows.Forms.Control]$p, [string]$t, [int]$x, [int]$y, [int]$w = 500) {
-        $l = New-Object "$W.Label"; $l.Text = $t; $l.Location = New-Object System.Drawing.Point($x, $y)
+        $l = New-Object 'System.Windows.Forms.Label'; $l.Text = $t; $l.Location = New-Object System.Drawing.Point($x, $y)
         $l.Size = New-Object System.Drawing.Size($w, 20); $p.Controls.Add($l); return $l
     }
     function New-Button([System.Windows.Forms.Control]$p, [string]$t, [int]$x, [int]$y, [int]$w = 130) {
-        $b = New-Object "$W.Button"; $b.Text = $t; $b.Location = New-Object System.Drawing.Point($x, $y)
+        $b = New-Object 'System.Windows.Forms.Button'; $b.Text = $t; $b.Location = New-Object System.Drawing.Point($x, $y)
         $b.Size = New-Object System.Drawing.Size($w, 28); $p.Controls.Add($b); return $b
     }
     function New-TextBox([System.Windows.Forms.Control]$p, [string]$t, [int]$x, [int]$y, [int]$w = 380) {
-        $tb = New-Object "$W.TextBox"; $tb.Text = $t; $tb.Location = New-Object System.Drawing.Point($x, $y)
+        $tb = New-Object 'System.Windows.Forms.TextBox'; $tb.Text = $t; $tb.Location = New-Object System.Drawing.Point($x, $y)
         $tb.Size = New-Object System.Drawing.Size($w, 24); $p.Controls.Add($tb); return $tb
     }
 

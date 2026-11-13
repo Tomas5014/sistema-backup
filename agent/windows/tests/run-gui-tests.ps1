@@ -42,6 +42,25 @@ try {
     $script:ResticExeNome = 'restic-stub.ps1'
     $script:SshExe = 'ssh'
 
+    # ---- helpers de controle: $w (largura) nao esconde $W ----
+    # Bug visto na VM: dentro de New-Label/New-Button/New-TextBox o
+    # parametro [int]$w sombreava $W = 'System.Windows.Forms' e
+    # "$W.Label" virava "500.Label" (TypeNotFound ao abrir a janela).
+    # As tres criacoes tem de usar o tipo COMPLETO; nenhuma funcao com
+    # [int]$w pode referenciar "$W.". (Estrutural/simulado -- instanciar
+    # o controle WinForms de verdade so acontece no Windows.)
+    $guiSrc = Get-Content -LiteralPath $gui -Raw
+    foreach ($alvo in @(
+        @('New-Label',   'System.Windows.Forms.Label'),
+        @('New-Button',  'System.Windows.Forms.Button'),
+        @('New-TextBox', 'System.Windows.Forms.TextBox'))) {
+        $fn = [regex]::Escape($alvo[0]); $tipo = [regex]::Escape($alvo[1])
+        ok ($guiSrc -match "(?s)function\s+$fn\([^)]*\)\s*\{[^}]*New-Object '$tipo'") "$($alvo[0]): cria o tipo esperado $($alvo[1])"
+    }
+    foreach ($m in [regex]::Matches($guiSrc, '(?s)function\s+([\w-]+)\s*\([^)]*\[int\]\$w[^)]*\)\s*\{(.*?)\n    \}')) {
+        ok ($m.Groups[2].Value -notmatch '"\$W\.') "helper $($m.Groups[1].Value): sem `$W sombreado por `$w"
+    }
+
     # ---- backend de tarefa FALSO com memoria (substitui o COM) ----
     function New-ColFalsa {
         # Colecao no estilo COM: Clear/Create/Remove(1-based)/Item(1-based)/Count.

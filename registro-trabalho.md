@@ -1756,3 +1756,56 @@ PS 5.1/NSIS/File.Replace no Windows. Instalador NAO compilado: sem
 makensis nem payload\restic.exe aprovado — BUILD.md mantem o primeiro
 passo reproduzivel. Na VM: sucesso -> falha com a janela fechada,
 SFTP mudo na configuracao e confirmado bloqueado (piloto 4b itens 7-9).
+
+## Revisao 11 (branch feature/windows-backup-gui-pilot)
+
+**Atalho nao abria a interface (VM, instalador do commit 007f14c):**
+Menu Iniciar -> PowerShell aparecia por um segundo e fechava. Execucao
+direta do script instalado revelou `New-Object: TypeNotFound
+[500.Label]` na linha 1228, codigo de saida 1. OpenSSH na mesma VM:
+9.5p2 (fora da causa).
+
+Causa raiz: dentro de `Show-Gui`, `$W = 'System.Windows.Forms'`, e os
+helpers `New-Label`, `New-Button` e `New-TextBox` tem parametro
+`[int]$w` (largura). O PowerShell nao distingue maiusculas de
+minusculas em nomes de variavel — `$w` esconde `$W` no escopo do
+helper, e `New-Object "$W.Label"` resolvia para `"500.Label"` (a
+largura padrao) em vez do tipo WinForms. So ocorre sob Windows
+PowerShell 5.1 com WinForms real; nos testes simulados em pwsh 7 o
+erro nao se manifestava porque os helpers nunca eram invocados com
+tipagem real.
+
+Correcao: os tres helpers agora instanciam tipos COMPLETOS
+('System.Windows.Forms.Label', '.Button', '.TextBox') — nunca via a
+variavel — com comentario ATENCAO no codigo. Varrimento estatico
+confirmou que nenhuma outra funcao tem parametro `[int]$w`; `New-Tab`
+e os demais `New-Object "$W.*"` estao no corpo de `Show-Gui` ou em
+handlers sem o parametro conflitante (fechadura correta). Fluxo de
+configuracao, backup e restauracao intocados.
+
+Regressao: criacao direta dos tres controles com as larguras padrao
+assertando GetType().FullName (Label/Button/TextBox) + varrimento que
+rejeita qualquer funcao com `[int]$w` contendo shorthand `"$W.` no
+corpo. Sem abrir a janela (exigiria display Windows).
+
+Verificacao: GUI **187 ok, 0 falha** (1 pulado: COM real fora do
+Windows); agente **150 ok, 0 falha** (1 pulado: MACIP_RESTIC_REAL
+indefinido); `unittest` **5/5** (2 pulados: pwsh fora do PATH do
+harness — suites rodadas direto); `git diff --check` limpo; arquivos
+ASCII.
+
+Separacao de prova: SIMULADO em pwsh 7.4.6/Linux — a regressao prova
+a resolucao de tipos, NAO a inicializacao do WinForms. Instalador NAO
+recompilado: sem makensis nem installer\payload\restic.exe aprovado
+(BUILD.md mantem o primeiro passo reproduzivel: copiar o restic.exe
+aprovado para payload\ -> makensis /DVERSAO=... macip-backup.nsi ->
+registrar SHA do codigo, versao e SHA-256 do .exe e do restic.exe).
+
+ACEITE PENDENTE NA VM: instalar com autorizacao administrativa -> abrir
+pelo Menu Iniciar na conta dedicada, SEM elevacao -> janela permanece
+aberta, aba Ativar visivel, seletor de perfil abre. Para substituir o
+instalador de teste: recompilar o .exe a partir deste commit com o
+restic aprovado, desinstalar a versao anterior por Aplicativos
+instalados (ProgramData e repositorio sao preservados) e instalar o
+novo — o tecnico nao repete nenhuma configuracao. A homologacao do
+backup segue separada (piloto 4b).
