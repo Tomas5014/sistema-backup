@@ -23,15 +23,24 @@ Name "${NOME} ${VERSAO}"
 OutFile "MacipBackupSetup-${VERSAO}.exe"
 Unicode True
 RequestExecutionLevel admin          ; instalar em Program Files exige elevacao (UAC nativo)
-InstallDir "${PASTA}"
+InstallDir "${PASTA}"                ; FIXO no piloto: sem tela de diretorio e sem /D=
 SetCompressor /SOLID lzma
 
 !include "MUI2.nsh"
 !include "LogicLib.nsh"
-!insertmacro MUI_PAGE_DIRECTORY
+; Sem MUI_PAGE_DIRECTORY: o piloto instala SEMPRE em Program Files\MACIP-Backup
+; (pasta protegida por ACL do Windows contra usuarios comuns).
 !insertmacro MUI_PAGE_INSTFILES
 !insertmacro MUI_PAGE_FINISH
 !insertmacro MUI_LANGUAGE "PortugueseBR"
+
+Function .onInit
+  ; /D= na linha de comando nao pode contornar a pasta fixa do piloto.
+  StrCmp "$INSTDIR" "${PASTA}" instdir_ok
+    MessageBox MB_ICONSTOP|MB_OK "O piloto instala somente em ${PASTA}.$\n$\nO diretorio informado ($INSTDIR) nao e aceito -- rode o instalador sem /D=."
+    Abort
+  instdir_ok:
+FunctionEnd
 
 Section "Instalar"
   SetShellVarContext all             ; $APPDATA = %ProgramData%, $SMPROGRAMS = todos os usuarios
@@ -64,6 +73,15 @@ Section "Instalar"
     '-NoProfile -ExecutionPolicy RemoteSigned -File "$INSTDIR\MacipBackup-Gui.ps1"'
 
   WriteUninstaller "$INSTDIR\desinstalar.exe"
+
+  ; Registro em "Aplicativos instalados" do Windows (remocao por ali).
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\MACIP-Backup" "DisplayName" "${NOME} ${VERSAO}"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\MACIP-Backup" "DisplayVersion" "${VERSAO}"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\MACIP-Backup" "Publisher" "MAC IP"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\MACIP-Backup" "InstallLocation" "$INSTDIR"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\MACIP-Backup" "UninstallString" "$INSTDIR\desinstalar.exe"
+  WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\MACIP-Backup" "NoModify" 1
+  WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\MACIP-Backup" "NoRepair" 1
 SectionEnd
 
 Section "Uninstall"
@@ -113,6 +131,7 @@ remover_arquivos:
   Delete "$INSTDIR\restic.exe"
   Delete "$INSTDIR\desinstalar.exe"
   RMDir "$INSTDIR"
+  DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\MACIP-Backup"
 fim_uninstall:
   ; $APPDATA\MacipBackup (backup.json, estado, preparo.json, senha DPAPI e
   ; resultados) e SEMPRE preservado -- tarefa desabilitada, dados nao.

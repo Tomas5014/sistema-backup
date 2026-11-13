@@ -30,9 +30,16 @@ a senha Restic (chave e senha por canal seguro, nunca junto ao pacote).
 
 - Verifica o Cliente OpenSSH do Windows e avisa se faltar (instalação
   continua; backup só funciona depois de ativado).
-- Copia `Backup-MacipCliente.ps1`, `MacipBackup-Gui.ps1`,
-  `Desinstalar-Tarefa.ps1`, exemplo de perfil e `restic.exe` para
-  `%ProgramFiles%\MACIP-Backup`.
+- Instala **sempre** em `%ProgramFiles%\MACIP-Backup` (pasta protegida
+  por ACL do Windows contra usuários comuns): sem página de diretório,
+  e `.onInit` aborta se `/D=` ou outro caminho for forçado — no piloto
+  não há instalação fora de Program Files. Copia
+  `Backup-MacipCliente.ps1`, `MacipBackup-Gui.ps1`,
+  `Desinstalar-Tarefa.ps1`, exemplo de perfil e `restic.exe`.
+- Registra o aplicativo em **Aplicativos instalados** do Windows
+  (`HKLM\...\Uninstall\MACIP-Backup` — DisplayName/Version/Publisher/
+  InstallLocation/UninstallString, NoModify/NoRepair); a remoção pode
+  ser feita por lá e a chave é apagada na desinstalação.
 - Cria `%ProgramData%\MacipBackup` (sem espaços — configuração e estado)
   via `SetShellVarContext all`: `$APPDATA` resolve para `%ProgramData%`,
   **o mesmo caminho que a interface usa** (`$env:ProgramData`). NSIS não

@@ -262,6 +262,14 @@ try {
     eq (Get-ConfigAtual) $configAntes 'preparo falho: config anterior preservada'
     ($idValido) | Set-Content (Join-Path $stubDir 'id') -Encoding Ascii -NoNewline
 
+    # ---- pausa preservada ao salvar: update NAO reativa ----
+    $script:Backend = New-BackendFalso
+    $script:Backend.defData = @{ descricao='MACIP Backup - agente de backup do piloto'; userId='X'; logon=1
+                                 enabled=$false
+                                 args=(Get-TaskActionArgs -Agente $script:AgentePath -Config 'c' -Estado 'e'); trigger='' }
+    Register-TarefaMacip -Horario '03:15' -Conta 'X' -SenhaConta 'y' -Config 'c' -Estado 'e'
+    eq ([bool]$script:Backend.defData.enabled) $false 'salvar com tarefa pausada: PAUSA preservada (so Retomar religa)'
+
     # ---- propriedade da tarefa: estranha recusada ----
     $script:Backend = New-BackendFalso -TemEstranha $true
     throws { Register-TarefaMacip -Horario '02:30' -Conta 'X' -SenhaConta 'y' -Config 'c' -Estado 'e' } 'tarefa homonima estranha: registro recusado'
@@ -451,12 +459,23 @@ try {
 
     # ---- classificacao ----
     $infoOk = [pscustomobject]@{ Habilitada=$true; Estado=1; Ultima=''; Proxima='a'; Codigo=0 }
-    eq (Classify-Resultado -Res $null -InfoTarefa $infoOk) 'nunca_executou' 'classifica: sem resultado'
-    eq (Classify-Resultado -Res ([pscustomobject]@{status='sucesso';inicio_utc='2030-01-01T00:00:00Z';codigo_restic=0}) -InfoTarefa $infoOk) 'sucesso' 'classifica: sucesso'
-    eq (Classify-Resultado -Res ([pscustomobject]@{status='falha';inicio_utc='2030-01-01T00:00:00Z';codigo_restic=1}) -InfoTarefa $infoOk) 'falha' 'classifica: falha'
+    $snapOk = 'c' * 64
+    eq (Classify-Resultado -Res $null -InfoTarefa $infoOk) 'ainda_nao' 'classifica: sem disparo e sem resultado'
+    eq (Classify-Resultado -Res ([pscustomobject]@{status='sucesso';inicio_utc='2030-01-01T00:00:00Z';codigo_restic=0;snapshot=$snapOk}) -InfoTarefa $infoOk) 'concluido' 'classifica: sucesso valido sem disparo previo'
+    eq (Classify-Resultado -Res ([pscustomobject]@{status='sucesso';inicio_utc='2030-01-01T00:00:00Z';codigo_restic=0;snapshot=''}) -InfoTarefa $infoOk) 'falhou' 'classifica: sucesso SEM snapshot valido nao conclui'
+    eq (Classify-Resultado -Res ([pscustomobject]@{status='falha';inicio_utc='2030-01-01T00:00:00Z';codigo_restic=1}) -InfoTarefa $infoOk) 'falhou' 'classifica: falha'
     eq (Classify-Resultado -Res ([pscustomobject]@{status='falha';inicio_utc='2030-01-01T00:00:00Z';codigo_restic=3}) -InfoTarefa $infoOk) 'incompleto' 'classifica: incompleto (restic 3)'
     eq (Classify-Resultado -Res ([pscustomobject]@{status='sucesso';inicio_utc='2030-01-01T00:00:00Z'}) -InfoTarefa ([pscustomobject]@{Habilitada=$true;Estado=4;Ultima='';Proxima='';Codigo=0})) 'em_execucao' 'classifica: em execucao agora'
-    eq (Classify-Resultado -Res ([pscustomobject]@{status='sucesso';inicio_utc='2026-01-01T00:00:00Z'}) -InfoTarefa ([pscustomobject]@{Habilitada=$true;Estado=1;Ultima='2030-06-01T03:00:00Z';Proxima='';Codigo=0})) 'sem_resultado_novo' 'classifica: resultado antigo nao conta como novo'
+    # sucesso das 14:00 NAO e resultado do disparo das 14:00:50 (era o bug dos 2 min)
+    eq (Classify-Resultado -Res ([pscustomobject]@{status='sucesso';inicio_utc='2030-01-01T14:00:00Z';codigo_restic=0;snapshot=$snapOk;fim_utc='2030-01-01T14:01:00Z'}) -InfoTarefa ([pscustomobject]@{Habilitada=$true;Estado=1;Ultima='2030-01-01T14:00:50Z';Proxima='';Codigo=0})) 'sem_resultado' 'classifica: sucesso antigo dentro de 2min NAO e deste disparo'
+    # mesmo disparo (inicio >= ultima) CONFERE
+    eq (Classify-Resultado -Res ([pscustomobject]@{status='sucesso';inicio_utc='2030-01-01T14:00:51Z';codigo_restic=0;snapshot=$snapOk}) -InfoTarefa ([pscustomobject]@{Habilitada=$true;Estado=1;Ultima='2030-01-01T14:00:50Z';Proxima='';Codigo=0})) 'concluido' 'classifica: resultado do proprio disparo conclui'
+    # disparo sem nenhum resultado: Agendador tentou -> sem_resultado (nunca "nunca executou")
+    eq (Classify-Resultado -Res $null -InfoTarefa ([pscustomobject]@{Habilitada=$true;Estado=1;Ultima='2030-01-01T14:00:50Z';Proxima='';Codigo=0})) 'sem_resultado' 'classifica: disparo sem resultado nao e "nunca executou"'
+    # codigo do Agendador prova FALHA DE INICIALIZACAO
+    eq (Classify-Resultado -Res $null -InfoTarefa ([pscustomobject]@{Habilitada=$true;Estado=1;Ultima='2030-01-01T14:00:50Z';Proxima='';Codigo=[int]0x800710E0})) 'falhou' 'classifica: codigo do Agendador prova falha de inicializacao'
+    # resultado ilegivel (sem inicio_utc) com disparo -> sem_resultado
+    eq (Classify-Resultado -Res ([pscustomobject]@{status='sucesso';codigo_restic=0;snapshot=$snapOk}) -InfoTarefa ([pscustomobject]@{Habilitada=$true;Estado=1;Ultima='2030-01-01T14:00:50Z';Proxima='';Codigo=0})) 'sem_resultado' 'classifica: resultado sem inicio_utc nao se vincula'
 
     # ---- restauracao: ls --json filtra so arquivos regulares ----
     @'
@@ -469,6 +488,37 @@ try {
     $arqs = Get-ArquivosSnapshot -Estado $estado -Config $b1.Config -Snapshot ('c'*64)
     eq $arqs.Count 2 'ls --json: somente arquivos regulares (dir e symlink fora)'
     ok ($arqs -contains '/o/a[1].txt') 'ls --json: caminho exato com [] preservado'
+
+    # ---- vinculo do preparo na restauracao/listagem ----
+    $cfgRest = Get-CfgOperacional -Estado $estado -Config $b1.Config
+    ok (Confirm-PreparoVigente -Estado $estado -Cfg $cfgRest) 'preparo vigente: conferido'
+    # known_hosts ALTERADO depois do preparo -> vinculo quebrado -> recusa
+    $khFile = $cfgRest.known_hosts
+    $khOrig = Get-Content -LiteralPath $khFile -Raw
+    'outro.host ssh-rsa AAAAadulterado' | Add-Content -LiteralPath $khFile
+    throws { Get-Snapshots -Estado $estado -Config $b1.Config } 'known_hosts alterado: listar pontos recusado'
+    throws { Restore-Arquivo -Estado $estado -Config $b1.Config -Snapshot ('c'*64) -Arquivo '/o/a[1].txt' -Destino (Join-Path $tmp 'dest-vinc') -Origem $origem } 'known_hosts alterado: restaurar recusado'
+    $khOrig | Set-Content -LiteralPath $khFile -NoNewline
+    ok (Confirm-PreparoVigente -Estado $estado -Cfg $cfgRest) 'preparo restaurado: vinculo volta a conferir'
+    # identidade_ssh apontando para outro arquivo -> recusa
+    $cfgBad = $cfgRest.PSObject.Copy()
+    $cfgBad.identidade_ssh = Join-Path $tmp 'chave-qualquer'
+    throws { Confirm-PreparoVigente -Estado $estado -Cfg $cfgBad } 'identidade_ssh divergente: recusado'
+    # ssh_config alterado -> recusa
+    $sshCfgF = Join-Path $estado 'ssh_config'
+    $sshOrig = Get-Content -LiteralPath $sshCfgF -Raw
+    '# adulterado' | Add-Content -LiteralPath $sshCfgF
+    throws { Confirm-PreparoVigente -Estado $estado -Cfg $cfgRest } 'ssh_config alterado: recusado'
+    $sshOrig | Set-Content -LiteralPath $sshCfgF -NoNewline
+
+    # ---- SFTP que aceita SSH mas nao responde: consulta tem prazo ----
+    '20' | Set-Content -LiteralPath (Join-Path $stubDir 'cat-sleep') -Encoding Ascii -NoNewline
+    $script:ConsultaTimeoutMs = 800
+    $t0 = Get-Date
+    throws { Get-Snapshots -Estado $estado -Config $b1.Config } 'SFTP sem resposta: consulta falha dentro do prazo'
+    ok (((Get-Date) - $t0).TotalSeconds -lt 15) 'SFTP sem resposta: nao travou (Kill no estouro)'
+    $script:ConsultaTimeoutMs = 60000
+    Remove-Item -LiteralPath (Join-Path $stubDir 'cat-sleep') -Force
 
     # Restore-Arquivo: destino = origem / dentro da origem / junction
     throws { Restore-Arquivo -Estado $estado -Config $b1.Config -Snapshot ('c'*64) -Arquivo '/o/amostra.txt' -Destino $origem -Origem $origem } 'restaurar: destino = origem recusado'
@@ -484,6 +534,16 @@ try {
     if (-not (Test-IsWindows)) { New-Item -ItemType SymbolicLink -Path $linkPai -Target $origem | Out-Null }
     else { cmd /c mklink /J "$linkPai" "$origem" | Out-Null }
     throws { Restore-Arquivo -Estado $estado -Config $b1.Config -Snapshot ('c'*64) -Arquivo '/o/amostra.txt' -Destino (Join-Path $linkPai 'subdir-nova') -Origem $origem } 'restaurar: pai link + pasta nova = dentro da origem (recusado)'
+    # DOIS links encadeados: link1 -> link2 -> origem -- resolve para dentro
+    $link2 = Join-Path $tmp 'link2-origem'; $link1 = Join-Path $tmp 'link1-origem'
+    if (-not (Test-IsWindows)) {
+        New-Item -ItemType SymbolicLink -Path $link2 -Target $origem | Out-Null
+        New-Item -ItemType SymbolicLink -Path $link1 -Target $link2 | Out-Null
+    } else {
+        cmd /c mklink /J "$link2" "$origem" | Out-Null
+        cmd /c mklink /J "$link1" "$link2" | Out-Null
+    }
+    throws { Restore-Arquivo -Estado $estado -Config $b1.Config -Snapshot ('c'*64) -Arquivo '/o/amostra.txt' -Destino (Join-Path $link1 'nova') -Origem $origem } 'restaurar: dois links encadeados para a origem recusado'
 
     # Restore real via stub dump: arquivo exato, bytes e SHA-256 conferidos.
     $conteudo = 'CONTEUDO-LAB-' + ('A' * 8)

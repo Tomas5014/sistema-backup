@@ -53,6 +53,7 @@ $script:TaskCreate    = 2   # TASK_CREATE   -- FALHA se a tarefa ja existir
 $script:TaskUpdate    = 4   # TASK_UPDATE   -- FALHA se a tarefa nao existir
 $script:PsExeEsperado = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
 $script:DumpTimeoutMs = 600000   # restauracao: 10 min -- alem disso Kill + parcial fora
+$script:ConsultaTimeoutMs = 60000 # consultas (cat/snapshots/ls): 60 s
 $script:Backend       = $null   # injetavel nos testes; padrao COM no Windows
 
 . $AgentePath   # reusa Read-AgenteConfig, Write-SshConfig, Invoke-Restic, etc.
@@ -325,10 +326,19 @@ function Register-TarefaMacip {
     $xmlAnterior = $b.XmlAtual()                 # copia serializada -- imune a mutacao da def
     $def = $b.NewDef($t)
     Write-TaskDef -Def $def -Horario $Horario -Config $Config -Estado $Estado -Conta $Conta
+    # A PAUSA e do operador: atualizar uma tarefa pausada NAO a reativa --
+    # so o botao Retomar reabilita. No primeiro cadastro, nasce habilitada.
+    if ($info.Status -eq 'encontrada') { $def.Settings.Enabled = [bool]$t.Enabled }
     # CREATE no 1o cadastro: se uma homonima aparecer entre a consulta e o
     # registro, a criacao FALHA sem tocar nela. UPDATE so na tarefa nossa.
     $flag = $(if ($info.Status -eq 'ausente') { $script:TaskCreate } else { $script:TaskUpdate })
-    $b.Registrar($def, $Conta, $SenhaConta, $flag)   # erro de permissao/credencial sobe para a tela
+    try {
+        $b.Registrar($def, $Conta, $SenhaConta, $flag)
+    } catch {
+        throw ($_.Exception.Message + ' Se faltar permissao para executar com a sessao encerrada ' +
+            '(direito "Fazer logon como trabalho em lotes"), acione o administrador do Windows - ' +
+            'o cadastro por si so nao comprova que o backup agendado vai rodar.')
+    }
     return $xmlAnterior
 }
 
@@ -444,35 +454,74 @@ function Read-UltimoResultado {
     try { return (Get-Content -LiteralPath $f -Raw | ConvertFrom-Json) } catch { return $null }
 }
 
+function Test-ResConfirmado {
+    # Um resultado CONFIRMADO: status sucesso + restic 0 + snapshot valido.
+    param($Res)
+    return ($Res -and [string]$Res.status -eq 'sucesso' -and
+            $null -ne $Res.codigo_restic -and [int]$Res.codigo_restic -eq 0 -and
+            [string]$Res.snapshot -match '^[0-9a-f]{64}$')
+}
+
 function Classify-Resultado {
-    # Nunca trata resultado antigo como prova da execucao atual: so e "novo"
-    # quando inicio_utc pertence ao disparo informado (LastRunTime da tarefa).
+    # "Concluido" EXIGE resultado valido VINCULADO ao ultimo disparo
+    # (inicio_utc >= LastRunTime da tarefa -- tolerancia so de 1s para
+    # granularidade, nunca minutos). Um sucesso das 14:00 NAO e resultado
+    # do disparo das 14:00:50. Sem vinculo -> sem_resultado; sem tentativa
+    # do Agendador E sem resultado -> ainda_nao (resultado ausente/ilegivel
+    # sozinho nunca prova "nunca rodou"). O codigo do Agendador so prova
+    # FALHA DE INICIALIZACAO quando nao ha resultado do disparo.
     param($Res, $InfoTarefa)
     if ($InfoTarefa -and $InfoTarefa.Estado -eq 4) { return 'em_execucao' }
-    if (-not $Res) { return 'nunca_executou' }
-    $novo = $true
+    $ultima = $null
     if ($InfoTarefa -and $InfoTarefa.Ultima) {
+        try { $u = [DateTimeOffset]::Parse($InfoTarefa.Ultima); if ($u.Year -gt 2000) { $ultima = $u } } catch { }
+    }
+    $agendadorTentou = ($null -ne $ultima)
+    # o resultado pertence a ESTE disparo?
+    $deste = $false
+    if ($Res -and $Res.inicio_utc) {
         try {
-            $ultima = [DateTimeOffset]::Parse($InfoTarefa.Ultima)
             $inicio = [DateTimeOffset]::Parse([string]$Res.inicio_utc)
-            if ($inicio -lt $ultima.AddMinutes(-2)) { $novo = $false }  # resultado anterior ao ultimo disparo
+            if ($ultima) { $deste = ($inicio -ge $ultima.AddSeconds(-1)) }
+            else { $deste = $true }   # sem disparo registrado: o resultado e a unica evidencia
         } catch { }
     }
-    if (-not $novo) { return 'sem_resultado_novo' }
-    if ([string]$Res.status -eq 'sucesso') { return 'sucesso' }
-    if ($null -ne $Res.codigo_restic -and [int]$Res.codigo_restic -eq 3) { return 'incompleto' }
-    return 'falha'
+    if ($deste) {
+        if ([string]$Res.status -eq 'em_execucao') { return 'em_execucao' }
+        if (Test-ResConfirmado -Res $Res) { return 'concluido' }
+        if ($null -ne $Res.codigo_restic -and [int]$Res.codigo_restic -eq 3) { return 'incompleto' }
+        return 'falhou'
+    }
+    if ($agendadorTentou) {
+        # Agendador tentou e nao ha resultado do disparo: o codigo dele so
+        # vale como prova de falha de INICIALIZACAO (nao de execucao).
+        if ($InfoTarefa.Codigo -ne 0) { return 'falhou' }
+        return 'sem_resultado'
+    }
+    if ($Res) { return 'falhou' }      # resultado ilegivel/incompleto, sem disparo: nao prova nada
+    return 'ainda_nao'
 }
 
 $script:RotulosStatus = @{
-    sucesso            = 'SUCESSO - backup concluido neste disparo'
-    falha              = 'FALHA - execucao terminou com erro'
+    concluido          = 'BACKUP CONCLUIDO - resultado confirmado'
+    falhou             = 'FALHOU - a execucao terminou com erro'
     incompleto         = 'INCOMPLETO - Restic codigo 3 (nem todo arquivo lido)'
     em_execucao        = 'EM EXECUCAO - backup rodando agora'
-    sem_resultado_novo = 'SEM RESULTADO NOVO - o ultimo resultado e de um disparo anterior'
-    nunca_executou     = 'NUNCA EXECUTOU - ainda nao ha resultado registrado'
+    sem_resultado      = 'SEM RESULTADO DESTE DISPARO - o Agendador tentou, nada foi gravado'
+    ainda_nao          = 'AINDA NAO EXECUTOU - nenhum disparo ate agora'
     sem_tarefa         = 'SEM TAREFA - configure e salve primeiro'
     tarefa_estranha    = 'TAREFA ESTRANHA - existe MACIP-Backup que nao e do aplicativo'
+}
+
+$script:AcaoStatus = @{
+    concluido          = 'Nenhuma acao pendente.'
+    falhou             = 'Acao necessaria: veja o resultado na pasta de estado e confira o destino na aba 1.'
+    incompleto         = 'Acao necessaria: confira o que ficou de fora (arquivos em uso/abertos).'
+    em_execucao        = 'Aguarde o termino do backup em execucao.'
+    sem_resultado      = 'Acao necessaria: verifique destino, conta da tarefa e permissao de execucao sem sessao.'
+    ainda_nao          = 'Aguarde o proximo disparo ou use "Executar agora".'
+    sem_tarefa         = 'Acao necessaria: valide na aba 1 e salve na aba 2.'
+    tarefa_estranha    = 'Acao necessaria: chame a MAC IP - a tarefa estranha nao e tocada.'
 }
 
 # ---------- restauracao ----------
@@ -485,19 +534,131 @@ function Get-CfgOperacional {
     return $cfg
 }
 
+function Confirm-PreparoVigente {
+    # Mesma verificacao que o backup faz do preparo, reutilizada para
+    # listar pontos, listar arquivos e restaurar. Confere:
+    #   conta (SID da sessao == SID do preparo);
+    #   repositorio + repositorio_id (config == preparo);
+    #   VINCULO EFETIVO: identidade_ssh, known_hosts e ssh_config sao os
+    #   mesmos arquivos do preparo, no mesmo caminho e com o mesmo SHA-256.
+    # Divergencia -> erro com a correcao pela interface (refazer ativacao).
+    param([string]$Estado, [pscustomobject]$Cfg)
+    $prepFile = Join-Path $Estado 'preparo.json'
+    if (-not (Test-Path -LiteralPath $prepFile -PathType Leaf)) {
+        throw "Estado sem preparo verificavel (preparo.json ausente) - refaca a ativacao na aba 1."
+    }
+    $prep = try { Get-Content -LiteralPath $prepFile -Raw | ConvertFrom-Json }
+            catch { throw "preparo.json ilegivel - refaca a ativacao na aba 1." }
+    $sidAtual = (Get-IdentidadeAtual).Sid
+    if ($sidAtual -and [string]$prep.sid -cne $sidAtual) {
+        throw 'A conta desta sessao difere da conta do preparo - abra a interface na conta do backup.'
+    }
+    if ([string]$prep.repositorio -cne [string]$Cfg.repositorio -or
+        [string]$prep.repositorio_id -cne [string]$Cfg.repositorio_id) {
+        throw 'Repositorio divergente do preparo - a configuracao mudou; salve de novo na aba 2.'
+    }
+    $vinculos = @(
+        @{ Nome = 'identidade_ssh'; Arquivo = [string]$Cfg.identidade_ssh; Esperado = [string]$prep.identidade_ssh; Hash = [string]$prep.identidade_sha256 },
+        @{ Nome = 'known_hosts';   Arquivo = [string]$Cfg.known_hosts;   Esperado = [string]$prep.known_hosts;   Hash = [string]$prep.known_hosts_sha256 },
+        @{ Nome = 'ssh_config';    Arquivo = (Join-Path $Estado 'ssh_config'); Esperado = $null;                   Hash = [string]$prep.ssh_config_sha256 }
+    )
+    foreach ($v in $vinculos) {
+        $arq = $v.Arquivo
+        if ($v.Esperado -and ((ConvertTo-CaminhoNormal -P $arq) -cne (ConvertTo-CaminhoNormal -P $v.Esperado))) {
+            throw "$($v.Nome) aponta para outro arquivo que nao o do preparo - refaca a ativacao na aba 1."
+        }
+        if (-not $arq -or -not (Test-Path -LiteralPath $arq -PathType Leaf)) {
+            throw "$($v.Nome) ausente ($arq) - refaca a ativacao na aba 1."
+        }
+        if ($v.Hash -and ((Get-HashArquivo $arq) -cne $v.Hash)) {
+            throw "$($v.Nome) foi alterado desde o preparo - refaca a ativacao na aba 1."
+        }
+    }
+    return $true
+}
+
+function Invoke-ResticConsulta {
+    # Como Invoke-Restic, mas com prazo (relogio monotonico): consultas de
+    # leitura (cat config, snapshots, ls) NUNCA podem travar a janela.
+    # stdout e stderr drenados em paralelo; no estouro, mata o processo e
+    # devolve codigo de falha com a mensagem -- o chamador decide.
+    param([pscustomobject]$Cfg, [string]$Estado, [string[]]$Comando, [int]$PrazoMs = 60000)
+    $exe = Join-Path $Estado $script:ResticExeNome
+    $senha = Read-ResticPassword -Caminho (Join-Path $Estado 'restic.dpapi')
+    $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($senha)
+    $p = $null
+    try {
+        $psi = [Diagnostics.ProcessStartInfo]::new()
+        $sftpCmd = 'sftp.command={0} -F {1} -s {2} sftp' -f $Cfg.ssh_exe, $Cfg.ssh_config, $Cfg.sftp_host
+        $resticArgs = '--repo "{0}" --cache-dir "{1}" -o "{2}" {3}' -f `
+            $Cfg.repositorio, (Join-Path $Estado 'cache'), $sftpCmd, ($Comando -join ' ')
+        if (Test-IsWindows) {
+            $psi.FileName = $exe; $psi.Arguments = $resticArgs
+        } else {
+            $psi.FileName = (Get-Process -Id $PID).Path
+            $psi.Arguments = '-NoProfile -File "{0}" {1}' -f $exe, $resticArgs
+        }
+        $psi.UseShellExecute = $false
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.EnvironmentVariables['RESTIC_PASSWORD'] = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+        $psi.EnvironmentVariables.Remove('RESTIC_PASSWORD_FILE') | Out-Null
+        $psi.EnvironmentVariables.Remove('RESTIC_PASSWORD_COMMAND') | Out-Null
+        if (-not (Test-IsWindows)) { $psi.EnvironmentVariables['RESTIC_STUB_CHILD'] = '1' }
+        try { $p = [Diagnostics.Process]::Start($psi) }
+        catch { throw "Nao foi possivel iniciar o restic ($exe): $($_.Exception.Message)" }
+        $relogio = [Diagnostics.Stopwatch]::StartNew()
+        $prazo = { [int][Math]::Max(0, $PrazoMs - $relogio.ElapsedMilliseconds) }
+        $outTask = $p.StandardOutput.ReadToEndAsync()
+        $errTask = $p.StandardError.ReadToEndAsync()
+        if (-not $p.WaitForExit((& $prazo))) {
+            try { $p.Kill() } catch { }
+            return [pscustomobject]@{ Codigo = -1; Linhas = @("tempo limite de $([int]($PrazoMs/1000))s excedido - verifique destino e rede") }
+        }
+        if (-not ($outTask.Wait((& $prazo)) -and $errTask.Wait((& $prazo)))) {
+            return [pscustomobject]@{ Codigo = -1; Linhas = @('leitura da saida do restic excedeu o tempo limite') }
+        }
+        $linhas = @()
+        $linhas += [string]$outTask.Result -split "`r?`n" | Where-Object { $_ -ne '' }
+        $linhas += [string]$errTask.Result -split "`r?`n" | Where-Object { $_ -ne '' }
+        return [pscustomobject]@{ Codigo = $p.ExitCode; Linhas = $linhas }
+    } finally {
+        if ($p) { $p.Dispose() }
+        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+        if ($senha) { $senha.Dispose() }
+    }
+}
+
 function Confirm-DestinoOperacional {
-    # Antes de listar ou restaurar: confere que o destino responde e que o
-    # ID do repositorio e o aprovado no preparo.
+    # Antes de listar ou restaurar: MESMA verificacao do backup -- preparo
+    # vigente (conta, repo, vinculos) + destino responde + ID aprovado.
+    # A consulta ao repositorio tem prazo (servidor que aceita SSH mas
+    # nao responde SFTP nao pode travar a janela).
     param([pscustomobject]$Cfg, [string]$Estado)
-    return (Confirm-Destino -Cfg $Cfg -Estado $Estado)
+    [void](Confirm-PreparoVigente -Estado $Estado -Cfg $Cfg)
+    $resp = Invoke-ResticConsulta -Cfg $Cfg -Estado $Estado -Comando @('cat', 'config') -PrazoMs ([int]$script:ConsultaTimeoutMs)
+    if ($resp.Codigo -ne 0) {
+        throw ('Repositorio inacessivel ou identidade recusada (restic codigo {0}: {1}). ' +
+            'Verifique se o servidor responde SFTP e se a chave/perfil sao os aprovados.') -f `
+            $resp.Codigo, (($resp.Linhas | Select-Object -First 3) -join ' ')
+    }
+    $linha = $resp.Linhas | Where-Object { $_ -match '"id"' } | Select-Object -First 1
+    $id = $null
+    if ($linha) { try { $id = ($linha | ConvertFrom-Json).id } catch { } }
+    if (-not $id -and $linha -match '"id"\s*:\s*"([0-9a-f]{64})"') { $id = $Matches[1] }
+    if (-not $id) { throw 'Repositorio respondeu sem ID verificavel - recusado.' }
+    if ($id -cne $Cfg.repositorio_id) {
+        throw 'Destino divergente do aprovado pela MAC IP (repositorio_id nao confere) - recusado.'
+    }
+    return $id
 }
 
 function Get-Snapshots {
     param([string]$Estado, [string]$Config)
     $cfg = Get-CfgOperacional -Estado $Estado -Config $Config
     [void](Confirm-DestinoOperacional -Cfg $cfg -Estado $Estado)
-    $r = Invoke-Restic -Cfg $cfg -Estado $Estado -Comando @('snapshots', '--json')
-    if ($r.Codigo -ne 0) { throw "Falha ao listar pontos de restauracao (restic $($r.Codigo))." }
+    $r = Invoke-ResticConsulta -Cfg $cfg -Estado $Estado -Comando @('snapshots', '--json') -PrazoMs ([int]$script:ConsultaTimeoutMs)
+    if ($r.Codigo -ne 0) { throw "Falha ao listar pontos de restauracao (restic $($r.Codigo)): $(($r.Linhas | Select-Object -First 3) -join ' ')" }
     $snaps = @($r.Linhas | ForEach-Object { try { $_ | ConvertFrom-Json } catch { } } |
         Where-Object { $_.id } | ForEach-Object { $_ })
     return $snaps
@@ -509,8 +670,8 @@ function Get-ArquivosSnapshot {
     param([string]$Estado, [string]$Config, [string]$Snapshot)
     $cfg = Get-CfgOperacional -Estado $Estado -Config $Config
     [void](Confirm-DestinoOperacional -Cfg $cfg -Estado $Estado)
-    $r = Invoke-Restic -Cfg $cfg -Estado $Estado -Comando @('ls', '--json', $Snapshot)
-    if ($r.Codigo -ne 0) { throw "Falha ao listar arquivos do ponto (restic $($r.Codigo))." }
+    $r = Invoke-ResticConsulta -Cfg $cfg -Estado $Estado -Comando @('ls', '--json', $Snapshot) -PrazoMs ([int]$script:ConsultaTimeoutMs)
+    if ($r.Codigo -ne 0) { throw "Falha ao listar arquivos do ponto (restic $($r.Codigo)): $(($r.Linhas | Select-Object -First 3) -join ' ')" }
     $arquivos = @()
     foreach ($linha in $r.Linhas) {
         try { $no = $linha | ConvertFrom-Json } catch { continue }
@@ -526,7 +687,8 @@ function Resolve-LinkPath {
     $atual = $Caminho
     for ($i = 0; $i -lt 8; $i++) {
         if (-not (Test-Path -LiteralPath $atual)) { return ([IO.Path]::GetFullPath($atual)) }
-        try { $item = Get-Item -LiteralPath $atual -Force } catch { return ([IO.Path]::GetFullPath($atual)) }
+        try { $item = Get-Item -LiteralPath $atual -Force }
+        catch { throw "Componente nao verificavel (acesso negado ou erro de leitura): $atual" }
         if (-not $item.LinkType -or -not $item.Target) { return ([IO.Path]::GetFullPath($atual)) }
         $alvo = $item.Target
         if ($alvo -is [array]) { $alvo = $alvo[0] }
@@ -944,6 +1106,44 @@ function Publish-Configuracao {
     }
 }
 
+# ---------- execucao fora da thread da janela ----------
+
+function Invoke-Assincrono {
+    # Roda UMA funcao do app num runspace separado (a funcao e resolvida
+    # dot-sourcing este arquivo la dentro) e bombeia a fila de mensagens
+    # da janela enquanto espera -- a janela NUNCA trava numa operacao de
+    # rede. Prazo monotonico: no estouro, para o runspace e reporta. O
+    # resultado volta como objeto; erros do trabalho viram excecao aqui.
+    param([string]$Funcao, [hashtable]$Params, [int]$PrazoMs = 300000, $Form)
+    $guiPath = $PSCommandPath
+    $ps = [powershell]::Create()
+    $async = $null
+    try {
+        [void]$ps.AddScript('param($GuiPath,$Base,$Agente,$Fn,$P) . $GuiPath -BaseDir $Base -AgentePath $Agente; & $Fn @P')
+        [void]$ps.AddParameter('GuiPath', $guiPath)
+        [void]$ps.AddParameter('Base', $script:BaseDir)
+        [void]$ps.AddParameter('Agente', $script:AgentePath)
+        [void]$ps.AddParameter('Fn', $Funcao)
+        [void]$ps.AddParameter('P', $Params)
+        $async = $ps.BeginInvoke()
+        $relogio = [Diagnostics.Stopwatch]::StartNew()
+        while (-not $async.IsCompleted) {
+            if ($relogio.ElapsedMilliseconds -gt $PrazoMs) {
+                try { $ps.Stop() } catch { }
+                throw ("Operacao excedeu o tempo limite de $([int]($PrazoMs/1000)) segundos. " +
+                    'Se o servidor nao responde, verifique rede, SFTP e a chave aprovada.')
+            }
+            if ($Form) { [System.Windows.Forms.Application]::DoEvents() } else { Start-Sleep -Milliseconds 50 }
+        }
+        $out = $null
+        try { $out = $ps.EndInvoke($async) } catch { }
+        if ($ps.Streams.Error.Count -gt 0) { throw ([string]$ps.Streams.Error[0].Exception.Message) }
+        if ($ps.HadErrors) { throw 'A operacao falhou (detalhes indisponiveis no runspace).' }
+        if ($out -and $out.Count -ge 1) { return $out[0] }
+        return $out
+    } finally { $ps.Dispose() }
+}
+
 # =================== INTERFACE ===================
 
 function Show-Gui {
@@ -1003,9 +1203,8 @@ function Show-Gui {
     $tbSenha = New-TextBox $t1 '' 10 164 240
     $tbSenha.UseSystemPasswordChar = $true
     $lblAtv = New-Label $t1 '' 10 230 520
-    $btTestar = New-Button $t1 'Testar conexao' 10 196
-    $btAtivar = New-Button $t1 'Ativar' 150 196
-    $btAtivar.Enabled = $false
+    $btValidar = New-Button $t1 'Validar e continuar' 10 196 170
+    $script:ativacaoToken = $null     # prova de que ESTA combinacao perfil+chave+senha validou
 
     $btPerfil.Add_Click({
         $dlg = New-Object "$W.OpenFileDialog"
@@ -1027,28 +1226,35 @@ function Show-Gui {
         $dlg.Title = 'Chave privada SSH fornecida pela MAC IP'
         if ($dlg.ShowDialog() -eq 'OK') { $tbChave.Text = $dlg.FileName }
     })
-    $btTestar.Add_Click({
-        $btTestar.Enabled = $false; $lblAtv.ForeColor = 'DarkBlue'; $lblAtv.Text = 'Testando...'
-        $form.Refresh()
+    # O que prova a ativacao: perfil + chave + senha usados na validacao.
+    # Se qualquer um mudar depois, a prova expira (conferida ao salvar).
+    function Get-TokenAtivacao {
+        param($Perfil, [string]$ChavePath, [string]$SenhaTxt)
+        $sha = [Security.Cryptography.SHA256]::Create()
+        $hashChave = ''
+        if ($ChavePath -and (Test-Path -LiteralPath $ChavePath -PathType Leaf)) {
+            $hashChave = (Get-FileHash -LiteralPath $ChavePath -Algorithm SHA256).Hash
+        }
+        $bytes = [Text.Encoding]::UTF8.GetBytes(($Perfil | ConvertTo-Json -Compress) + '|' + $ChavePath + '|' + $hashChave + '|' + $SenhaTxt)
+        return ([BitConverter]::ToString($sha.ComputeHash($bytes)))
+    }
+    $btValidar.Add_Click({
+        $btValidar.Enabled = $false; $lblAtv.ForeColor = 'DarkBlue'; $lblAtv.Text = 'Validando destino...'
         try {
             if (-not $script:perfilAtual) { throw 'Importe o perfil primeiro.' }
             if (-not $tbChave.Text) { throw 'Escolha o arquivo da chave privada.' }
             if (-not $tbSenha.Text) { throw 'Informe a senha Restic.' }
-            $ss = ConvertTo-SecureString $tbSenha.Text -AsPlainText -Force
-            $id = Test-ConexaoDestino -Perfil $script:perfilAtual -ChavePath $tbChave.Text -SenhaRestic $ss
+            $id = Invoke-Assincrono -Funcao 'Test-ConexaoDestino' -Form $form -PrazoMs ([int]$script:ConsultaTimeoutMs + 30000) -Params @{
+                Perfil = $script:perfilAtual; ChavePath = $tbChave.Text
+                SenhaRestic = (ConvertTo-SecureString $tbSenha.Text -AsPlainText -Force) }
+            $script:ativacaoToken = Get-TokenAtivacao -Perfil $script:perfilAtual -ChavePath $tbChave.Text -SenhaTxt $tbSenha.Text
             $lblAtv.ForeColor = 'DarkGreen'
-            $lblAtv.Text = "Conexao OK - identidade do servidor e ID do repositorio conferem ($($id.Substring(0,12))...)."
-            $btAtivar.Enabled = $true
+            $lblAtv.Text = "Destino validado - identidade do servidor e ID do repositorio conferem ($($id.Substring(0,12))...)."
+            $tabs.SelectedTab = $t2     # avanca so com a prova
         } catch {
+            $script:ativacaoToken = $null
             $lblAtv.ForeColor = 'DarkRed'; $lblAtv.Text = "Recusado: $($_.Exception.Message)"
-            $btAtivar.Enabled = $false
-        } finally { $btTestar.Enabled = $true }
-    })
-    $btAtivar.Add_Click({
-        $tabs.SelectedTab = $t2
-        [void][System.Windows.Forms.MessageBox]::Show($form,
-            'Ativacao validada. Agora escolha a pasta, as exclusoes e o horario na aba Configurar.',
-            'MAC IP Backup', 'OK', 'Information')
+        } finally { $btValidar.Enabled = $true }
     })
 
     # ----- Tab 2: Configurar -----
@@ -1086,16 +1292,24 @@ function Show-Gui {
 
     $btSalvar.Add_Click({
         $btSalvar.Enabled = $false; $lblCfg.ForeColor = 'DarkBlue'; $lblCfg.Text = 'Salvando...'
-        $form.Refresh()
         $built = $null
         try {
             $excl = @($tbExcl.Lines | Where-Object { $_ -and $_.Trim() -ne '' })
             if (-not $tbOrigem.Text) { throw 'Escolha a pasta a proteger.' }
             if ($tbHora.Text -cnotmatch '^([01][0-9]|2[0-3]):[0-5][0-9]$') { throw 'Horario invalido (use HH:mm).' }
-            # FASE 1: conjunto novo, sem tocar no ativo
-            $senhaSs = if ($tbSenha.Text) { ConvertTo-SecureString $tbSenha.Text -AsPlainText -Force } else { $null }
-            $built = Build-Configuracao -Perfil $script:perfilAtual -ChavePath $tbChave.Text `
-                -SenhaRestic $senhaSs -Origem $tbOrigem.Text -Exclusoes $excl -Horario $tbHora.Text
+            # perfil novo exige validacao VIGENTE: se perfil, chave ou senha
+            # mudaram depois do "Validar e continuar", a prova expirou.
+            if ($script:perfilAtual) {
+                $tok = Get-TokenAtivacao -Perfil $script:perfilAtual -ChavePath $tbChave.Text -SenhaTxt $tbSenha.Text
+                if (-not $script:ativacaoToken -or $tok -ne $script:ativacaoToken) {
+                    throw 'Perfil, chave ou senha alterados apos a validacao - clique "Validar e continuar" de novo na aba 1.'
+                }
+            }
+            # FASE 1 (consulta o destino no preparo): fora da thread da janela
+            $built = Invoke-Assincrono -Funcao 'Build-Configuracao' -Form $form -PrazoMs 180000 -Params @{
+                Perfil = $script:perfilAtual; ChavePath = $tbChave.Text
+                SenhaRestic = $(if ($tbSenha.Text) { ConvertTo-SecureString $tbSenha.Text -AsPlainText -Force } else { $null })
+                Origem = $tbOrigem.Text; Exclusoes = $excl; Horario = $tbHora.Text }
             # credencial do Windows na janela nativa; cancelar => desfaz a fase 1
             $cred = $host.UI.PromptForCredential('MAC IP Backup',
                 "Senha do Windows da conta $conta (a tarefa roda mesmo sem sessao aberta)",
@@ -1105,13 +1319,15 @@ function Show-Gui {
                 throw ('Agendamento cancelado - a configuracao anterior continua valendo.' +
                     $(if ($aviso) { " $aviso" } else { '' }))
             }
-            # FASE 2: publica
+            # FASE 2: publica (COM + arquivo; operacao local)
             Publish-Configuracao -Built $built -Conta $conta -SenhaConta $cred.GetNetworkCredential().Password
             $cred = $null
-            $script:perfilAtual = $null
+            $script:perfilAtual = $null; $script:ativacaoToken = $null
             $built = $null
             $lblCfg.ForeColor = 'DarkGreen'
-            $lblCfg.Text = "Salvo. Tarefa '$($script:TaskName)' agendada para $($tbHora.Text) na conta $conta."
+            $lblCfg.Text = ("Salvo. Agendamento SOLICITADO para $($tbHora.Text) na conta $conta - " +
+                'a execucao programada so fica comprovada quando o disparo real aparecer na aba Operar.')
+            & $script:AtualizarTela
         } catch {
             # Limpeza so aqui se a fase 2 ainda nao assumiu (Publicado):
             # depois de Publish-Configuracao ela e a unica responsavel.
@@ -1126,12 +1342,13 @@ function Show-Gui {
     $lblStatus = New-Label $t3 'Situacao: -' 10 40
     $lblStatus.Font = New-Object System.Drawing.Font($lblStatus.Font, 'Bold')
     $lblProx = New-Label $t3 'Proxima execucao: -' 10 66
-    $lblUlt = New-Label $t3 'Ultimo resultado: -' 10 92
-    $btAgora = New-Button $t3 'Executar agora' 10 130 130
-    $btPausa = New-Button $t3 'Pausar' 150 130 90
-    $btRetomar = New-Button $t3 'Retomar' 250 130 90
-    $btAtual = New-Button $t3 'Atualizar' 400 130 90
-    $lblOp = New-Label $t3 '' 10 170 520
+    $lblUlt = New-Label $t3 'Ultimo backup confirmado: -' 10 92
+    $lblAcao = New-Label $t3 '' 10 118 520
+    $btAgora = New-Button $t3 'Executar agora' 10 150 160
+    $btPausa = New-Button $t3 'Pausar' 180 150 90
+    $btRetomar = New-Button $t3 'Retomar' 280 150 90
+    $btAtual = New-Button $t3 'Atualizar' 400 150 90
+    $lblOp = New-Label $t3 '' 10 190 520
 
     $script:AtualizarTela = {
         try {
@@ -1140,30 +1357,42 @@ function Show-Gui {
             if ($cfgPath -and (Test-Path -LiteralPath $cfgPath -PathType Leaf)) {
                 try { $lblPasta.Text = 'Pasta protegida: ' + (Read-AgenteConfig -Caminho $cfgPath).origem } catch { }
             }
-            if (-not $info) { $lblStatus.Text = 'Situacao: ' + $script:RotulosStatus.sem_tarefa; $lblProx.Text = 'Proxima execucao: -'; $lblUlt.Text = 'Ultimo resultado: -'; return }
-            if (-not $info.DoApp) {
-                $lblStatus.ForeColor = 'DarkRed'; $lblStatus.Text = 'Situacao: ' + $script:RotulosStatus.tarefa_estranha
-                return
-            }
             $estado = Get-EstadoAtual
             $res = if ($estado) { Read-UltimoResultado -Estado $estado } else { $null }
+            # Ultimo backup CONFIRMADO e evidencia propria: data/hora e
+            # snapshot vem do resultado, nao do disparo atual.
+            $lblUlt.Text = 'Ultimo backup confirmado: ' + $(if (Test-ResConfirmado -Res $res) {
+                ('{0} (snapshot {1})' -f $res.fim_utc, ([string]$res.snapshot).Substring(0,12))
+            } else { 'nenhum ainda' })
+            if (-not $info) {
+                $lblStatus.ForeColor = 'DarkRed'; $lblStatus.Text = 'Situacao: ' + $script:RotulosStatus.sem_tarefa
+                $lblProx.Text = 'Proxima execucao: -'; $lblAcao.Text = $script:AcaoStatus.sem_tarefa
+                $btAgora.Enabled = $false; $btPausa.Enabled = $false; $btRetomar.Enabled = $false; return
+            }
+            if (-not $info.DoApp) {
+                $lblStatus.ForeColor = 'DarkRed'; $lblStatus.Text = 'Situacao: ' + $script:RotulosStatus.tarefa_estranha
+                $lblAcao.Text = $script:AcaoStatus.tarefa_estranha
+                $btAgora.Enabled = $false; $btPausa.Enabled = $false; $btRetomar.Enabled = $false; return
+            }
             $cls = Classify-Resultado -Res $res -InfoTarefa $info
             $cor = switch ($cls) {
-                'sucesso' { 'DarkGreen' } 'em_execucao' { 'DarkBlue' } 'incompleto' { 'DarkOrange' }
-                default { 'DarkRed' }
+                'concluido' { 'DarkGreen' } 'em_execucao' { 'DarkBlue' }
+                'incompleto' { 'DarkOrange' } 'ainda_nao' { 'DarkBlue' }
+                'sem_resultado' { 'DarkOrange' } default { 'DarkRed' }
             }
             $lblStatus.ForeColor = $cor
             $lblStatus.Text = 'Situacao: ' + $script:RotulosStatus[$cls]
-            $lblProx.Text = 'Proxima execucao: ' + $(if ($info.Habilitada) { $info.Proxima } else { 'PAUSADO' })
-            $lblUlt.Text = 'Ultimo resultado: ' + $(if ($res) {
-                "$($res.status) em $($res.fim_utc) (restic $($res.codigo_restic), snapshot $($res.snapshot))"
-            } else { '-' })
+            $lblProx.Text = 'Proxima execucao: ' + $(if ($info.Habilitada) { $info.Proxima } else { 'PAUSADO - so Retomar religa' })
+            $lblAcao.Text = $(if (-not $info.Habilitada -and $cls -ne 'em_execucao') {
+                'Acao necessaria: a tarefa esta PAUSADA - so "Retomar" religa o agendamento.'
+            } else { $script:AcaoStatus[$cls] })
             $btPausa.Enabled = $info.Habilitada
             $btRetomar.Enabled = -not $info.Habilitada
             $btAgora.Enabled = ($info.Estado -ne 4)
+            $btAgora.Text = $(if (Test-ResConfirmado -Res $res) { 'Executar agora' } else { 'Executar primeiro backup' })
         } catch { $lblStatus.Text = 'Situacao: erro ao ler - ' + $_.Exception.Message }
     }
-    $btAgora.Add_Click({ try { Start-TarefaAgora; $lblOp.ForeColor='DarkGreen'; $lblOp.Text = 'Disparo manual enviado - a mesma tarefa agendada executa agora.' } catch { $lblOp.ForeColor='DarkRed'; $lblOp.Text = $_.Exception.Message }; & $script:AtualizarTela })
+    $btAgora.Add_Click({ try { Start-TarefaAgora; $lblOp.ForeColor='DarkBlue'; $lblOp.Text = 'Disparo SOLICITADO - a conclusao aparece aqui quando houver resultado deste disparo.' } catch { $lblOp.ForeColor='DarkRed'; $lblOp.Text = $_.Exception.Message }; & $script:AtualizarTela })
     $btPausa.Add_Click({ try { Set-TarefaHabilitada $false; $lblOp.Text = 'Tarefa pausada - o disparo agendado nao roda ate retomar.' } catch { $lblOp.Text = $_.Exception.Message }; & $script:AtualizarTela })
     $btRetomar.Add_Click({ try { Set-TarefaHabilitada $true; $lblOp.Text = 'Tarefa retomada.' } catch { $lblOp.Text = $_.Exception.Message }; & $script:AtualizarTela })
     $btAtual.Add_Click({ & $script:AtualizarTela })
@@ -1185,30 +1414,35 @@ function Show-Gui {
     $btSnaps = New-Button $t4 'Carregar pontos' 10 170 130
     $btRest = New-Button $t4 'Restaurar arquivo' 150 170 150
 
+    $script:LimpaSelecaoRest = {
+        $script:snaps = @(); $cbSnap.Items.Clear(); $cbArq.Items.Clear()
+    }
     $btSnaps.Add_Click({
-        $btSnaps.Enabled = $false; $lblRes.ForeColor = 'DarkBlue'; $lblRes.Text = 'Listando pontos...'; $form.Refresh()
+        $btSnaps.Enabled = $false; $lblRes.ForeColor = 'DarkBlue'; $lblRes.Text = 'Listando pontos...'
         try {
             $estado = Get-EstadoAtual; $cfgPath = Get-ConfigAtual
-            if (-not $estado -or -not $cfgPath) { throw 'Sem preparo concluido - ative e configure primeiro.' }
-            $snaps = Get-Snapshots -Estado $estado -Config $cfgPath
+            if (-not $estado -or -not $cfgPath) { throw 'Sem preparo concluido - valide na aba 1 e salve na aba 2.' }
+            $snaps = Invoke-Assincrono -Funcao 'Get-Snapshots' -Form $form -PrazoMs ([int]$script:ConsultaTimeoutMs + 30000) -Params @{ Estado = $estado; Config = $cfgPath }
+            & $script:LimpaSelecaoRest                       # selecao anterior nunca sobrevive a nova listagem
             $script:snaps = @($snaps)
-            $cbSnap.Items.Clear()
             foreach ($s in $script:snaps) { [void]$cbSnap.Items.Add(('{0} - {1}' -f $s.short_id, $s.time)) }
             if ($cbSnap.Items.Count -gt 0) { $cbSnap.SelectedIndex = $cbSnap.Items.Count - 1 }
             $lblRes.ForeColor = 'DarkGreen'; $lblRes.Text = "$($cbSnap.Items.Count) ponto(s) disponivel(is)."
-        } catch { $lblRes.ForeColor = 'DarkRed'; $lblRes.Text = $_.Exception.Message }
-        finally { $btSnaps.Enabled = $true }
+        } catch {
+            & $script:LimpaSelecaoRest                       # listagem falhou -> descarta a selecao
+            $lblRes.ForeColor = 'DarkRed'; $lblRes.Text = $_.Exception.Message
+        } finally { $btSnaps.Enabled = $true }
     })
     $cbSnap.Add_SelectedIndexChanged({
+        if ($cbSnap.SelectedIndex -lt 0) { return }
+        $cbArq.Items.Clear()
         try {
-            $cbArq.Items.Clear()
             $estado = Get-EstadoAtual; $cfgPath = Get-ConfigAtual
             $snap = $script:snaps[$cbSnap.SelectedIndex]
-            foreach ($a in (Get-ArquivosSnapshot -Estado $estado -Config $cfgPath -Snapshot $snap.id)) {
-                [void]$cbArq.Items.Add($a)
-            }
+            $arqs = Invoke-Assincrono -Funcao 'Get-ArquivosSnapshot' -Form $form -PrazoMs ([int]$script:ConsultaTimeoutMs + 30000) -Params @{ Estado = $estado; Config = $cfgPath; Snapshot = $snap.id }
+            foreach ($a in $arqs) { [void]$cbArq.Items.Add($a) }
             if ($cbArq.Items.Count -gt 0) { $cbArq.SelectedIndex = 0 }
-        } catch { $lblRes.ForeColor = 'DarkRed'; $lblRes.Text = $_.Exception.Message }
+        } catch { $cbArq.Items.Clear(); $lblRes.ForeColor = 'DarkRed'; $lblRes.Text = $_.Exception.Message }
     })
     $btDest.Add_Click({
         $dlg = New-Object "$W.FolderBrowserDialog"
@@ -1216,13 +1450,15 @@ function Show-Gui {
         if ($dlg.ShowDialog() -eq 'OK') { $tbDest.Text = $dlg.SelectedPath }
     })
     $btRest.Add_Click({
-        $btRest.Enabled = $false; $lblRes.ForeColor = 'DarkBlue'; $lblRes.Text = 'Restaurando...'; $form.Refresh()
+        $btRest.Enabled = $false; $lblRes.ForeColor = 'DarkBlue'; $lblRes.Text = 'Restaurando...'
         try {
             $estado = Get-EstadoAtual; $cfgPath = Get-ConfigAtual
             $snap = $script:snaps[$cbSnap.SelectedIndex]
             $cfg = Read-AgenteConfig -Caminho $cfgPath
-            $alvo = Restore-Arquivo -Estado $estado -Config $cfgPath -Snapshot $snap.id `
-                -Arquivo $cbArq.SelectedItem -Destino $tbDest.Text -Origem $cfg.origem
+            if (-not $cbArq.SelectedItem) { throw 'Escolha o arquivo a restaurar na lista.' }
+            $alvo = Invoke-Assincrono -Funcao 'Restore-Arquivo' -Form $form -PrazoMs ([int]$script:DumpTimeoutMs + 60000) -Params @{
+                Estado = $estado; Config = $cfgPath; Snapshot = $snap.id
+                Arquivo = $cbArq.SelectedItem; Destino = $tbDest.Text; Origem = $cfg.origem }
             $sha = (Get-FileHash -LiteralPath $alvo -Algorithm SHA256).Hash.ToLower()
             $lblRes.ForeColor = 'DarkGreen'
             $lblRes.Text = "Restaurado: $alvo (SHA-256 $sha) - o original NAO foi sobrescrito."

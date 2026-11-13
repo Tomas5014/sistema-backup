@@ -157,12 +157,14 @@ Dot-sourcing do próprio `Backup-MacipCliente.ps1`: a validação do
 `backup.json`, o `ssh_config` restrito, a conferência do ID do
 repositório e o `Preparar` (DPAPI na conta) são os mesmos do agente.
 
-- **Ativar:** importa um `perfil.json` da MAC IP (repositório, ID
-  esperado e `known_hosts` embutidos — dados, sem segredos; perfis com
-  campo de senha/chave são recusados). Chave privada e senha Restic
-  entram separadas pela tela. **Testar conexão** prova identidade do
-  servidor + ID do repositório em pasta temporária, sem gravar estado;
-  ativação só libera se os dois conferirem.
+- **Validar e continuar** (aba 1): importa um `perfil.json` da MAC IP
+  (repositório, ID esperado e `known_hosts` embutidos — dados, sem
+  segredos; perfis com campo de senha/chave são recusados). Chave
+  privada e senha Restic entram separadas pela tela. Um clique prova
+  identidade do servidor + ID do repositório em pasta temporária, sem
+  gravar estado — **só avança se os dois conferirem**, e mudar perfil,
+  chave ou senha depois invalida a prova (o Salvar confere de novo).
+  A consulta roda fora da thread da janela, com prazo.
 - **Configurar:** seletor de pasta do Windows, exclusões opcionais e
   horário diário. Salvar é **transacional em duas fases**: primeiro um
   conjunto novo (`config-N`, identidade e `backup.json`; `estado-N` novo
@@ -185,10 +187,17 @@ repositório e o `Preparar` (DPAPI na conta) são os mesmos do agente.
   divergentes é recusada e a consulta por texto é proibida (só o código
   "tarefa inexistente" do próprio `GetTask` classifica ausência).
   Salvar duas vezes atualiza a mesma tarefa, nunca duplica.
-- **Operar:** pasta protegida, próxima execução e último resultado com
-  classificação em sucesso/falha/incompleto/em execução/**sem resultado
-  novo**/nunca executou — um resultado antigo não conta como prova da
-  execução atual (inicio_utc × LastRunTime). *Executar agora* dispara a
+- **Operar:** pasta protegida, situação deste disparo, **último backup
+  confirmado** com data/hora própria, próxima execução e **ação
+  necessária**. Classificação em concluído/falhou/incompleto/em
+  execução/**sem resultado deste disparo**/ainda não executou —
+  "concluído" exige resultado válido **vinculado ao disparo**
+  (`inicio_utc` ≥ `LastRunTime`) com código `0` e snapshot válido; um
+  sucesso antigo, mesmo dentro de minutos, não conta. Resultado ausente
+  com disparo registrado é "sem resultado deste disparo" (o código do
+  Agendador prova falha de inicialização quando não `0`), nunca
+  "nunca executou". Salvar com a tarefa pausada **preserva a pausa** —
+  só *Retomar* religa. *Executar agora* dispara a
   **mesma** tarefa validada por **SID**: a conta em
   `Definition.Principal.UserId` precisa resolver para o mesmo SID do
   `preparo.json` do estado que a tarefa usa (mesmo nome em outro
@@ -196,10 +205,16 @@ repositório e o `Preparar` (DPAPI na conta) são os mesmos do agente.
   a tarefa; execução em andamento bloqueia novo disparo.
 - **Restaurar:** pontos via `restic snapshots`; arquivos via
   `restic ls --json` filtrados a **arquivos regulares** — a escolha vem
-  da lista, nunca de texto livre. O destino é resolvido em **todos os
+  da lista, nunca de texto livre. Antes de listar ou restaurar vale a
+  **mesma verificação do preparo do backup** (`Confirm-PreparoVigente`):
+  SID da sessão, repositório + ID, e vínculo efetivo de
+  `identidade_ssh`/`known_hosts`/`ssh_config` por caminho **e** SHA-256
+  — divergência bloqueia e indica refazer a ativação; falha na listagem
+  descarta a seleção anterior. Consultas têm prazo (`Invoke-ResticConsulta`)
+  e rodam fora da thread da janela. O destino é resolvido em **todos os
   componentes** (link/junction até em pasta pai, mesmo com a final
-  inexistente) e precisa ser **vazio e fora da pasta protegida**; antes
-  de listar/restaurar o destino e o ID do repositório são conferidos.
+  inexistente, cadeias encadeadas e componentes ilegíveis são recusados)
+  e precisa ser **vazio e fora da pasta protegida**.
   `restic dump` traz **somente o arquivo escolhido** — nome com
   `[`/`]`/`*` é literal — gravado em **temporário exclusivo** com
   `stdout`/`stderr` drenados em paralelo e **um único prazo monotônico**

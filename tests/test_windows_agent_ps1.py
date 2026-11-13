@@ -76,7 +76,7 @@ class TestWindowsAgentPs1(unittest.TestCase):
         self.assertNotIn("private", json.dumps(perfil).lower())
         fonte = GUI.read_text(encoding="utf-8")
         for marca in ("Schedule.Service", "TASK_LOGON_PASSWORD",
-                      "ultimo-resultado.json", "sem_resultado_novo",
+                      "ultimo-resultado.json", "sem_resultado",
                       "RegisterTaskDefinition", "PromptForCredential"):
             self.assertIn(marca, fonte, f"ausente na GUI: {marca}")
         # a interface nunca chama init nem grava senha em arquivo/log
@@ -113,6 +113,15 @@ class TestWindowsAgentPs1(unittest.TestCase):
         self.assertNotIn('findstr', codigo)
         self.assertNotIn('schtasks', codigo)
         self.assertIn('MACIP-Backup', nsi)
+        # piloto: instalacao FIXA em Program Files -- sem pagina de diretorio,
+        # e .onInit barra contorno por /D= na linha de comando
+        self.assertNotIn('MUI_PAGE_DIRECTORY', codigo)
+        self.assertIn('Function .onInit', nsi)
+        self.assertIn('$PROGRAMFILES64\\MACIP-Backup', nsi)
+        # registro em "Aplicativos instalados" do Windows
+        self.assertIn('CurrentVersion\\Uninstall\\MACIP-Backup', nsi)
+        self.assertIn('UninstallString', nsi)
+        self.assertIn('DeleteRegKey HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\MACIP-Backup"', nsi)
         # o script estruturado verifica marca + acao + instancias via COM
         desinst = (AGENT_DIR / "installer" / "Desinstalar-Tarefa.ps1").read_text(
             encoding="utf-8")

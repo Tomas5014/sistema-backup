@@ -16,6 +16,11 @@ if ($args -contains 'version') {
     else { Write-Output 'restic 0.18.1 compiled with go1.24.5 on windows/amd64' }
 }
 elseif ($args -contains 'cat') {
+    # cat-sleep: SSH "aceita" mas o SFTP nao responde -- o processo fica
+    # vivo sem devolver nada ate a consulta estourar o prazo.
+    if (Test-Path (Join-Path $d 'cat-sleep')) {
+        Start-Sleep -Seconds ([int](Get-Content (Join-Path $d 'cat-sleep') -Raw))
+    }
     $id = (Get-Content (Join-Path $d 'id') -Raw).Trim()
     Write-Output ('{"version":2,"id":"' + $id + '","chunker_polynomial":"00"}')
 }

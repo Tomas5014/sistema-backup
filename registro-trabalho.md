@@ -1561,3 +1561,46 @@ COM real fora do Windows); agente **119/119**; `unittest` **5/5**
 ps1 ASCII puro. Pendente sem mudanca: VM Windows limpa, `makensis`,
 `restic.exe` aprovado — instalador NAO compilado neste ambiente;
 COM/DPAPI/junction sem prova real.
+
+## Revisao 7 (branch feature/windows-backup-gui-pilot)
+
+1. **Resultado certo na tela:** `Classify-Resultado` reescrita — "concluido"
+   EXIGE resultado valido VINCULADO ao disparo (inicio_utc >= LastRunTime,
+   tolerancia so de 1s; o sucesso das 14:00 nao e mais resultado do
+   disparo das 14:00:50), com codigo 0 e snapshot de 64 hex. Novos
+   estados: concluido/falhou/incompleto/em_execucao/sem_resultado (o
+   Agendador tentou, nada gravado — codigo dele prova falha de
+   inicializacao)/ainda_nao. Aba Operar mostra situacao deste disparo +
+   "Ultimo backup confirmado" (data/hora proprias) + proxima execucao +
+   acao necessaria. PAUSA preservada ao salvar: update nao reativa.
+2. **Restauracao com a mesma verificacao do backup:**
+   `Confirm-PreparoVigente` confere SID da sessao, repositorio+ID e
+   VINCULO EFETIVO de identidade_ssh/known_hosts/ssh_config (caminho +
+   SHA-256 do preparo.json) antes de listar pontos, listar arquivos e
+   restaurar; divergencia bloqueia orientando refazer a ativacao. Falha
+   na listagem descarta a selecao. Resolve-LinkPath recusa componente
+   ilegivel; dois links encadeados cobertos.
+3. **Janela responsiva, menos passos:** "Testar conexao + Ativar" virou
+   "Validar e continuar" — avanca so com servidor e ID confirmados;
+   token de ativacao (perfil+chave+senha) expira se qualquer um mudar.
+   Rede fora da thread da janela: `Invoke-Assincrono` roda a funcao em
+   runspace separado com DoEvents + prazo; consultas pre-dump usam
+   `Invoke-ResticConsulta` (prazo monotonico + Kill). Erro de registro
+   sem permissao orienta acionar o administrador; cadastro nao e
+   apresentado como prova do agendamento.
+4. **Instalacao fixa:** sem MUI_PAGE_DIRECTORY; `.onInit` aborta `/D=` ou
+   pasta alternativa — piloto so instala em %ProgramFiles%\MACIP-Backup
+   (ACL do Windows protege de usuarios comuns). Registro em Aplicativos
+   instalados (HKLM Uninstall) + DeleteRegKey na remocao. Protecoes da
+   desinstalacao e preservacao de dados mantidas.
+
+Regressoes novas: sucesso das 14:00 com disparo 14:00:50 ->
+sem_resultado; resultado do proprio disparo -> concluido; sucesso sem
+snapshot valido -> falhou; disparo sem resultado -> sem_resultado;
+codigo do Agendador != 0 -> falhou; salvar com pausada -> pausa
+preservada; known_hosts/ssh_config/identidade alterados -> recusado;
+dois links encadeados -> recusado; "cat" que nao responde -> falha
+<15s com Kill. `run-gui-tests.ps1` **160/160** (1 pulado); agente
+**119/119**; `unittest` **5/5**; `git diff --check` limpo; ASCII.
+Pendente sem mudanca: VM Windows, makensis, restic.exe aprovado —
+instalador NAO compilado; COM/DPAPI/agendamento sem prova real.

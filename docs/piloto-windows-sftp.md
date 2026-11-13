@@ -77,29 +77,55 @@ Homologação de laboratório **relatada pelo operador** para o agente
 Kit entregue: `Backup-MacipCliente.ps1`, `backup.json`, `restic.exe`,
 chave SSH, `known_hosts`, senha via cofre.
 
-## 4. Instalação no Windows (administrador do cliente)
+## 4. Instalação no Windows
 
-### 4a. Pela interface (caminho do piloto)
+O que o **administrador do cliente** faz **uma vez**; o resto o técnico
+faz **pela interface**, sem terminal, JSON ou Agendador.
 
-1. Instalar `MacipBackupSetup-<versao>.exe` (gerar por
-   `agent/windows/installer/BUILD.md`; conferir SHA-256 do pacote —
-   abortar se ausente ou divergente).
-2. Abrir **MAC IP Backup** na **conta dedicada** com logon em lote —
+### 4a. Administrador (uma vez)
+
+1. Criar a **conta dedicada** do backup (ex.: `macip-backup`) com
+   leitura na pasta protegida e direito de **logon em lote** ("Fazer
+   logon como trabalho em lotes"). Sem esse direito a tarefa não dispara
+   com a sessão encerrada — a interface avisa se o registro falhar por
+   permissão, mas **o cadastro por si só não comprova o agendamento**:
+   a prova é o disparo real (item 6 abaixo).
+2. Conferir SHA-256 de `MacipBackupSetup-<versao>.exe` (gerar por
+   `agent/windows/installer/BUILD.md`) — abortar se ausente/divergente.
+3. Executar o instalador **sem argumentos** — instala **sempre** em
+   `%ProgramFiles%\MACIP-Backup` (protegido por ACL contra usuários
+   comuns; `/D=` e pasta alternativa são recusados), registra o app em
+   **Aplicativos instalados** e cria `%ProgramData%\MacipBackup` para
+   dados. Entregar ao técnico: **perfil `.json` da MAC IP, chave SSH
+   privada e senha Restic** (chave e senha por canal seguro).
+
+### 4b. Técnico (pela interface, na conta dedicada)
+
+1. Abrir **MAC IP Backup** no Menu Iniciar, **na conta dedicada** —
    preparo, senha DPAPI e tarefa ficam nessa conta.
-3. **Ativar:** *Importar perfil* (JSON da MAC IP — só dados), *Chave
-   privada*, *Senha Restic* → **Testar conexão** → **Ativar** (só
-   libera com identidade do servidor e ID do repositório conferindo).
-4. **Configurar:** *Escolher pasta*, exclusões, horário → **Salvar e
-   agendar** — a senha Windows é pedida na janela nativa; a tarefa
-   `MACIP-Backup` é criada (salvar de novo só a atualiza).
-5. Prova sem sessão: encerrar a sessão antes do horário, religar,
-   conferir na aba **Operar** (*Situacao: SUCESSO* com resultado novo)
-   e no destino (`restic snapshots`). Disparo manual pelo botão
-   **Executar agora** — a mesma tarefa, na mesma conta.
-6. **Restaurar:** aba 4 — ponto, arquivo, pasta separada; o original
-   nunca é sobrescrito.
+2. **Aba 1 — Validar e continuar:** *Importar perfil*, *Chave privada*,
+   *Senha Restic* → um clique só. Avança **somente** quando a identidade
+   do servidor e o ID do repositório conferem; mudar perfil, chave ou
+   senha depois exige nova validação.
+3. **Aba 2 — Salvar e agendar:** só pasta, horário e exclusões. A senha
+   Windows é pedida na janela nativa; salvar com a tarefa **pausada
+   preserva a pausa** (só *Retomar* religa).
+4. **Aba 3 — Operar:** mostra a **situação deste disparo** (o sucesso de
+   outro disparo nunca conta como novo), o **último backup confirmado**
+   com data/hora, a **próxima execução** e a **ação necessária**. O botão
+   *Executar primeiro backup* dispara a mesma tarefa — "Disparo
+   SOLICITADO" e a conclusão só aparece com resultado do disparo.
+5. Prova sem sessão: encerrar a sessão antes do horário, religar e
+   conferir *BACKUP CONCLUIDO* (resultado vinculado ao disparo) ou a
+   ação indicada.
+6. **Aba 4 — Restaurar:** ponto, arquivo (seleção literal), pasta
+   separada e vazia — o original nunca é sobrescrito; vínculos
+   SSH/destino são reconferidos antes de qualquer acesso.
 
-O fluxo por script abaixo segue válido como alternativa de diagnóstico.
+### 4c. Pelo script (diagnóstico)
+
+O fluxo por script abaixo segue válido **apenas para diagnóstico** — a
+operação normal do piloto é a interface acima.
 
 ### 4b. Pelo script (alternativa/diagnóstico)
 
