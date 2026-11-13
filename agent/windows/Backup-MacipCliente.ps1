@@ -323,23 +323,42 @@ function Update-Confirmado {
     $fimCur = if ($cur) { ConvertTo-DataUtc $cur.fim_utc } else { $null }
     if ($fimCur -and $fimCur -ge $fim) { return }   # nao regride
     $dest = Join-Path $Estado 'ultimo-confirmado.json'
-    $tmp  = "$dest.tmp"
-    # pasta homonima impediria a troca atomica silenciosamente: sem ela,
-    # Move-Item de arquivo sobre arquivo e a substituicao segura.
+    # pasta homonima nao e confirmado gravavel: o erro fica explicito.
     if (Test-Path -LiteralPath $dest -PathType Container) {
         throw 'ultimo-confirmado.json e uma pasta; confirmado nao gravado.'
     }
+    # Temporario EXCLUSIVO no mesmo diretorio (mesmo volume -> a troca e
+    # atomica). O JSON completo e gravado e fechado ANTES de publicar.
+    $tmp = Join-Path $Estado ("ultimo-confirmado.{0}.tmp" -f [guid]::NewGuid().ToString('N'))
     try {
-        [ordered]@{
+        $json = [ordered]@{
             fim_utc        = $FimUtc
             inicio_utc     = $InicioUtc
             snapshot       = $Snapshot
             repositorio_id = $RepositorioId
-        } | ConvertTo-Json | Set-Content -LiteralPath $tmp -Encoding UTF8
-        Move-Item -LiteralPath $tmp -Destination $dest -Force
+        } | ConvertTo-Json
+        [IO.File]::WriteAllText($tmp, $json, ([Text.UTF8Encoding]::new($false)))
+        Publish-Confirmado -Tmp $tmp -Destino $dest
+        $tmp = $null
     } catch {
-        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+        # so o temporario DESTA tentativa e removido -- o confirmado
+        # anterior NUNCA e apagado para tentar a troca de novo.
+        if ($tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
         throw
+    }
+}
+
+function Publish-Confirmado {
+    # A troca efetiva do temporario completo pelo arquivo oficial.
+    # Primeira gravacao: File.Move SEM sobrescrita -- se algo ja
+    # existir ali, falha em vez de apagar. Com confirmado anterior:
+    # File.Replace, que ou substitui inteiro ou nao toca em nada
+    # (Move-Item -Force podia apagar o destino antes de mover).
+    param([string]$Tmp, [string]$Destino)
+    if (Test-Path -LiteralPath $Destino -PathType Leaf) {
+        [IO.File]::Replace($Tmp, $Destino, [NullString]::Value)
+    } else {
+        [IO.File]::Move($Tmp, $Destino)
     }
 }
 

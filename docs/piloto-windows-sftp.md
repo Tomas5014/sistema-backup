@@ -121,6 +121,24 @@ faz **pela interface**, sem terminal, JSON ou Agendador.
 6. **Aba 4 — Restaurar:** ponto, arquivo (seleção literal), pasta
    separada e vazia — o original nunca é sobrescrito; vínculos
    SSH/destino são reconferidos antes de qualquer acesso.
+7. **Sucesso → falha com a janela fechada:** com a GUI fechada, forçar
+   um disparo que falhe (ex.: pausar o SFTP ou cortar a rede no
+   horário) depois de um sucesso confirmado. Ao reabrir, a tela deve
+   mostrar **Falhou** neste disparo **e** manter data/hora e snapshot
+   do sucesso anterior em "Último backup confirmado" — a evidência é
+   gravada pelo agente, não pela leitura da janela.
+8. **SFTP sem resposta durante a configuração:** com o destino aceitando
+   SSH mas sem responder SFTP, clicar em *Validar e continuar* e em
+   *Salvar e agendar* — a janela deve voltar a aceitar comandos dentro
+   do prazo, informar o que verificar e **nenhuma** configuração nova
+   pode ser publicada depois do timeout (a anterior continua valendo).
+9. **`ultimo-confirmado.json` bloqueado de verdade (só Windows):** a
+   falha da troca é simulada nos testes; aqui, abrir o arquivo de
+   confirmação com leitura exclusiva (ex.: `[IO.File]::Open` com
+   `FileShare.None` em outra janela), disparar um backup bem-sucedido e
+   conferir: `ultimo-confirmado.json` **idêntico** ao anterior
+   (SHA-256), `ultimo-resultado.json` mostra o novo snapshot +
+   `confirmado_erro`, e nenhum `*.tmp` fica para trás no estado.
 
 ### 4c. Pelo script (diagnóstico)
 

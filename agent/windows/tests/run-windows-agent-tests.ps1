@@ -242,17 +242,38 @@ Invoke-Preparar $lab | Out-Null
 $r = Invoke-Backup $lab
 eq $r.status 'sucesso' 'conf-erro: primeiro sucesso'
 $confAntes = Get-Content (Join-Path $lab.Estado 'ultimo-confirmado.json') -Raw
+$hashAntes = (Get-FileHash -LiteralPath (Join-Path $lab.Estado 'ultimo-confirmado.json') -Algorithm SHA256).Hash
+# Falha injetada NA SUBSTITUICAO -- DEPOIS de o temporario novo estar
+# completo e fechado: Publish-Confirmado e redefinido so nesta sessao
+# (SIMULADO -- a prova com arquivo de verdade bloqueado no Windows fica
+# para o roteiro da VM). Bloquear so a criacao do tmp nao comprovaria a
+# preservacao durante a troca.
+$pubReal = ${function:Publish-Confirmado}
+Set-Item function:Publish-Confirmado { param($Tmp,$Destino) throw 'falha injetada na substituicao (simulada)' }
+try {
+    ('e' * 64) | Set-Content (Join-Path $lab.StubDir 'snapshot') -Encoding Ascii -NoNewline
+    $antes = @((Get-ChildItem $lab.Estado -File | ForEach-Object { $_.Name }) | Sort-Object)
+    $r = Invoke-Backup $lab
+} finally {
+    Set-Item function:Publish-Confirmado $pubReal
+}
+eq $r.status 'sucesso' 'conf-erro: backup continua sucesso'
+eq ([string]$r.snapshot) ('e' * 64) 'conf-erro: resultado recente mantem o novo snapshot'
+eq (-not [string]::IsNullOrEmpty([string]$r.confirmado_erro)) $true 'conf-erro: falha visivel no retorno'
+eq (-not [string]::IsNullOrEmpty([string](Read-Resultado $lab).confirmado_erro)) $true 'conf-erro: diagnostico em ultimo-resultado'
+eq ((Get-FileHash -LiteralPath (Join-Path $lab.Estado 'ultimo-confirmado.json') -Algorithm SHA256).Hash) $hashAntes 'conf-erro: anterior IDENTICO (SHA-256)'
+eq (Get-Content (Join-Path $lab.Estado 'ultimo-confirmado.json') -Raw) $confAntes 'conf-erro: conteudo anterior byte a byte'
+eq @((Get-ChildItem $lab.Estado -File | Where-Object { $_.Name -like '*.tmp' })).Count 0 'conf-erro: temporario da tentativa removido'
+$depois = @((Get-ChildItem $lab.Estado -File | ForEach-Object { $_.Name }) | Sort-Object)
+eq ($depois -join '|') ($antes -join '|') 'conf-erro: nenhum arquivo extra deixado'
+# falha na CRIACAO do temporario (so Linux): tambem preserva o anterior
 if (-not $IsWindowsAlvo) {
-    # diretorio so de leitura: bloqueia CRIAR o temporario do confirmado;
-    # os arquivos existentes (resultado, log) seguem gravaveis.
     & chmod a-w $lab.Estado
     $r = Invoke-Backup $lab
     & chmod u+w $lab.Estado
-    eq $r.status 'sucesso' 'conf-erro: backup continua sucesso'
-    eq (-not [string]::IsNullOrEmpty([string]$r.confirmado_erro)) $true 'conf-erro: falha visivel no retorno'
-    eq (-not [string]::IsNullOrEmpty([string](Read-Resultado $lab).confirmado_erro)) $true 'conf-erro: diagnostico em ultimo-resultado'
-    eq (Get-Content (Join-Path $lab.Estado 'ultimo-confirmado.json') -Raw) $confAntes 'conf-erro: arquivo anterior byte a byte'
-    eq (Test-Path (Join-Path $lab.Estado 'ultimo-confirmado.json.tmp')) $false 'conf-erro: temporario limpo'
+    eq $r.status 'sucesso' 'conf-erro(tmp): backup continua sucesso'
+    eq (-not [string]::IsNullOrEmpty([string]$r.confirmado_erro)) $true 'conf-erro(tmp): falha visivel no retorno'
+    eq ((Get-FileHash -LiteralPath (Join-Path $lab.Estado 'ultimo-confirmado.json') -Algorithm SHA256).Hash) $hashAntes 'conf-erro(tmp): anterior identico'
 }
 
 Write-Host '== senha: nunca em argv/log/resultado; env restaurada =='

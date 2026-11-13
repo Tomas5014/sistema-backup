@@ -1712,3 +1712,47 @@ aprovado — BUILD.md mantem o primeiro passo reproduzivel. Pendente na
 VM: sucesso -> falha com a janela fechada e SFTP sem resposta durante a
 configuracao (janela deve voltar a aceitar comandos e nada publica
 depois do timeout).
+
+## Revisao 10 (branch feature/windows-backup-gui-pilot)
+
+**Substituicao segura de ultimo-confirmado.json:** `Update-Confirmado`
+usava `Move-Item -Force`, que pode apagar o destino antes de mover o
+arquivo novo — uma falha no meio da troca perdia a confirmacao
+anterior. Reescrito:
+
+- Temporario EXCLUSIVO no mesmo diretorio
+  (`ultimo-confirmado.<guid>.tmp` — mesmo volume, sem colidir com
+  outra tentativa nem com nome fixo), JSON completo gravado e fechado
+  (`[IO.File]::WriteAllText`, UTF-8 sem BOM) ANTES de publicar.
+- Publicacao em `Publish-Confirmado`: `File.Move` SEM sobrescrita na
+  primeira gravacao (destino existente -> erro, nunca apaga) e
+  `File.Replace` quando ja existe confirmado — a troca e atomica ou
+  nao toca em nada. Sem caminho alternativo que apague o anterior.
+- Falha limpa APENAS o temporario da tentativa; a confirmacao
+  anterior permanece byte a byte. Regras mantidas: so backup valido
+  atualiza; sucesso mais antigo nao regride; outro repo nao herda;
+  confirmado_erro em ultimo-resultado.json se a gravacao falhar com
+  snapshot remoto intocado.
+
+Regressao OBRIGATORIA (caminho real `Invoke-AgenteBackup`, restic
+simulado, janela fechada): falha INJETADA na substituicao —
+`Publish-Confirmado` redefinido na sessao para lancar DEPOIS de o
+temporario estar completo (simulado; a prova com arquivo bloqueado de
+verdade ficou no roteiro da VM, item 9 de 4b). Resultados: SHA-256 do
+confirmado anterior IDENTICO; ultimo-resultado com o snapshot novo +
+confirmado_erro; nenhum *.tmp resta; conjunto de arquivos do estado
+inalterado. Cobertura complementar: primeira gravacao (File.Move sem
+sobrescrita), substituicao bem-sucedida (File.Replace — "sucesso mais
+novo atualiza"), sucesso -> falha -> incompleto preservando o
+confirmado, criacao do temporario bloqueada (dir so de leitura, so
+Linux) tambem preserva.
+
+Verificacao: agente **150 ok, 0 falha** (pwsh 7.4.6, simulado); GUI
+**181 ok, 0 falha** (1 pulado: COM real fora do Windows); `unittest`
+**5/5** (2 pulados: pwsh fora do PATH do harness — suites rodadas
+direto); `git diff --check` limpo; linhas novas em ASCII.
+Separacao de prova: SIMULADO — sem prova real de COM/DPAPI/WinForms/
+PS 5.1/NSIS/File.Replace no Windows. Instalador NAO compilado: sem
+makensis nem payload\restic.exe aprovado — BUILD.md mantem o primeiro
+passo reproduzivel. Na VM: sucesso -> falha com a janela fechada,
+SFTP mudo na configuracao e confirmado bloqueado (piloto 4b itens 7-9).
