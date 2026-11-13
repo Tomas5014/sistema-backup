@@ -167,12 +167,15 @@ repositório e o `Preparar` (DPAPI na conta) são os mesmos do agente.
   horário diário. Salvar é **transacional em duas fases**: primeiro um
   conjunto novo (`config-N`, identidade e `backup.json`; `estado-N` novo
   só quando o perfil muda — DPAPI do estado anterior é reaproveitado se
-  o destino é o mesmo) é montado e validado **sem tocar** no conjunto
-  ativo; depois a tarefa `MACIP-Backup` é registrada e só então os
-  metadados apontam para o conjunto novo. Cancelamento da janela de
+  o destino é o mesmo, e nesse reuso o SID da sessão precisa ser o SID
+  gravado no `preparo.json`) é montado e validado **sem tocar** no
+  conjunto ativo; depois a tarefa `MACIP-Backup` é registrada e só então
+  os metadados apontam para o conjunto novo. Cancelamento da janela de
   credencial, falha no preparo ou erro no COM descartam o conjunto novo
-  e restauram a definição anterior da tarefa — configuração, estado
-  DPAPI e tarefa anteriores continuam juntos e funcionais. A tarefa usa
+  e restauram a definição anterior da tarefa; se a reposição falhar ou
+  não houver anterior, a tarefa **permanece apontando para arquivos
+  preservados e funcionais** — a limpeza só acontece quando o Agendador
+  confirma que nada referencia o conjunto. A tarefa usa
   `TASK_LOGON_PASSWORD` (**1**, não S4U) na mesma conta da sessão e só
   é alterada se estiver marcada como do aplicativo — tarefa homônima
   estranha é recusada. Salvar duas vezes atualiza a mesma tarefa, nunca
@@ -181,16 +184,20 @@ repositório e o `Preparar` (DPAPI na conta) são os mesmos do agente.
   classificação em sucesso/falha/incompleto/em execução/**sem resultado
   novo**/nunca executou — um resultado antigo não conta como prova da
   execução atual (inicio_utc × LastRunTime). *Executar agora* dispara a
-  **mesma** tarefa na **mesma** conta (conta divergente do preparo é
-  recusada); *Pausar/Retomar* habilita a tarefa; execução em andamento
-  bloqueia novo disparo.
+  **mesma** tarefa validada por **SID**: a conta em
+  `Definition.Principal.UserId` precisa resolver para o mesmo SID do
+  `preparo.json` do estado que a tarefa usa (mesmo nome em outro
+  domínio não equivale; SID ilegível recusa); *Pausar/Retomar* habilita
+  a tarefa; execução em andamento bloqueia novo disparo.
 - **Restaurar:** pontos via `restic snapshots`; arquivos via
   `restic ls --json` filtrados a **arquivos regulares** — a escolha vem
-  da lista, nunca de texto livre. Destino obrigatoriamente **vazio e
-  fora da pasta protegida** (equivalência por link/junction recusada);
-  antes de listar/restaurar o destino e o ID do repositório são
-  conferidos. `restic dump` traz **somente o arquivo escolhido** —
-  nome com `[`/`]`/`*` é literal, não arrasta outros arquivos — e a tela
+  da lista, nunca de texto livre. O destino é resolvido em **todos os
+  componentes** (link/junction até em pasta pai, mesmo com a final
+  inexistente) e precisa ser **vazio e fora da pasta protegida**; antes
+  de listar/restaurar o destino e o ID do repositório são conferidos.
+  `restic dump` traz **somente o arquivo escolhido** — nome com
+  `[`/`]`/`*` é literal — gravado com **criação exclusiva** (colisão
+  nunca sobrescreve; falha no dump remove só o parcial criado), e a tela
   só mostra sucesso quando o arquivo esperado existe no destino.
 - **Conta:** a GUI roda na conta dedicada do backup — DPAPI, preparo e
   tarefa ficam na mesma identidade; se for aberta elevada em outra

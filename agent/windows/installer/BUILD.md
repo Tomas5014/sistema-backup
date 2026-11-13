@@ -46,12 +46,16 @@ a senha Restic (chave e senha por canal seguro, nunca junto ao pacote).
   copiada e o `restic.dpapi`). A raiz `%ProgramData%\MacipBackup` fica
   com a herança padrão do ProgramData para que a conta dedicada consiga
   criar suas subpastas.
-- Desinstalação: **primeiro** desabilita somente a tarefa `MACIP-Backup`
-  (`schtasks /End` + `/Change /DISABLE`) e confere o código de retorno;
-  se a desativação não for confirmada, informa a falha e **preserva os
-  executáveis** que a tarefa roda. `%ProgramData%\MacipBackup`
-  (configuração, estado, resultados, senha protegida) é sempre
-  preservado.
+- Desinstalação segura, nesta ordem: consulta `MACIP-Backup` via
+  `schtasks /Query /XML` — **ausência confirmada** ("não encontrado")
+  segue; **erro de acesso/consulta** informa a falha e preserva os
+  executáveis; tarefa **homônima sem a marca** `MACIP Backup` no XML
+  permanece intacta. Para a tarefa do app: `/End` para encerrar
+  execução, `/Change /DISABLE` conferido pelo código de retorno e uma
+  segunda consulta que rejeita remover arquivos enquanto houver
+  execução ativa. `%ProgramData%\MacipBackup` (configuração, estado,
+  resultados, senha protegida) e o repositório remoto são sempre
+  preservados.
 
 ## Status de compilação
 

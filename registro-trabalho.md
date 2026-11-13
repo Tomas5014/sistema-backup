@@ -1396,3 +1396,48 @@ sem arquivo. Agente sem regressao **119/119**; `unittest` **5/5**
 homologacao):** VM Windows — instalador compilado, COM/DPAPI/
 PromptForCredential reais, SFTP real, sessao encerrada, reinicio e
 restauracao ponta a ponta.
+
+## 2026-11-13 — GUI do piloto: SID na tarefa, limpeza unica, desinstalacao e restauracao seguras
+
+Branch `feature/windows-backup-gui-pilot` sobre `de1ec98`. Segunda rodada
+de quatro correcoes, cada uma com regressao no simulador:
+
+1. **Conta da tarefa por SID:** `Definition.Principal.UserId` (formato
+   real do COM — o backend falso passa a replica-lo) resolvido para SID
+   e comparado com o `sid` do `preparo.json` do estado que a TAREFA
+   referencia; identidade ilegivel ou SID divergente recusa o disparo —
+   mesmo nome em dominio diferente nao equivale. Reuso de estado para
+   mudar pasta/exclusoes/horario exige SID da sessao == SID do preparo.
+   Teste positivo agora executa `Start-TarefaAgora` de verdade e confere
+   `Run` chamado exatamente uma vez; nos recusados, zero chamadas.
+2. **Limpeza com dono unico:** `Publish-Configuracao` marca `Publicado`
+   — o tratador da interface nao repete a remocao. `Remove-ConjuntoNovo`
+   so apaga quando o Agendador confirma que nenhuma tarefa/execucao
+   referencia o conjunto; na duvida, preserva e avisa. Falha de meta
+   apos o COM: reposicao confirmada -> conjunto novo removido e anterior
+   valendo; sem reposicao (1o cadastro ou falha nela) -> tarefa segue
+   apontando para arquivos preservados e funcionais, nada e apagado sob
+   tarefa viva.
+3. **Desinstalacao:** consulta `MACIP-Backup` via `/XML` e separa
+   ausencia confirmada de erro de acesso; propriedade verificada pela
+   marca `MACIP Backup` no XML (homonima estranha intocada). Para a
+   nossa: `/End` + `/DISABLE` conferido e segunda consulta barra remocao
+   com execucao ativa — sem confirmacao, preserva os executaveis.
+   Config, credenciais DPAPI, resultados e repositorio preservados.
+4. **Restauracao:** caminho efetivo resolvido em TODOS os componentes
+   (link/junction ate em pai de pasta final inexistente); cadeia longa
+   demais ou irrisolvivel recusa. Criacao exclusiva `CreateNew` —
+   colisao nunca sobrescreve; falha no dump remove so o parcial criado;
+   sucesso so com codigo 0 + arquivo esperado no destino.
+
+Testes: `run-gui-tests.ps1` **82/82** em pwsh 7.4.6 — SID/dominio,
+`Run` exatamente-uma-vez/zero-vez, tres casos de falha de publicacao,
+SID divergente no reuso, pai-link com pasta nova, colisao, arquivo
+ausente e binario `a[1].txt` com SHA-256. Agente sem regressao
+**119/119**; `unittest` **5/5**. **Restic REAL 0.18.1** (repo local):
+`ls --json` confirmou o schema (registro snapshot + nos `type:file`),
+`dump` restaurou `a[1].txt` e binario com SHA-256 batendo e recusou
+caminho inexato — o simulador nao substitui essa prova, ela existe.
+**Pendente (bloqueio):** VM Windows — COM/DPAPI/PromptForCredential
+reais, instalador compilado (sem makensis/restic.exe aprovado aqui),
+sessao encerrada, reinicio, cancelamento e desinstalacao na interface.

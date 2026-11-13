@@ -106,6 +106,11 @@ class TestWindowsAgentPs1(unittest.TestCase):
         # desinstalacao so remove executaveis apos desabilitar a tarefa
         self.assertIn('/DISABLE', nsi)
         self.assertIn('MACIP-Backup', nsi)
+        # verificacao de propriedade pela marca no XML + distincao ausencia/erro
+        self.assertIn('/XML', nsi)
+        self.assertIn('MACIP Backup', nsi)
+        self.assertIn('/End', nsi)
+        self.assertIn('findstr', nsi)
 
 
 if __name__ == "__main__":

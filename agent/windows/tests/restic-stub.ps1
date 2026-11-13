@@ -42,3 +42,6 @@ elseif ($args -contains 'dump') {
         [Console]::OpenStandardOutput().Write($b, 0, $b.Length)
     } else { $global:LASTEXITCODE = 1 }
 }
+# Em execucao como processo filho (pwsh -File via RESTIC_STUB_CHILD), o codigo
+# de saida real e o do processo — exit e obrigatorio (in-process & le $LASTEXITCODE).
+if ($env:RESTIC_STUB_CHILD -eq '1') { exit ([int]$global:LASTEXITCODE) }

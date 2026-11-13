@@ -1,6 +1,6 @@
 #requires -Version 5.1
 # MacipBackup-Gui.ps1 - interface grafica do agente Windows da MAC IP (piloto).
-# WinForms sobre Windows PowerShell 5.1: sem dependencia nova — a mesma
+# WinForms sobre Windows PowerShell 5.1: sem dependencia nova -- a mesma
 # tecnologia do agente. Todas as strings em ASCII: o arquivo roda em PS 5.1
 # sem BOM como o agente.
 #
@@ -9,7 +9,7 @@
 # O Agendador continua por tras: a tarefa MACIP-Backup roda com o app fechado,
 # sem sessao aberta e apos reinicio.
 #
-# Reaproveitamento: o agente Backup-MacipCliente.ps1 e dot-sourced — validacao
+# Reaproveitamento: o agente Backup-MacipCliente.ps1 e dot-sourced -- validacao
 # de backup.json, ssh_config restrito, Confirm-Destino, Invoke-Restic e
 # Invoke-AgentePreparar sao os mesmos ja homologados em laboratorio.
 #
@@ -46,7 +46,7 @@ $script:BaseDir    = [IO.Path]::GetFullPath($BaseDir)
 $script:GuiMeta    = Join-Path $script:BaseDir 'gui.json'
 $script:TaskName   = 'MACIP-Backup'
 $script:AgentePath = $AgentePath
-$script:LogonPassword = 1   # TASK_LOGON_PASSWORD = 1 (o 2 e S4U — sem DPAPI/rede)
+$script:LogonPassword = 1   # TASK_LOGON_PASSWORD = 1 (o 2 e S4U -- sem DPAPI/rede)
 $script:TaskMarker    = 'MACIP Backup'
 $script:Backend       = $null   # injetavel nos testes; padrao COM no Windows
 
@@ -170,7 +170,7 @@ function New-BackendCom {
         param($Def, $Conta, $SenhaConta)
         $this.Conectar()
         # 6 = TASK_CREATE_OR_UPDATE | TASK_LOGON_PASSWORD (1): conta com
-        # senha — token completo (rede + DPAPI) mesmo sem sessao aberta.
+        # senha -- token completo (rede + DPAPI) mesmo sem sessao aberta.
         $this.svc.GetFolder('\').RegisterTaskDefinition(
             $script:TaskName, $Def, 6, $Conta, $SenhaConta, $script:LogonPassword, $null) | Out-Null
     }
@@ -178,7 +178,7 @@ function New-BackendCom {
         param([string]$Xml, $Conta, $SenhaConta)
         $this.Conectar()
         # Rollback: repoe a definicao anterior exatamente como estava (XML
-        # serializado ANTES de qualquer alteracao — um objeto Definition
+        # serializado ANTES de qualquer alteracao -- um objeto Definition
         # reusado poderia ja vir modificado).
         $this.svc.GetFolder('\').RegisterTask(
             $script:TaskName, $Xml, 6, $Conta, $SenhaConta, $script:LogonPassword, $null) | Out-Null
@@ -244,7 +244,7 @@ function Register-TarefaMacip {
         throw ("Ja existe uma tarefa '$($script:TaskName)' que NAO pertence ao MAC IP Backup. " +
             'Renomeie ou remova a tarefa estranha - o aplicativo nao a altera.')
     }
-    $xmlAnterior = $b.XmlAtual()                 # copia serializada — imune a mutacao da def
+    $xmlAnterior = $b.XmlAtual()                 # copia serializada -- imune a mutacao da def
     $def = $b.NewDef($t)
     Write-TaskDef -Def $def -Horario $Horario -Config $Config -Estado $Estado -Conta $Conta
     $b.Registrar($def, $Conta, $SenhaConta)      # erro de permissao/credencial sobe para a tela
@@ -264,7 +264,7 @@ function Get-TaskArg {
 }
 
 function Get-EstadoAtual {
-    # Fonte primaria: o que a TAREFA usa — se o meta ficou para tras numa
+    # Fonte primaria: o que a TAREFA usa -- se o meta ficou para tras numa
     # falha de publicacao, a tela acompanha a realidade do Agendador.
     $e = Get-TaskArg -Nome 'DiretorioEstado'
     if ($e) { return $e }
@@ -288,18 +288,45 @@ function Set-TarefaHabilitada {
     $t.Enabled = $On
 }
 
+function Resolve-ContaSid {
+    # Resolve "DOMINIO\conta" para o SID real. Duas contas de mesmo nome em
+    # dominios diferentes NAO sao equivalentes -- so o SID decide.
+    param([string]$Conta)
+    if (-not $Conta) { return $null }
+    if (Test-IsWindows) {
+        try { return ([Security.Principal.NTAccount]$Conta).Translate([Security.Principal.SecurityIdentifier]).Value }
+        catch { return $null }
+    }
+    return ('posix:' + $Conta)   # fora do Windows (testes): nome completo e a identidade
+}
+
+function Read-PreparoSid {
+    # SID da conta que fez o preparo (gravado pelo agente em preparo.json).
+    param([string]$Estado)
+    $f = Join-Path $Estado 'preparo.json'
+    if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { return $null }
+    try { return [string](Get-Content -LiteralPath $f -Raw | ConvertFrom-Json).sid }
+    catch { return $null }
+}
+
 function Start-TarefaAgora {
     # Executar agora = a MESMA tarefa agendada, na MESMA conta registrada.
+    # A conta da tarefa (Definition.Principal.UserId) e a conta do preparo
+    # (preparo.json no estado que a TAREFA referencia) sao comparadas por SID.
     $t = (Get-Backend).Get()
     if (-not $t) { throw "Tarefa $($script:TaskName) nao existe - salve a configuracao primeiro." }
     if (-not (Test-TarefaDoApp -Tarefa $t)) { throw "Tarefa $($script:TaskName) nao pertence ao MAC IP Backup - recusado." }
-    if ($t.State -eq 4) { throw 'Ja ha uma execucao em andamento.' }   # TASK_STATE_RUNNING
-    $meta = Read-GuiMeta
-    if ($meta.conta_tarefa -and $t.Principal.UserId) {
-        $dom = [string]$t.Principal.UserId
-        if ($dom -and ($dom -split '[\\/]')[-1] -cne ($meta.conta_tarefa -split '[\\/]')[-1]) {
-            throw "Conta da tarefa ($dom) difere da conta do preparo ($($meta.conta_tarefa)) - recusado."
-        }
+    if ([int]$t.State -eq 4) { throw 'Ja ha uma execucao em andamento.' }   # TASK_STATE_RUNNING
+    $estado = Get-TaskArg -Nome 'DiretorioEstado'
+    if (-not $estado) { throw 'Tarefa sem estado verificavel nos argumentos - recusado.' }
+    $sidPreparo = Read-PreparoSid -Estado $estado
+    $contaTarefa = [string]$t.Definition.Principal.UserId
+    $sidTarefa = Resolve-ContaSid -Conta $contaTarefa
+    if (-not $sidPreparo -or -not $sidTarefa) {
+        throw 'Sem identidade verificavel (SID ausente no preparo ou na tarefa) - recusado.'
+    }
+    if ($sidTarefa -cne $sidPreparo) {
+        throw "Conta da tarefa ($contaTarefa) difere da conta do preparo (SID divergente) - recusado."
     }
     $t.Run($null) | Out-Null
 }
@@ -307,13 +334,15 @@ function Start-TarefaAgora {
 function Get-InfoTarefa {
     $t = (Get-Backend).Get()
     if (-not $t) { return $null }
+    $contaTarefa = ''
+    try { $contaTarefa = [string]$t.Definition.Principal.UserId } catch { }
     return [pscustomobject]@{
         Habilitada = [bool]$t.Enabled
         Estado     = [int]$t.State          # 4 = em execucao
         Ultima     = [string]$t.LastRunTime
         Proxima    = [string]$t.NextRunTime
         Codigo     = [int]$t.LastTaskResult
-        Conta      = [string]$t.Principal.UserId
+        Conta      = $contaTarefa
         DoApp      = (Test-TarefaDoApp -Tarefa $t)
     }
 }
@@ -388,7 +417,7 @@ function Get-Snapshots {
 
 function Get-ArquivosSnapshot {
     # restic ls --json: um objeto por no. Retorna SOMENTE arquivos regulares
-    # (type == 'file'), com o caminho exato do snapshot — nada de texto livre.
+    # (type == 'file'), com o caminho exato do snapshot -- nada de texto livre.
     param([string]$Estado, [string]$Config, [string]$Snapshot)
     $cfg = Get-CfgOperacional -Estado $Estado -Config $Config
     [void](Confirm-DestinoOperacional -Cfg $cfg -Estado $Estado)
@@ -403,14 +432,14 @@ function Get-ArquivosSnapshot {
 }
 
 function Resolve-LinkPath {
-    # Resolve links simbolicos/junctions: um destino "equivalente" por link
-    # conta como a propria origem.
+    # Resolve links simbolicos/junctions encadeados. Se a cadeia nao fecha em
+    # 8 saltos, recusa -- melhor recusar do que comparar um caminho ambiguo.
     param([string]$Caminho)
     $atual = $Caminho
     for ($i = 0; $i -lt 8; $i++) {
-        if (-not (Test-Path -LiteralPath $atual)) { break }
-        try { $item = Get-Item -LiteralPath $atual -Force } catch { break }
-        if (-not $item.LinkType -or -not $item.Target) { break }
+        if (-not (Test-Path -LiteralPath $atual)) { return ([IO.Path]::GetFullPath($atual)) }
+        try { $item = Get-Item -LiteralPath $atual -Force } catch { return ([IO.Path]::GetFullPath($atual)) }
+        if (-not $item.LinkType -or -not $item.Target) { return ([IO.Path]::GetFullPath($atual)) }
         $alvo = $item.Target
         if ($alvo -is [array]) { $alvo = $alvo[0] }
         if (-not [IO.Path]::IsPathRooted($alvo)) {
@@ -418,7 +447,26 @@ function Resolve-LinkPath {
         }
         $atual = [IO.Path]::GetFullPath($alvo)
     }
-    return [IO.Path]::GetFullPath($atual)
+    throw "Cadeia de links/junctions longa demais para resolver com seguranca: $Caminho"
+}
+
+function Resolve-PathSeguro {
+    # Resolve o caminho efetivo olhando TODOS os componentes -- inclusive
+    # quando a pasta final ainda nao existe (o link pode estar num pai).
+    param([string]$Caminho)
+    $full = [IO.Path]::GetFullPath($Caminho)
+    $raiz = [IO.Path]::GetPathRoot($full)
+    $rel = $full.Substring($raiz.Length)
+    $atual = $raiz
+    foreach ($seg in ($rel -split '[\\/]+')) {
+        if (-not $seg) { continue }
+        $atual = Join-Path $atual $seg
+        if (Test-Path -LiteralPath $atual) {
+            try { $atual = Resolve-LinkPath -Caminho $atual }
+            catch { throw "Caminho nao resolvido com seguranca ($atual): $($_.Exception.Message)" }
+        }
+    }
+    return $atual
 }
 
 function Get-NomeArquivoRestic {
@@ -429,47 +477,59 @@ function Get-NomeArquivoRestic {
 
 function Invoke-ResticDump {
     # 'restic dump <snap> <caminho>' escreve o conteudo do ARQUIVO EXATO no
-    # stdout — sem glob: um '*' no nome nao arrasta outros arquivos.
+    # stdout -- sem glob: um '*' no nome nao arrasta outros arquivos.
     # stdout vai direto para o destino via stream (nao passa por string do
-    # PS — preserva binario).
+    # PS -- preserva binario).
     param([pscustomobject]$Cfg, [string]$Estado, [string]$Snapshot, [string]$Arquivo, [string]$Destino)
     $exe = Join-Path $Estado $script:ResticExeNome
     $senha = Read-ResticPassword -Caminho (Join-Path $Estado 'restic.dpapi')
     $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($senha)
     $alvo = Join-Path $Destino (Get-NomeArquivoRestic -PathRestic $Arquivo)
+    $criado = $false
     try {
-        $psi = [Diagnostics.ProcessStartInfo]::new()
-        $sftpCmd = 'sftp.command={0} -F {1} -s {2} sftp' -f $Cfg.ssh_exe, $Cfg.ssh_config, $Cfg.sftp_host
-        $resticArgs = '--repo "{0}" --cache-dir "{1}" -o "{2}" dump {3} "{4}"' -f `
-            $Cfg.repositorio, (Join-Path $Estado 'cache'), $sftpCmd, $Snapshot, $Arquivo
-        if (Test-IsWindows) {
-            $psi.FileName = $exe
-            $psi.Arguments = $resticArgs
-        } else {
-            # Em Windows o restic.exe e nativo. Fora do Windows (so em teste) o
-            # "exe" e um script ps1 — roda pelo interpretador que hospeda a GUI.
-            $psi.FileName = (Get-Process -Id $PID).Path
-            $psi.Arguments = '-NoProfile -File "{0}" {1}' -f $exe, $resticArgs
+        # Criacao EXCLUSIVA antes de disparar o restic: se o arquivo ja
+        # existir (ou aparecer entre a checagem e a gravacao), recusa sem
+        # tocar no conteudo existente.
+        try {
+            $fs = [IO.File]::Open($alvo, 'CreateNew', 'Write')
+            $criado = $true
+        } catch [IO.IOException] {
+            throw "Ja existe arquivo em '$alvo' - a restauracao nunca sobrescreve."
         }
-        $psi.UseShellExecute = $false
-        $psi.RedirectStandardOutput = $true
-        $psi.RedirectStandardError = $true
-        $psi.EnvironmentVariables['RESTIC_PASSWORD'] = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
-        $psi.EnvironmentVariables.Remove('RESTIC_PASSWORD_FILE') | Out-Null
-        $psi.EnvironmentVariables.Remove('RESTIC_PASSWORD_COMMAND') | Out-Null
-        $p = [Diagnostics.Process]::Start($psi)
-        $fs = [IO.File]::Create($alvo)
-        try { $p.StandardOutput.BaseStream.CopyTo($fs) } finally { $fs.Close() }
-        $p.WaitForExit()
-        $err = $p.StandardError.ReadToEnd()
-        $codigo = $p.ExitCode
+        try {
+            $psi = [Diagnostics.ProcessStartInfo]::new()
+            $sftpCmd = 'sftp.command={0} -F {1} -s {2} sftp' -f $Cfg.ssh_exe, $Cfg.ssh_config, $Cfg.sftp_host
+            $resticArgs = '--repo "{0}" --cache-dir "{1}" -o "{2}" dump {3} "{4}"' -f `
+                $Cfg.repositorio, (Join-Path $Estado 'cache'), $sftpCmd, $Snapshot, $Arquivo
+            if (Test-IsWindows) {
+                $psi.FileName = $exe
+                $psi.Arguments = $resticArgs
+            } else {
+                # Em Windows o restic.exe e nativo. Fora do Windows (so em teste) o
+                # "exe" e um script ps1 -- roda pelo interpretador que hospeda a GUI.
+                $psi.FileName = (Get-Process -Id $PID).Path
+                $psi.Arguments = '-NoProfile -File "{0}" {1}' -f $exe, $resticArgs
+            }
+            $psi.UseShellExecute = $false
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError = $true
+            $psi.EnvironmentVariables['RESTIC_PASSWORD'] = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+            $psi.EnvironmentVariables.Remove('RESTIC_PASSWORD_FILE') | Out-Null
+            $psi.EnvironmentVariables.Remove('RESTIC_PASSWORD_COMMAND') | Out-Null
+            if (-not (Test-IsWindows)) { $psi.EnvironmentVariables['RESTIC_STUB_CHILD'] = '1' }
+            $p = [Diagnostics.Process]::Start($psi)
+            try { $p.StandardOutput.BaseStream.CopyTo($fs) } finally { $fs.Close() }
+            $p.WaitForExit()
+            $err = $p.StandardError.ReadToEnd()
+            if ($p.ExitCode -ne 0) { throw "Falha na restauracao (restic $($p.ExitCode)): $err" }
+        } catch {
+            # so remove o arquivo parcial criado por ESTA tentativa
+            if ($criado) { Remove-Item -LiteralPath $alvo -Force -ErrorAction SilentlyContinue }
+            throw
+        }
     } finally {
         [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
         if ($senha) { $senha.Dispose() }
-    }
-    if ($codigo -ne 0) {
-        Remove-Item -LiteralPath $alvo -Force -ErrorAction SilentlyContinue
-        throw "Falha na restauracao (restic $codigo): $err"
     }
     return $alvo
 }
@@ -482,16 +542,17 @@ function Restore-Arquivo {
           [string]$Destino, [string]$Origem)
     if (-not $Destino) { throw 'Escolha a pasta de destino da restauracao.' }
     if (-not $Arquivo) { throw 'Escolha o arquivo a restaurar na lista.' }
-    $destAbs = [IO.Path]::GetFullPath($Destino)
-    $origAbs = if ($Origem) { [IO.Path]::GetFullPath($Origem) } else { $null }
-    $destResolvido = Resolve-LinkPath -Caminho $destAbs
-    $origResolvido = if ($origAbs) { Resolve-LinkPath -Caminho $origAbs } else { $null }
+    # Resolve o caminho efetivo olhando TODOS os componentes -- um link ou
+    # junction num pai (mesmo com a pasta final inexistente) muda o destino.
+    $destResolvido = Resolve-PathSeguro -Caminho $Destino
+    $origResolvido = if ($Origem) { Resolve-PathSeguro -Caminho $Origem } else { $null }
     if ($origResolvido -and $destResolvido.TrimEnd('\','/') -ieq $origResolvido.TrimEnd('\','/')) {
         throw 'A restauracao do piloto nao pode ser feita sobre a pasta protegida (nem por link/junction).'
     }
     if ($origResolvido -and $destResolvido.StartsWith($origResolvido.TrimEnd('\','/') + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
         throw 'A pasta de destino esta DENTRO da pasta protegida - escolha outra.'
     }
+    $destAbs = $destResolvido
     if (Test-Path -LiteralPath $destAbs) {
         if ((Get-ChildItem -LiteralPath $destAbs -Force | Measure-Object).Count -gt 0) {
             throw "Destino precisa estar vazio (restauracao nunca sobrescreve): $destAbs"
@@ -633,9 +694,20 @@ function Build-Configuracao {
         }
         $estado = if ($estadoNovo) { $estadoNovo } else { Get-EstadoAtual }
         if (-not $estado) { throw 'Sem estado preparado - conclua a ativacao primeiro.' }
+        if (-not $estadoNovo) {
+            # Estado reaproveitado: a conta que vai registrar a tarefa PRECISA
+            # ser a do preparo -- o SID esta em preparo.json e e inegociavel
+            # (a senha DPAPI so abre na conta original).
+            $sidPrep = Read-PreparoSid -Estado $estado
+            if (-not $sidPrep) { throw "Estado sem preparo verificavel (preparo.json ausente em $estado) - reative pelo perfil." }
+            if ($sidPrep -cne (Get-IdentidadeAtual).Sid) {
+                throw 'A conta desta sessao difere da conta do preparo (SID divergente) - abra a interface na conta do backup.'
+            }
+        }
         return [pscustomobject]@{
             Indice = $n; ConfigDir = $cfgDir; Config = $jsonPath
             Estado = $estado; EstadoNovo = ($null -ne $estadoNovo); Horario = $Horario
+            Publicado = $false
         }
     } catch {
         # rollback da fase 1: o conjunto anterior nao foi tocado
@@ -645,27 +717,58 @@ function Build-Configuracao {
     }
 }
 
-function Remove-ConjuntoNovo {
-    # Remove o que a fase 1 criou (cancelamento ou falha posterior).
+function Test-ConjuntoEmUso {
+    # $true = o Agendador referencia este conjunto (config/estado nos
+    # argumentos) ou NAO foi possivel confirmar -- inclusive execucao ativa.
     param($Built)
-    if (-not $Built) { return }
+    try {
+        $t = (Get-Backend).Get()
+        if (-not $t) { return $false }
+        if ([int]$t.State -eq 4) { return $true }        # em execucao pode depender dele
+        $c = Get-TaskArg -Nome 'Config'
+        $e = Get-TaskArg -Nome 'DiretorioEstado'
+        if ((-not $c) -or (-not $e)) { return $true }  # argumentos ilegiveis = nao confirmado
+        if ($c -ieq $Built.Config) { return $true }
+        # o estado so e removivel quando ESTA tentativa o criou (perfil novo);
+        # estado reaproveitado ja era da tarefa anterior, nao do conjunto novo.
+        if ($Built.EstadoNovo -and $Built.Estado -and ($e -ieq $Built.Estado)) { return $true }
+        return $false
+    } catch { return $true }                            # falha na consulta = nao confirmado
+}
+
+function Remove-ConjuntoNovo {
+    # UNICO ponto de limpeza do conjunto novo. So remove quando o Agendador
+    # confirma que NADA depende dele; na duvida preserva e devolve aviso.
+    param($Built)
+    if (-not $Built) { return $null }
+    if (Test-ConjuntoEmUso -Built $Built) {
+        return ("Conjunto novo PRESERVADO: a tarefa ainda o referencia, esta em execucao " +
+            "ou nao foi possivel confirmar (mantido: $($Built.ConfigDir)).")
+    }
     Remove-Item -LiteralPath $Built.ConfigDir -Recurse -Force -ErrorAction SilentlyContinue
     if ($Built.EstadoNovo) { Remove-Item -LiteralPath $Built.Estado -Recurse -Force -ErrorAction SilentlyContinue }
+    return $null
 }
 
 function Publish-Configuracao {
-    # FASE 2: registra a tarefa apontando para o conjunto NOVO e so depois
-    # publica gui.json. Falha de registro -> Remove-ConjuntoNovo; falha apos
-    # o registro (ex.: gui.json) -> restaura a definicao anterior da tarefa
-    # para manter o conjunto anterior coerente (config+estado+tarefa).
+    # FASE 2 -- DONA da limpeza a partir daqui ($Built.Publicado avisa o
+    # tratador da interface para NAO repetir a remocao):
+    #   1. registra a tarefa apontando para o conjunto NOVO;
+    #   2. publica gui.json.
+    # Falha no registro -> conjunto novo descartavel (o Agendador confirma).
+    # Falha na publicacao -> tenta repor a definicao anterior:
+    #   reposta  -> conjunto novo livre -> limpa;
+    #   nao reposta (ou 1o cadastro sem anterior) -> a tarefa CONTINUA
+    #   apontando para o conjunto novo: arquivos preservados e funcionais.
     param($Built, [string]$Conta, [string]$SenhaConta)
+    $Built.Publicado = $true
     $xmlAnterior = $null
     try {
         $xmlAnterior = Register-TarefaMacip -Horario $Built.Horario -Conta $Conta `
             -SenhaConta $SenhaConta -Config $Built.Config -Estado $Built.Estado
     } catch {
-        Remove-ConjuntoNovo -Built $Built
-        throw
+        $aviso = Remove-ConjuntoNovo -Built $Built
+        throw ($_.Exception.Message + $(if ($aviso) { " $aviso" } else { '' }))
     }
     try {
         $meta = Read-GuiMeta
@@ -674,14 +777,23 @@ function Publish-Configuracao {
         $meta.conta_tarefa = $Conta
         Save-GuiMeta -Meta $meta
     } catch {
-        # tarefa ja aponta para o novo conjunto: repoe a definicao anterior
-        # (XML capturado antes da alteracao) para o conjunto anterior
-        # continuar coerente — config+estado+tarefa andam juntos.
+        $reposto = $false
         if ($xmlAnterior) {
-            try { (Get-Backend).RegistrarXml($xmlAnterior, $Conta, $SenhaConta) } catch { }
+            try { (Get-Backend).RegistrarXml($xmlAnterior, $Conta, $SenhaConta); $reposto = $true } catch { }
         }
-        Remove-ConjuntoNovo -Built $Built
-        throw
+        if ($reposto) {
+            # tarefa anterior restaurada -> conjunto novo livre
+            $aviso = Remove-ConjuntoNovo -Built $Built
+            throw ("Falha ao publicar os metadados; a tarefa anterior foi restaurada " +
+                "e a configuracao anterior continua valendo. $($_.Exception.Message)" +
+                $(if ($aviso) { " $aviso" } else { '' }))
+        }
+        # sem reposicao: a tarefa aponta para o conjunto NOVO -- nunca apagar
+        # os arquivos que ela executa. O conjunto fica funcional e o meta
+        # pode ser regravado numa nova tentativa de salvar.
+        throw ("Falha ao publicar os metadados ($($_.Exception.Message)). " +
+            "Os arquivos novos foram PRESERVADOS porque a tarefa os referencia - " +
+            "tente salvar novamente para concluir a publicacao.")
     }
 }
 
@@ -842,8 +954,9 @@ function Show-Gui {
                 "Senha do Windows da conta $conta (a tarefa roda mesmo sem sessao aberta)",
                 $conta, '')
             if (-not $cred) {
-                Remove-ConjuntoNovo -Built $built
-                throw 'Agendamento cancelado - a configuracao anterior continua valendo.'
+                $aviso = Remove-ConjuntoNovo -Built $built
+                throw ('Agendamento cancelado - a configuracao anterior continua valendo.' +
+                    $(if ($aviso) { " $aviso" } else { '' }))
             }
             # FASE 2: publica
             Publish-Configuracao -Built $built -Conta $conta -SenhaConta $cred.GetNetworkCredential().Password
@@ -853,7 +966,9 @@ function Show-Gui {
             $lblCfg.ForeColor = 'DarkGreen'
             $lblCfg.Text = "Salvo. Tarefa '$($script:TaskName)' agendada para $($tbHora.Text) na conta $conta."
         } catch {
-            if ($built) { Remove-ConjuntoNovo -Built $built }
+            # Limpeza so aqui se a fase 2 ainda nao assumiu (Publicado):
+            # depois de Publish-Configuracao ela e a unica responsavel.
+            if ($built -and -not $built.Publicado) { Remove-ConjuntoNovo -Built $built | Out-Null }
             $lblCfg.ForeColor = 'DarkRed'; $lblCfg.Text = "Erro: $($_.Exception.Message)"
         } finally { $btSalvar.Enabled = $true }
     })

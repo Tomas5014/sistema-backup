@@ -1,5 +1,5 @@
 ﻿#requires -Version 5.1
-# Testes da interface MAC IP Backup — mesma infra da suite do agente.
+# Testes da interface MAC IP Backup -- mesma infra da suite do agente.
 # Roda em pwsh no Linux: DPAPI e Agendador sao substituidos (backend
 # injetavel com memoria de tarefa); no Windows roda a prova COM real.
 # Cobre: perfil, salvamento em 2 fases com rollback, tarefa (logon type,
@@ -86,10 +86,10 @@ try {
     }
     function New-BackendFalso {
         # defData = a tarefa "gravada" (definicoes devolvidas por Get() sao
-        # NOVAS a cada chamada — mutacoes locais nao vazam para o gravado,
+        # NOVAS a cada chamada -- mutacoes locais nao vazam para o gravado,
         # como no COM real).
         param([string]$FalharEm = '', [bool]$TemEstranha = $false)
-        $b = [pscustomobject]@{ defData = $null; registros = 0; falha = $FalharEm; estado = 1 }
+        $b = [pscustomobject]@{ defData = $null; registros = 0; falha = $FalharEm; estado = 1; runs = 0 }
         if ($TemEstranha) {
             $b.defData = @{ descricao='Manutencao da empresa'; userId='OUTRO\usuario'; logon=1
                             enabled=$true; args='-File C:\outra\coisa.ps1'; trigger='' }
@@ -97,18 +97,20 @@ try {
         $b | Add-Member ScriptMethod Get {
             if (-not $this.defData) { return $null }
             $d = Set-DefData -Def (New-DefFalsa) -D $this.defData
+            # formato REAL do COM: Principal fica em Definition.Principal --
+            # NAO existe Principal de primeiro nivel na tarefa.
             $t = [pscustomobject]@{
                 Enabled=$d.Settings.Enabled; State=$this.estado
                 LastRunTime=''; NextRunTime='amanha'; LastTaskResult=0
-                Principal=[pscustomobject]@{UserId=$this.defData.userId}
                 Xml=($this.defData | ConvertTo-Json -Compress)
                 Definition=$d
+                bk=$this
             }
-            $t | Add-Member ScriptMethod Run { param($x) } | Out-Null
+            $t | Add-Member ScriptMethod Run { param($x) $this.bk.runs++; $this.State = 4 } | Out-Null
             return $t
         }
         $b | Add-Member ScriptMethod NewDef { param($Tarefa)
-            return (New-DefFalsa)   # sempre copia nova — o registrado fica intacto
+            return (New-DefFalsa)   # sempre copia nova -- o registrado fica intacto
         }
         $b | Add-Member ScriptMethod Registrar { param($Def,$Conta,$SenhaConta)
             if ($this.falha -eq 'registrar') { throw 'Permissao negada (simulada)' }
@@ -227,18 +229,91 @@ try {
     throws { Set-TarefaHabilitada $false } 'tarefa estranha: pausa recusada'
     throws { Start-TarefaAgora } 'tarefa estranha: executar agora recusado'
 
-    # ---- Executar agora: conta e concorrencia ----
+    # ---- Executar agora: SID da tarefa == SID do preparo (estado real) ----
+    # A conta do preparo (preparo.json em $b1.Estado) e a conta atual do teste.
+    $contaPrep = (Get-IdentidadeAtual).Nome
     $script:Backend = New-BackendFalso
-    $script:Backend.defData = @{ descricao='MACIP Backup - agente de backup do piloto'; userId='LAB\operador'
-                                 logon=1; enabled=$true; args='-DiretorioEstado "e" -Config "c"'; trigger='' }
+    $script:Backend.defData = @{ descricao='MACIP Backup - agente de backup do piloto'; userId=$contaPrep
+                                 logon=1; enabled=$true
+                                 args=('-DiretorioEstado "{0}" -Config "{1}"' -f $b1.Estado, $b1.Config); trigger='' }
     $script:Backend.estado = 4
     throws { Start-TarefaAgora } 'execucao em andamento: novo disparo recusado'
+    eq $script:Backend.runs 0 'em execucao: zero chamadas a Run'
     $script:Backend.estado = 1
-    Save-GuiMeta -Meta ([pscustomobject]@{estado_atual='e';config_atual='c';conta_tarefa='LAB\operador'})
-    { Start-TarefaAgora } | Out-Null
-    ok $true 'executar agora: disparo aceito na mesma tarefa/conta'
+    Start-TarefaAgora
+    eq $script:Backend.runs 1 'executar agora: Run chamado exatamente uma vez na tarefa'
+    $script:Backend.estado = 1
     $script:Backend.defData.userId = 'OUTRO\usuario'
-    throws { Start-TarefaAgora } 'conta divergente do preparo: disparo recusado'
+    throws { Start-TarefaAgora } 'conta divergente do preparo (SID): disparo recusado'
+    eq $script:Backend.runs 1 'conta divergente: zero chamadas novas a Run'
+    $script:Backend.defData.userId = ''
+    throws { Start-TarefaAgora } 'sem UserId na tarefa: disparo recusado'
+    eq $script:Backend.runs 1 'sem UserId: zero chamadas novas a Run'
+    # mesmo nome de usuario em outro dominio NAO equivale (SID diverge)
+    $script:Backend.defData.userId = ('DOMINIOFALSO\' + $contaPrep)
+    throws { Start-TarefaAgora } 'mesmo nome em dominio diferente: disparo recusado (SID)'
+    eq $script:Backend.runs 1 'dominio diferente: zero chamadas novas a Run'
+    # estado sem preparo.json -> sem identidade verificavel -> recusa
+    $estadoVazio = Join-Path $tmp 'estado-sem-preparo'; New-Item -ItemType Directory $estadoVazio | Out-Null
+    $script:Backend.defData.userId = $contaPrep
+    $script:Backend.defData.args = '-DiretorioEstado "{0}" -Config "{1}"' -f $estadoVazio, $b1.Config
+    throws { Start-TarefaAgora } 'estado sem preparo.json: disparo recusado'
+    eq $script:Backend.runs 1 'sem preparo verificavel: zero chamadas novas a Run'
+
+    # ---- falha na PUBLICACAO do meta (Save-GuiMeta) apos registro COM ----
+    # seam de falha injetavel
+    $script:SaveMetaReal = ${function:Save-GuiMeta}
+    function script:Save-GuiMeta { param($Meta) if ($script:FalhaSaveMeta) { throw 'falha meta (simulada)' }; & $script:SaveMetaReal -Meta $Meta }
+    $script:FalhaSaveMeta = $true
+
+    # caso A: primeiro cadastro (sem tarefa anterior) -> conjunto novo
+    # PRESERVADO porque a tarefa nova ja o referencia; nada fica apagado.
+    $script:Backend = New-BackendFalso   # sem tarefa gravada
+    $builtA = Build-Configuracao -Perfil $null -ChavePath '' -SenhaRestic $null -Origem $origem -Exclusoes @() -Horario '06:00'
+    throws { Publish-Configuracao -Built $builtA -Conta $contaPrep -SenhaConta 'w' } 'pub falhou (1o cadastro): excecao propagada'
+    ok (Test-Path -LiteralPath $builtA.Config -PathType Leaf) 'pub falhou (1o cadastro): arquivos novos preservados'
+    $arg = $script:Backend.Get().Definition.Actions.Item(1).Arguments
+    ok ($arg -like ('*' + $builtA.Config + '*')) 'pub falhou (1o cadastro): tarefa aponta p/ conjunto novo (funcional)'
+    $script:FalhaSaveMeta = $false
+
+    # caso B: atualizacao com reposicao da tarefa anterior -> conjunto novo limpo
+    $defAntiga2 = $script:Backend.Get().Definition   # def do caso A virou "anterior"
+    $script:Backend = New-BackendFalso
+    $script:Backend.Registrar($defAntiga2, $contaPrep, 'w')
+    $configAntes = Get-ConfigAtual
+    $script:FalhaSaveMeta = $true
+    $builtB = Build-Configuracao -Perfil $null -ChavePath '' -SenhaRestic $null -Origem $origem -Exclusoes @() -Horario '07:00'
+    throws { Publish-Configuracao -Built $builtB -Conta $contaPrep -SenhaConta 'w' } 'pub falhou (reposicao ok): excecao propagada'
+    eq (Get-ConfigAtual) $configAntes 'pub falhou (reposicao ok): tarefa volta a config anterior'
+    ok (Test-Path -LiteralPath $configAntes -PathType Leaf) 'pub falhou (reposicao ok): config anterior existe'
+    ok (-not (Test-Path -LiteralPath $builtB.ConfigDir)) 'pub falhou (reposicao ok): conjunto novo removido'
+    $script:FalhaSaveMeta = $false
+
+    # caso C: atualizacao com FALHA na reposicao -> conjunto novo preservado,
+    # tarefa segue apontando para ele (nada apagado sob ela).
+    $defAntiga3 = $script:Backend.Get().Definition
+    $script:Backend = New-BackendFalso
+    $script:Backend.Registrar($defAntiga3, $contaPrep, 'w')
+    $script:FalhaSaveMeta = $true
+    $builtC = Build-Configuracao -Perfil $null -ChavePath '' -SenhaRestic $null -Origem $origem -Exclusoes @() -Horario '08:00'
+    $script:Backend.falha = 'registrarxml'
+    throws { Publish-Configuracao -Built $builtC -Conta $contaPrep -SenhaConta 'w' } 'pub falhou (reposicao falhou): excecao propagada'
+    ok (Test-Path -LiteralPath $builtC.Config -PathType Leaf) 'pub falhou (reposicao falhou): arquivos novos preservados'
+    $argC = $script:Backend.Get().Definition.Actions.Item(1).Arguments
+    ok ($argC -like ('*' + $builtC.Config + '*')) 'pub falhou (reposicao falhou): tarefa aponta p/ conjunto novo'
+    # a def anterior NAO foi reposta (falha injetada) -- mas seus arquivos
+    # continuam existindo: nada foi apagado sob nenhuma das duas defs.
+    $cfgAnt = Get-ConfigAtual
+    ok ($cfgAnt -eq $builtC.Config) 'pub falhou (reposicao falhou): sem config anterior na tarefa'
+    $script:FalhaSaveMeta = $false
+
+    # ---- conta do preparo diverge da sessao: reuso de estado recusado ----
+    $prepFile = Join-Path $b1.Estado 'preparo.json'
+    $prepJson = Get-Content -LiteralPath $prepFile -Raw
+    ($prepJson | ConvertFrom-Json | ForEach-Object { $_.sid = 'S-1-OUTRA-CONTA'; $_ } | ConvertTo-Json) | Set-Content -LiteralPath $prepFile -Encoding UTF8
+    throws { Build-Configuracao -Perfil $null -ChavePath '' -SenhaRestic $null -Origem $origem -Exclusoes @() -Horario '09:00' } 'reuso de estado com SID divergente: recusado'
+    $prepJson | Set-Content -LiteralPath $prepFile -Encoding UTF8
+    ok $true 'reuso de estado: SID da sessao == SID do preparo (fluxo normal ja passou acima)'
 
     # ---- classificacao ----
     $infoOk = [pscustomobject]@{ Habilitada=$true; Estado=1; Ultima=''; Proxima='a'; Codigo=0 }
@@ -270,6 +345,11 @@ try {
     throws { Restore-Arquivo -Estado $estado -Config $b1.Config -Snapshot ('c'*64) -Arquivo '/o/amostra.txt' -Destino $junDir -Origem $origem } 'restaurar: destino equivalente por link/junction recusado'
     $cheio = Join-Path $tmp 'cheio'; New-Item -ItemType Directory $cheio | Out-Null; 'x' | Set-Content (Join-Path $cheio 'f')
     throws { Restore-Arquivo -Estado $estado -Config $b1.Config -Snapshot ('c'*64) -Arquivo '/o/amostra.txt' -Destino $cheio -Origem $origem } 'restaurar: destino nao vazio recusado'
+    # pasta final INEXISTENTE sob um PAI link para a origem -> resolve p/ dentro da origem -> recusa
+    $linkPai = Join-Path $tmp 'link-pai-origem'
+    if (-not (Test-IsWindows)) { New-Item -ItemType SymbolicLink -Path $linkPai -Target $origem | Out-Null }
+    else { cmd /c mklink /J "$linkPai" "$origem" | Out-Null }
+    throws { Restore-Arquivo -Estado $estado -Config $b1.Config -Snapshot ('c'*64) -Arquivo '/o/amostra.txt' -Destino (Join-Path $linkPai 'subdir-nova') -Origem $origem } 'restaurar: pai link + pasta nova = dentro da origem (recusado)'
 
     # Restore real via stub dump: arquivo exato, bytes e SHA-256 conferidos.
     $conteudo = 'CONTEUDO-LAB-' + ('A' * 8)
@@ -287,7 +367,31 @@ try {
     $dest2 = Join-Path $tmp 'dest2'
     $alvo2 = Restore-Arquivo -Estado $estado -Config $b1.Config -Snapshot ('c'*64) `
         -Arquivo '/o/a[1].txt' -Destino $dest2 -Origem $origem
-    eq (Get-ChildItem -LiteralPath $dest2 -File | Measure-Object).Count 1 'restaurar: [1] literal — um unico arquivo no destino'
+    eq (Get-ChildItem -LiteralPath $dest2 -File | Measure-Object).Count 1 'restaurar: [1] literal -- um unico arquivo no destino'
+
+    # colisao: arquivo existente NUNCA e sobrescrito (criacao exclusiva)
+    $dest3 = Join-Path $tmp 'dest-colisao'; New-Item -ItemType Directory $dest3 | Out-Null
+    'CONTEUDO-ORIGINAL-PROTEGIDO' | Set-Content -LiteralPath (Join-Path $dest3 'a[1].txt') -Encoding Ascii -NoNewline
+    throws { Restore-Arquivo -Estado $estado -Config $b1.Config -Snapshot ('c'*64) `
+        -Arquivo '/o/a[1].txt' -Destino $dest3 -Origem $origem } 'restaurar: arquivo existente recusado (sem sobrescrever)'
+    eq (Get-Content -LiteralPath (Join-Path $dest3 'a[1].txt') -Raw) 'CONTEUDO-ORIGINAL-PROTEGIDO' 'restaurar: conteudo existente preservado'
+
+    # arquivo ausente no repositorio (dump falha) -> so o parcial da tentativa some
+    Remove-Item -LiteralPath (Join-Path $stubDir 'dump.bin') -Force
+    $dest4 = Join-Path $tmp 'dest-ausente'
+    throws { Restore-Arquivo -Estado $estado -Config $b1.Config -Snapshot ('c'*64) `
+        -Arquivo '/o/inexistente.txt' -Destino $dest4 -Origem $origem } 'restaurar: arquivo ausente no repositorio falha'
+    eq (Get-ChildItem -LiteralPath $dest4 -Force | Measure-Object).Count 0 'restaurar: parcial removido, destino volta vazio'
+
+    # arquivo BINARIO com nome de padrao: SHA-256 confere byte a byte
+    $bin = New-Object byte[] 256
+    for ($i = 0; $i -lt 256; $i++) { $bin[$i] = [byte]$i }
+    [IO.File]::WriteAllBytes((Join-Path $stubDir 'dump.bin'), $bin)
+    $dest5 = Join-Path $tmp 'dest-bin'
+    $alvo5 = Restore-Arquivo -Estado $estado -Config $b1.Config -Snapshot ('c'*64) `
+        -Arquivo '/o/a[1].txt' -Destino $dest5 -Origem $origem
+    eq (Get-FileHash -LiteralPath $alvo5 -Algorithm SHA256).Hash `
+       ([BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($bin)).Replace('-','')) 'restaurar: binario a[1].txt -- SHA-256 confere'
 
     # ---- agendamento COM real (so no Windows) ----
     if (Test-IsWindows) {
