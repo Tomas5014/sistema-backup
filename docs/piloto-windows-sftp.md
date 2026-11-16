@@ -124,9 +124,17 @@ faz **pela interface**, sem terminal, JSON ou Agendador.
    confirmado** com data/hora e a **próxima execução**, com **ação
    necessária** — atualizadas sozinhas a cada 15 s, sem o técnico clicar
    (o aviso de disparo solicitado cede lugar ao estado real). IDs,
-   conta, SID e versões ficam em **Detalhes**. O botão *Executar primeiro
-   backup* dispara a mesma tarefa — a conclusão só aparece com resultado
-   vinculado ao disparo.
+   conta, SID e versões ficam em **Detalhes**. O botão *Executar agora*
+   abre um **pedido com estado próprio**: antes de solicitar, a tela
+   registra o último `LastRunTime` e as instâncias em execução — só o
+   que vier **depois** conta como execução do pedido. Enquanto o
+   Agendador não registra execução nova aparece **Aguardando início**;
+   Em andamento/Concluído/Falhou só com evidência da nova tentativa
+   (resultado vinculado à nova execução — um sucesso anterior **nunca**
+   é anunciado como resultado do disparo); prazo estourado ou consulta
+   que falha termina em **Não foi possível confirmar a execução**, com
+   orientação. Cliques repetidos ficam bloqueados enquanto houver
+   pedido aberto.
 5. Prova sem sessão: encerrar a sessão antes do horário, religar e
    conferir *BACKUP CONCLUIDO* (resultado vinculado ao disparo) ou a
    ação indicada.
@@ -155,13 +163,18 @@ faz **pela interface**, sem terminal, JSON ou Agendador.
    conferir: `ultimo-confirmado.json` **idêntico** ao anterior
    (SHA-256), `ultimo-resultado.json` mostra o novo snapshot +
    `confirmado_erro`, e nenhum `*.tmp` fica para trás no estado.
-10. **OpenSSH presente e ausente:** com `ssh.exe` acessível no PATH
-    (mesmo fora de `System32\OpenSSH`), o instalador **não** deve
-    mostrar aviso e a aba Ativar deve listar o pré-requisito como
-    encontrado. Simular a ausência (renomear o `ssh.exe` do PATH ou
-    testar em conta/PATH sem ele) → o aviso correto aparece, com o
-    caminho esperado — o executável é conferido de verdade (`ssh -V`
-    precisa responder OpenSSH; caminho com espaços é recusado).
+10. **OpenSSH presente e ausente:** o instalador x86 só confere
+    **existência** — `Sysnative\OpenSSH\ssh.exe` (o System32 nativo visto
+    por processo de 32 bits), `System32\OpenSSH\ssh.exe` e PATH — e o
+    aviso só aparece quando **nenhum** local resolve. A verificação
+    **definitiva é a ativação**, na conta do backup: `ssh.exe` real e
+    respondendo OpenSSH em `ssh -V` → pré-requisito ok; nenhum
+    executável encontrado → **ausente** com a ação de ativação do
+    recurso opcional; arquivo encontrado que não responde OpenSSH (ou
+    caminho com espaços) → **incompatível** com o motivo. Simular os
+    três casos (presente, ausente renomeando o `ssh.exe`, e um
+    `ssh.exe` falso no PATH) — a mensagem nunca pode anunciar ausência
+    numa consulta inconclusiva.
 11. **Escalas de tela:** repetir a abertura da janela com DPI em
     **100 %, 125 % e 150 %** (e por acesso remoto, se for o caso) —
     campos, botões, caminhos e mensagens longas não podem cortar nem se
@@ -171,6 +184,14 @@ faz **pela interface**, sem terminal, JSON ou Agendador.
     Iniciar, a mensagem de erro informa a causa e o arquivo
     `diagnostico-macip.txt` (sem senhas nem conteúdo de chave) fica
     disponível para enviar à MAC IP.
+13. **Reinstalação de teste:** desinstalar preserva
+    `%ProgramData%\MacipBackup` (configuração, estado, senha protegida)
+    **mas desabilita a tarefa** — é a primeira ação do
+    `Desinstalar-Tarefa.ps1`. Depois de instalar a build nova, abrir a
+    interface, conferir a aba Situação e usar **Retomar** se o
+    agendamento deveria estar ativo (o ensaio de disparo após reinício
+    continua agendado para 17/11 às 13:26 — não alterar a VM nem o
+    repositório SFTP de laboratório até lá).
 
 ### 4c. Pelo script (diagnóstico)
 

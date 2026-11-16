@@ -178,45 +178,94 @@ function Test-OpenSshExe {
 }
 
 function Select-SshCandidato {
-    # Escolhe o PRIMEIRO candidato utilizavel: existe, nao tem espacos no
-    # caminho (o sftp.command do Restic nao cita o executavel) e responde
-    # como OpenSSH. Devolve o caminho resolvido e os motivos de cada
-    # rejeicao -- o diagnostico precisa dizer O QUE foi encontrado e
-    # descartado, nao so "nao achou".
-    param([string[]]$Candidatos)
+    # Escolhe o PRIMEIRO candidato utilizavel: existe, o caminho
+    # APROVADO nao tem espacos (o sftp.command do Restic nao cita o
+    # executavel) e o executavel responde como OpenSSH. Devolve o
+    # caminho aprovado e os motivos de cada rejeicao -- o diagnostico
+    # precisa dizer O QUE foi encontrado e descartado, nao so "nao achou".
+    # Cada candidato pode ser uma string simples (Exec = Caminho) ou um
+    # objeto @{ Exec = caminho para EXECUTAR a verificacao; Caminho =
+    # caminho APROVADO a devolver }. O par serve ao alias Sysnative: um
+    # processo de 32 bits so EXECUTA o ssh nativo pelo alias, mas o
+    # caminho gravado/aprovado e sempre o canonico (System32) -- quem
+    # roda o sftp.command e a tarefa em PowerShell de 64 bits, para a
+    # qual o alias Sysnative nao existe.
+    param($Candidatos)
     $rejeitados = @(); $vistos = @{}
     foreach ($c in $Candidatos) {
         if (-not $c) { continue }
-        if ($vistos.ContainsKey($c)) { continue }; $vistos[$c] = $true
-        if ($c -match '\s') { $rejeitados += "$c (espacos no caminho)"; continue }
-        if (-not (Test-Path -LiteralPath $c -PathType Leaf)) { continue }
-        if (-not (Test-OpenSshExe -Caminho $c)) { $rejeitados += "$c (nao respondeu como OpenSSH)"; continue }
-        return [pscustomobject]@{ Caminho = $c.Replace('\', '/'); Rejeitados = $rejeitados }
+        $exec = $c; $aprov = $c
+        if ($c -isnot [string]) { $exec = [string]$c.Exec; $aprov = [string]$c.Caminho }
+        if (-not $exec -or -not $aprov) { continue }
+        if ($vistos.ContainsKey($exec)) { continue }; $vistos[$exec] = $true
+        if ($aprov -match '\s') { $rejeitados += "$aprov (espacos no caminho)"; continue }
+        if (-not (Test-Path -LiteralPath $exec -PathType Leaf)) { continue }
+        if (-not (Test-OpenSshExe -Caminho $exec)) { $rejeitados += "$exec (nao respondeu como OpenSSH)"; continue }
+        return [pscustomobject]@{ Caminho = $aprov.Replace('\', '/'); Rejeitados = $rejeitados }
     }
     return [pscustomobject]@{ Caminho = $null; Rejeitados = $rejeitados }
 }
 
-function Get-SshExe {
-    if ($script:SshExe) { return $script:SshExe }
-    if (Test-IsWindows) {
-        # O MESMO executavel que o sftp.command recebe: primeiro o
-        # recurso opcional do Windows (caminho canonico), depois o ssh.exe
-        # que o PATH resolver -- na VM do piloto o ssh estava disponivel
-        # fora do caminho canonico e a checagem antiga acusava ausencia.
-        $cands = @( (Join-Path $env:WINDIR 'System32\OpenSSH\ssh.exe') )
-        $cmd = Get-Command ssh.exe -ErrorAction SilentlyContinue
-        if ($cmd) { $cands += $cmd.Source }
-        $sel = Select-SshCandidato -Candidatos $cands
-        if (-not $sel.Caminho) {
-            $rejeicao = if ($sel.Rejeitados.Count -gt 0) { ' Encontrado mas inutilizavel: ' + ($sel.Rejeitados -join '; ') + '.' } else { '' }
-            throw ("Cliente OpenSSH nao encontrado (procurados: $($cands -join '; ')).$rejeicao " +
-                "Ative o recurso opcional 'Cliente OpenSSH' ou deixe ssh.exe num caminho sem espacos no PATH.")
+function Get-SshCandidatos {
+    # Candidatos no MESMO criterio que o sftp.command vai consumir:
+    # 1) o recurso opcional no caminho canonico;
+    # 2) o mesmo binario visto via Sysnative -- um processo de 32 bits em
+    #    Windows x64 so alcanca o System32 nativo pelo alias; a
+    #    verificacao EXECUTA o alias, mas o caminho APROVADO permanece o
+    #    canonico (a tarefa do Agendador roda PowerShell de 64 bits);
+    # 3) o ssh.exe que o PATH resolver (existia na VM do piloto).
+    $cands = @()
+    if ($env:WINDIR) {
+        $canonico = Join-Path $env:WINDIR 'System32\OpenSSH\ssh.exe'
+        $cands += $canonico
+        $cands += [pscustomobject]@{
+            Exec    = Join-Path $env:WINDIR 'Sysnative\OpenSSH\ssh.exe'
+            Caminho = $canonico
         }
-        return $sel.Caminho
+    }
+    $cmd = Get-Command ssh.exe -ErrorAction SilentlyContinue
+    if ($cmd) { $cands += $cmd.Source }
+    return $cands
+}
+
+function Get-SshStatus {
+    # Situacao do cliente OpenSSH -- a verificacao definitiva e esta, na
+    # conta que executa o backup (o instalador so confere existencia;
+    # nunca executa candidato do PATH com privilegio administrativo).
+    # Status: ok (executavel aprovado), ausente (nenhum candidato
+    # existente no disco) ou incompativel (existe, mas nao responde como
+    # OpenSSH ou o caminho aprovado tem espacos).
+    if (Test-IsWindows) {
+        $sel = Select-SshCandidato -Candidatos (Get-SshCandidatos)
+        if ($sel.Caminho) {
+            return [pscustomobject]@{ Status = 'ok'; Caminho = $sel.Caminho
+                                      Rejeitados = $sel.Rejeitados; Mensagem = '' }
+        }
+        if ($sel.Rejeitados.Count -gt 0) {
+            return [pscustomobject]@{ Status = 'incompativel'; Caminho = $null
+                                      Rejeitados = $sel.Rejeitados
+                                      Mensagem = ('Encontrado mas inutilizavel: ' + ($sel.Rejeitados -join '; ')) }
+        }
+        return [pscustomobject]@{ Status = 'ausente'; Caminho = $null; Rejeitados = @(); Mensagem = '' }
     }
     $ssh = Get-Command ssh -ErrorAction SilentlyContinue
-    if (-not $ssh) { throw 'OpenSSH nao encontrado no PATH' }
-    return $ssh.Source
+    if ($ssh) { return [pscustomobject]@{ Status = 'ok'; Caminho = $ssh.Source; Rejeitados = @(); Mensagem = '' } }
+    return [pscustomobject]@{ Status = 'ausente'; Caminho = $null; Rejeitados = @(); Mensagem = '' }
+}
+
+function Get-SshExe {
+    if ($script:SshExe) { return $script:SshExe }
+    $st = Get-SshStatus
+    if ($st.Status -eq 'ok') { $script:SshExe = $st.Caminho; return $script:SshExe }
+    if ($st.Status -eq 'incompativel') {
+        throw ("Cliente OpenSSH INCOMPATIVEL: $($st.Mensagem). O ssh.exe desta maquina nao serve " +
+            "para o backup - ative o recurso opcional 'Cliente OpenSSH' do Windows ou chame a MAC IP.")
+    }
+    if (Test-IsWindows) {
+        throw ("Cliente OpenSSH nao encontrado nesta conta. Ative o recurso opcional 'Cliente OpenSSH' " +
+            "(Configuracoes > Aplicativos > Recursos opcionais > Adicionar recurso) ou chame a MAC IP.")
+    }
+    throw 'OpenSSH nao encontrado no PATH'
 }
 
 function Write-SshConfig {

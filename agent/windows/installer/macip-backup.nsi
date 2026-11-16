@@ -46,17 +46,22 @@ Section "Instalar"
   SetShellVarContext all             ; $APPDATA = %ProgramData%, $SMPROGRAMS = todos os usuarios
   SetOutPath "$INSTDIR"
 
-  ; Pre-requisito: Cliente OpenSSH do Windows -- o MESMO criterio do
-  ; agente em tempo de execucao: primeiro o caminho canonico do recurso
-  ; opcional, depois o ssh.exe que o PATH resolver (na VM do piloto o
-  ; ssh estava disponivel fora do caminho canonico e este aviso era
-  ; incorreto). A interface revalida o executavel na ativacao.
+  ; Pre-verificacao de existencia do Cliente OpenSSH -- CONSULTA
+  ; INCONCLUSIVA por natureza: este instalador e um processo de 32
+  ; bits, entao $WINDIR\System32 redireciona para SysWOW64 (o ssh nativo
+  ; de 64 bits NAO aparece la -- foi o falso aviso na VM do piloto).
+  ; Por isso consultamos primeiro o alias Sysnative, que um processo
+  ; x86 resolve para o System32 real em Windows x64. NADA aqui e
+  ; executado com privilegio administrativo: so existencia, nunca
+  ; "ssh -V" de candidato do PATH. A verificacao DEFINITIVA e a
+  ; ativacao, na conta do backup, no mesmo criterio do sftp.command.
+  IfFileExists "$WINDIR\Sysnative\OpenSSH\ssh.exe" ssh_ok
   IfFileExists "$WINDIR\System32\OpenSSH\ssh.exe" ssh_ok
   SearchPath $0 "ssh.exe"
   StrCmp $0 "" ssh_falta ssh_ok
   ssh_falta:
     MessageBox MB_ICONEXCLAMATION|MB_OK \
-      "Cliente OpenSSH nao encontrado em $WINDIR\System32\OpenSSH nem no PATH.$\n$\nAtive em: Configuracoes > Aplicativos > Recursos opcionais > Adicionar recurso > Cliente OpenSSH.$\nA instalacao continua, mas o backup so funcionara depois disso."
+      "O Cliente OpenSSH nao foi encontrado nos locais verificados.$\n$\nSe ele ja estiver instalado, a ativacao do aplicativo confirmara na conta do backup. Se nao estiver, ative em: Configuracoes > Aplicativos > Recursos opcionais > Adicionar recurso > Cliente OpenSSH.$\nA instalacao continua; o backup so funciona depois que a ativacao confirmar o OpenSSH."
   ssh_ok:
 
   File "..\Backup-MacipCliente.ps1"

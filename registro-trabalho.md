@@ -1896,3 +1896,77 @@ ultimo-confirmado bloqueado (4b.9) e a execucao apos reinicio — a
 homologacao segue PENDENTE ate essa prova; dados reais exigem
 autorizacao registrada e restauracao comprovada pela copia protegida no
 armazenamento definitivo da MAC IP.
+
+## Revisao 13 (branch feature/windows-backup-gui-pilot)
+
+**Falso aviso de OpenSSH (instalador x86) e sucesso anterior anunciado
+como do disparo novo.**
+
+Causa do aviso: o instalador NSIS e um processo de 32 bits — num Windows
+x64, `%WINDIR%\System32` redireciona para SysWOW64, e o ssh nativo de 64
+bits (`System32\OpenSSH\ssh.exe`, que respondeu 9.5p2 na VM) nao aparece
+la. `SearchPath` ajudava, mas nao cobria a arquitetura nem provava que o
+executavel encontrado servia.
+
+- **NSIS:** pre-verificacao apenas de EXISTENCIA, ciente de arquitetura:
+  `Sysnative\OpenSSH\ssh.exe` primeiro (o System32 nativo visto por um
+  processo x86), depois `System32\OpenSSH\ssh.exe` (Windows x86) e PATH
+  (`SearchPath`, existencia apenas). NADA e executado com privilegio
+  administrativo — nenhum `ssh -V` de candidato do PATH. Aviso so
+  quando nenhum local resolve, com texto inconclusivo ("nao foi
+  encontrado nos locais verificados" + a ativacao confirma).
+- **Ativacao = verificacao definitiva**, na conta do backup:
+  `Get-SshStatus` devolve ok/ausente/incompativel — existencia +
+  caminho aprovado sem espacos + `ssh -V` respondendo OpenSSH — e a
+  aba Ativar distingue os estados com a acao indicada. Em processo de
+  32 bits a execucao pode usar o alias `Sysnative`, mas o caminho
+  APROVADO (o que vai para o sftp.command da tarefa de 64 bits) e
+  SEMPRE o canonico `System32` — o alias nunca e gravado. Chave do
+  servidor, identidade SSH aprovada e BatchMode intocados.
+
+Causa do status preso/falso: o clique de "Executar agora" mostrava
+"Disparo solicitado" e a atualizacao imediata classificava o resultado
+ANTERIOR como do pedido — se o Agendador ainda devolvesse o LastRunTime
+antigo, um sucesso anterior dentro da janela era contado.
+
+- **Pedido com estado proprio:** antes do `Run()`, a tela registra o
+  ultimo `LastRunTime` e os GUIDs das instancias (`New-PedidoDisparo`).
+  `Update-PedidoDisparo` so aceita como execucao NOVA um `LastRunTime`
+  mais novo que a referencia ou uma instancia com GUID nao visto no
+  clique; a marca atualiza a cada consulta (deteccao so por GUID recebe
+  o LastRunTime atrasado depois). Sem evidencia -> `Aguardando inicio`;
+  em andamento/concluido/falhou so com evidencia da nova tentativa —
+  `concluido` exige resultado vinculado a NOVA execucao (inicio_utc >=
+  nova LastRunTime ou, sem ela, o instante do clique). Prazo estourado
+  ou consulta que segue falhando -> `Nao foi possivel confirmar a
+  execucao` com orientacao. Clique repetido ignorado com pedido aberto;
+  timer vai a 5 s durante o pedido; `Ultimo backup confirmado` segue
+  independente e os disparos agendados continuam sem a janela aberta.
+  Removida a classificacao por texto `Disparo*` na linha do pedido.
+
+Regressao obrigatoria (simulada, pwsh 7.4.6): sucesso anterior -> clique
+-> Agendador devolve dados antigos -> `aguardando` (NUNCA concluido) ->
+novo LastRunTime rodando -> `em_execucao` -> resultado vinculado ->
+`concluido`; execucao rapida entre dois ticks -> `concluido`; falha de
+inicio (codigo != 0 sem resultado) -> `falhou`; consulta inconclusiva
+dentro do prazo -> `aguardando`, alem dele -> `nao_confirmado`; prazo
+vencido sem execucao nova -> `nao_confirmado`; GUID de instancia novo
+-> `em_execucao`; instancia pre-existente no clique -> `aguardando`;
+execucao nova terminada e resultado ainda antigo -> `sem_resultado`.
+OpenSSH: par Sysnative->{Exec alias, Caminho canonico} devolve o
+canonico; status tipado; contratos estaticos do NSIS (Sysnative, so
+existencia, "locais verificados") e do agente.
+
+Verificacao: GUI **245 ok, 0 falha** (1 pulado: COM real fora do
+Windows); agente **150 ok, 0 falha** (1 pulado: MACIP_RESTIC_REAL
+indefinido); unittest (ver abaixo); `git diff --check` limpo; linhas
+novas em ASCII.
+
+Separacao de prova: TUDO SIMULADO — WoW64/Sysnative, COM real do
+Agendador, GUIDs de instancia e PS 5.1 sem prova real. Instalador NAO
+recompilado (sem makensis/payload). VM: roteiro 4b.10 (OpenSSH
+presente/ausente/incompativel), 4b.4 (pedido de Executar agora com
+Agendador devolvendo dados antigos) e 4b.13 (reinstalacao de teste:
+dados preservados, tarefa desabilitada -> Retomar). Ensaio de disparo
+apos reinicio mantido para 17/11 13:26 — VM e repositorio SFTP de
+laboratorio nao tocados. Homologacao segue PENDENTE.

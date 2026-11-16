@@ -28,14 +28,20 @@ a senha Restic (chave e senha por canal seguro, nunca junto ao pacote).
 
 ## O que o instalador faz
 
-- Verifica o Cliente OpenSSH do Windows pelo **mesmo critério do
-  agente**: aceito se existir `%WINDIR%\System32\OpenSSH\ssh.exe`
-  (canônico) **ou** um `ssh.exe` resolvível pelo `PATH` (`SearchPath`).
-  Aviso só aparece quando **nenhum** dos dois resolve — na VM do piloto
-  o `ssh.exe` estava no PATH fora do caminho canônico e o aviso antigo
-  era falso. A checagem do executável efetivo (responde `ssh -V` como
-  OpenSSH, caminho sem espaços) fica no agente/GUI. Instalação continua
-  com o aviso; backup só funciona depois do OpenSSH ativado.
+- **Pré-verifica** o Cliente OpenSSH apenas por **existência**, ciente
+  da arquitetura: `%WINDIR%\Sysnative\OpenSSH\ssh.exe` primeiro — o
+  instalador x86 é um processo de 32 bits, então `System32` redireciona
+  para `SysWOW64` e o ssh nativo de 64 bits **não aparece lá** (foi o
+  falso aviso na VM); depois `%WINDIR%\System32\OpenSSH\ssh.exe`
+  (Windows x86) e por fim `ssh.exe` no `PATH` (`SearchPath`, só
+  existência). **Nada é executado com privilégio administrativo** —
+  nenhum `ssh -V` de candidato do PATH. Aviso só aparece quando
+  **nenhum** local resolve, e diz que a verificação definitiva é a
+  ativação: a GUI roda na conta do backup, executa o candidato de
+  verdade (`ssh -V` responde OpenSSH, caminho sem espaços) e distingue
+  **ausente** de **encontrado mas incompatível**, com a ação indicada.
+  Instalação continua com o aviso; backup só funciona depois do
+  OpenSSH confirmado na ativação.
 - Instala **sempre** em `%ProgramFiles%\MACIP-Backup` (pasta protegida
   por ACL do Windows contra usuários comuns): sem página de diretório,
   e `.onInit` aborta se `/D=` ou outro caminho for forçado — no piloto
@@ -74,6 +80,11 @@ a senha Restic (chave e senha por canal seguro, nunca junto ao pacote).
   com o estado final confirmado. `%ProgramData%\MacipBackup`
   (configuração, estado, resultados, senha protegida) e o repositório
   remoto são sempre preservados.
+  **Reinstalação de teste:** desinstalar preserva os dados, mas a tarefa
+  fica **desabilitada** (é a primeira ação do `Desinstalar-Tarefa.ps1`).
+  Depois de instalar a build nova, abra a interface, confira a aba
+  Situação e use **Retomar** se o agendamento deveria estar ativo —
+  salvar ou mexer em qualquer opção mantém a pausa até lá.
 
 ## Status de compilação
 

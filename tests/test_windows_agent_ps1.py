@@ -66,6 +66,13 @@ class TestWindowsAgentPs1(unittest.TestCase):
         self.assertIn("Select-SshCandidato", fonte)
         self.assertIn("Test-OpenSshExe", fonte)
         self.assertIn("Get-Command ssh.exe", fonte)
+        # arquitetura: processo x86 ve o System32 nativo via Sysnative,
+        # mas o caminho APROVADO e sempre o canonico (tarefa e 64 bits)
+        self.assertIn("Sysnative\\OpenSSH\\ssh.exe", fonte)
+        self.assertIn("Caminho = $canonico", fonte)
+        # status tipado: ausente != encontrado-mas-incompativel
+        self.assertIn("Get-SshStatus", fonte)
+        self.assertIn("'incompativel'", fonte)
 
     def test_contrato_gui(self):
         """Contrato estático da interface e do perfil de exemplo."""
@@ -119,6 +126,17 @@ class TestWindowsAgentPs1(unittest.TestCase):
         # lancamento falho -> diagnostico sem segredos
         self.assertIn("Write-Diagnostico", fonte)
         self.assertIn("diagnostico-macip.txt", fonte)
+        # "Executar agora" vinculado a execucao NOVA: referencia antes do
+        # Run (ultimo LastRunTime + GUIDs de instancia), estados proprios
+        # e nunca o sucesso anterior anunciado como do disparo novo
+        self.assertIn("New-PedidoDisparo", fonte)
+        self.assertIn("Update-PedidoDisparo", fonte)
+        self.assertIn("UltimaRef", fonte)
+        self.assertIn("InstRef", fonte)
+        self.assertIn("nao_confirmado", fonte)
+        self.assertIn("Instancias", fonte)
+        # clique repetido bloqueado enquanto ha pedido aberto
+        self.assertIn("if ($script:Disparo) { return }", fonte)
         # layout que acompanha a escala de DPI
         self.assertIn("AutoScaleMode", fonte)
 
@@ -156,11 +174,16 @@ class TestWindowsAgentPs1(unittest.TestCase):
         # espaco): sem elas, "C:\Program" seria executado como programa
         self.assertIn('\'"$INSTDIR\\desinstalar.exe"\'', nsi)
         self.assertIn('DeleteRegKey HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\MACIP-Backup"', nsi)
-        # OpenSSH: o mesmo criterio do agente -- canonico OU ssh.exe no
-        # PATH (na VM o ssh estava disponivel fora do caminho canonico)
+        # OpenSSH: pre-verificacao so de EXISTENCIA, ciente de
+        # arquitetura -- Sysnative antes (x86 ve o System32 nativo),
+        # System32 (x86 real) e PATH; nada e executado com privilegio
+        # de administrador, e a verificacao definitiva fica na ativacao
+        self.assertIn('$WINDIR\\Sysnative\\OpenSSH\\ssh.exe', nsi)
         self.assertIn('$WINDIR\\System32\\OpenSSH\\ssh.exe', nsi)
         self.assertIn('SearchPath', nsi)
         self.assertIn('"ssh.exe"', nsi)
+        self.assertNotIn('ExecWait', nsi.split('ssh_falta')[0].split('OpenSSH')[0])
+        self.assertIn('locais verificados', nsi)
         # o script estruturado verifica marca + acao + instancias via COM
         desinst = (AGENT_DIR / "installer" / "Desinstalar-Tarefa.ps1").read_text(
             encoding="utf-8")

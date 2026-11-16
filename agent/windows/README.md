@@ -229,7 +229,16 @@ repositório e o `Preparar` (DPAPI na conta) são os mesmos do agente.
   `Definition.Principal.UserId` precisa resolver para o mesmo SID do
   `preparo.json` do estado que a tarefa usa (mesmo nome em outro
   domínio não equivale; SID ilegível recusa); *Pausar/Retomar* habilita
-  a tarefa; execução em andamento bloqueia novo disparo.
+  a tarefa; execução em andamento bloqueia novo disparo. O clique abre
+  um **pedido com estado próprio** (`New-PedidoDisparo`/
+  `Update-PedidoDisparo`): antes de solicitar, a tela registra o
+  `LastRunTime` e os GUIDs das instâncias — só o que vier **depois** é
+  execução do pedido. `Aguardando início` até evidência nova;
+  `Concluído`/`Falhou` só com resultado vinculado à nova execução — o
+  sucesso anterior **nunca** é anunciado como resultado do disparo;
+  consulta inconclusiva ou prazo estourado → `Não foi possível
+  confirmar a execução` com orientação. Cliques repetidos ficam
+  bloqueados enquanto houver pedido aberto.
 - **Restaurar:** fluxo em três passos na mesma aba — *Data do backup →
   Arquivo → Pasta de destino*. Pontos via `restic snapshots`; arquivos
   via `restic ls --json` filtrados a **arquivos regulares** — a escolha
@@ -260,14 +269,20 @@ repositório e o `Preparar` (DPAPI na conta) são os mesmos do agente.
   tarefa ficam na mesma identidade; se for aberta elevada em outra
   conta, a conta da tarefa registrada será a da sessão, e o aviso na
   aba 1 mostra qual é.
-- **Pré-requisito OpenSSH:** a checagem resolve o **mesmo executável
-  que o agente usa** no `sftp.command`: primeiro
-  `$WINDIR\System32\OpenSSH\ssh.exe`, depois `ssh.exe` do `PATH`
-  (`Select-SshCandidato`/`Test-OpenSshExe` — o candidato precisa existir,
-  **não ter espaços no caminho** e responder a `ssh -V` como OpenSSH;
-  cada recusa registra o motivo). O instalador aplica o mesmo critério
-  (`IfFileExists` no canônico ou `SearchPath` no `PATH`) — na VM do
-  piloto o ssh estava fora do caminho canônico e o aviso era falso.
+- **Pré-requisito OpenSSH:** a verificação **definitiva é a ativação**,
+  na conta do backup — resolve o **mesmo executável que o
+  `sftp.command`**: primeiro `$WINDIR\System32\OpenSSH\ssh.exe`
+  (canônico), depois o mesmo binário via `Sysnative` (um processo de
+  32 bits só o alcança pelo alias — a **execução** pode usar o alias,
+  mas o caminho aprovado/gravado é **sempre o canônico**, porque a
+  tarefa roda PowerShell de 64 bits) e por fim `ssh.exe` do `PATH`.
+  `Select-SshCandidato`/`Test-OpenSshExe` exigem existência, caminho
+  aprovado sem espaços e `ssh -V` respondendo OpenSSH; `Get-SshStatus`
+  distingue **ausente** de **encontrado mas incompatível**, cada um com
+  a ação indicada ao técnico. O instalador x86 só confere
+  **existência** (Sysnative → System32 → `SearchPath`) e avisa só
+  quando nenhum local resolve — sem executar candidato com privilégio
+  administrativo.
 - **Se o atalho falhar:** exceção de lançamento mostra mensagem com a
   causa e grava `diagnostico-macip.txt` junto à GUI (`Write-Diagnostico`
   — erro, versões de PowerShell/Windows/Restic/ssh e pré-requisitos,

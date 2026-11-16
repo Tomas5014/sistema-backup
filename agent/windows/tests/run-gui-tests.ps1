@@ -697,6 +697,108 @@ exit 0
     ok ($guiSrc.Contains('Get-DetalhesSuporte')) 'detalhes de suporte: bloco isolado'
     ok ($guiSrc -match "AutoScaleMode = .Dpi.") 'layout: escala de DPI (100/125/150%)'
 
+    # ================= pedido de "Executar agora" =================
+    # REPRODUCAO OBRIGATORIA (bug da tela): backup anterior bem-sucedido
+    # -> clique -> Agendador ainda devolve dados anteriores -> disparo
+    # novo observado -> novo resultado. A tela NUNCA pode anunciar o
+    # sucesso antigo como resultado do pedido recem-feito.
+
+    function New-InfoFalsa {
+        param($Ultima = $null, [int]$Estado = 1, [int]$Codigo = 0, $Insts = @())
+        return [pscustomobject]@{ Habilitada = $true; Estado = $Estado; Ultima = $Ultima
+                                 Proxima = ''; Codigo = $Codigo; Conta = 'x'; DoApp = $true
+                                 Instancias = @($Insts) }
+    }
+    $agora = [DateTimeOffset]::UtcNow
+    $resAntigo = [pscustomobject]@{ status = 'sucesso'; codigo_restic = 0; snapshot = $snapOk
+                                    inicio_utc = '2026-11-16T13:26:05Z'; fim_utc = '2026-11-16T13:27:00Z' }
+
+    # 1) sucesso anterior + clique + Agendador devolve os dados ANTIGOS
+    #    -> aguardando (NUNCA concluido)
+    $infoAnt = New-InfoFalsa -Ultima '2026-11-16 13:26:00' -Codigo 0
+    $ped = New-PedidoDisparo -InfoTarefa $infoAnt
+    eq (Update-PedidoDisparo -Pedido $ped -InfoTarefa $infoAnt -Res $resAntigo -AgoraUtc $agora) 'aguardando' `
+        'pedido: dados antigos do Agendador -> aguardando (sucesso antigo NAO conta)'
+
+    # 2) novo LastRunTime + rodando -> em_execucao
+    $infoRun = New-InfoFalsa -Ultima '2026-11-17 14:00:00' -Estado 4
+    eq (Update-PedidoDisparo -Pedido $ped -InfoTarefa $infoRun -Res $resAntigo -AgoraUtc $agora) 'em_execucao' `
+        'pedido: novo LastRunTime + rodando -> em_execucao'
+    ok $ped.Iniciado 'pedido: execucao nova registrada (Iniciado)'
+
+    # 3) resultado VINCULADO a execucao nova -> concluido
+    $resNovo = [pscustomobject]@{ status = 'sucesso'; codigo_restic = 0; snapshot = ('b'*64)
+                                  inicio_utc = '2026-11-17T14:00:02Z'; fim_utc = '2026-11-17T14:01:00Z' }
+    $infoFim = New-InfoFalsa -Ultima '2026-11-17 14:00:00' -Estado 1 -Codigo 0
+    eq (Update-PedidoDisparo -Pedido $ped -InfoTarefa $infoFim -Res $resNovo -AgoraUtc $agora) 'concluido' `
+        'pedido: resultado vinculado a nova execucao -> concluido'
+
+    # 4) resultado ANTIGO com a execucao nova ja vista -> sem_resultado
+    #    (jamais "concluido")
+    $ped2 = New-PedidoDisparo -InfoTarefa $infoAnt
+    [void](Update-PedidoDisparo -Pedido $ped2 -InfoTarefa $infoRun -Res $resAntigo -AgoraUtc $agora)
+    eq (Update-PedidoDisparo -Pedido $ped2 -InfoTarefa $infoFim -Res $resAntigo -AgoraUtc $agora) 'sem_resultado' `
+        'pedido: execucao nova terminou e resultado ainda e o ANTIGO -> sem_resultado'
+
+    # 5) execucao RAPIDA entre duas atualizacoes (comecou e terminou
+    #    sem a tela ver rodando) -> concluido direto
+    $ped3 = New-PedidoDisparo -InfoTarefa $infoAnt
+    eq (Update-PedidoDisparo -Pedido $ped3 -InfoTarefa $infoFim -Res $resNovo -AgoraUtc $agora) 'concluido' `
+        'pedido: execucao rapida entre ticks -> concluido'
+
+    # 6) falha de inicio: execucao nova vista, codigo do Agendador != 0,
+    #    sem resultado -> falhou
+    $ped4 = New-PedidoDisparo -InfoTarefa $infoAnt
+    [void](Update-PedidoDisparo -Pedido $ped4 -InfoTarefa $infoRun -Res $null -AgoraUtc $agora)
+    eq (Update-PedidoDisparo -Pedido $ped4 -InfoTarefa (New-InfoFalsa -Ultima '2026-11-17 14:00:00' -Codigo 1) -Res $null -AgoraUtc $agora) 'falhou' `
+        'pedido: falha de inicializacao da nova execucao -> falhou'
+
+    # 7) consulta inconclusiva: aguardando dentro do prazo, depois
+    #    nao_confirmado
+    $ped5 = New-PedidoDisparo -InfoTarefa $infoAnt -PrazoSegundos 60
+    eq (Update-PedidoDisparo -Pedido $ped5 -InfoTarefa $null -Res $null -AgoraUtc $agora) 'aguardando' `
+        'pedido: consulta falhou dentro do prazo -> aguardando'
+    eq (Update-PedidoDisparo -Pedido $ped5 -InfoTarefa $null -Res $null -AgoraUtc ($agora.AddSeconds(121))) 'nao_confirmado' `
+        'pedido: consulta segue falhando alem do prazo -> nao_confirmado'
+
+    # 8) prazo vencido sem execucao nova -> nao_confirmado
+    $ped6 = New-PedidoDisparo -InfoTarefa $infoAnt -PrazoSegundos 60
+    eq (Update-PedidoDisparo -Pedido $ped6 -InfoTarefa $infoAnt -Res $resAntigo -AgoraUtc ($agora.AddSeconds(121))) 'nao_confirmado' `
+        'pedido: sem execucao nova no prazo -> nao_confirmado'
+
+    # 9) evidencia por GUID de instancia: LastRunTime ainda antigo, mas
+    #    uma instancia com GUID novo -> em_execucao
+    $ped7 = New-PedidoDisparo -InfoTarefa $infoAnt
+    eq (Update-PedidoDisparo -Pedido $ped7 -InfoTarefa (New-InfoFalsa -Ultima '2026-11-16 13:26:00' -Estado 4 -Insts @('{guid-novo}')) -Res $null -AgoraUtc $agora) 'em_execucao' `
+        'pedido: instancia com GUID novo -> em_execucao (LastRunTime ainda antigo)'
+
+    # 10) instancia cuja GUID JA existia no clique nao e evidencia nova
+    $ped8 = New-PedidoDisparo -InfoTarefa (New-InfoFalsa -Ultima '2026-11-16 13:26:00' -Insts @('{guid-velho}'))
+    eq (Update-PedidoDisparo -Pedido $ped8 -InfoTarefa (New-InfoFalsa -Ultima '2026-11-16 13:26:00' -Estado 4 -Insts @('{guid-velho}')) -Res $resAntigo -AgoraUtc $agora) 'aguardando' `
+        'pedido: instancia pre-existente no clique -> aguardando'
+
+    # contrato estatico do pedido
+    ok ($guiSrc.Contains('New-PedidoDisparo') -and $guiSrc.Contains('Update-PedidoDisparo')) 'pedido: helpers separados e testaveis'
+    ok ($guiSrc.Contains('UltimaRef') -and $guiSrc.Contains('InstRef')) 'pedido: referencia capturada antes do Run'
+    ok ($guiSrc.Contains('nao_confirmado') -and $guiSrc.Contains('Aguardando inicio')) 'pedido: estados aguardando/nao_confirmado presentes'
+    ok ($guiSrc.Contains('if ($script:Disparo) { return }')) 'pedido: clique repetido bloqueado enquanto ha pedido aberto'
+    ok (-not $guiSrc.Contains("-like 'Disparo*'")) 'pedido: classificacao generica nao dirige mais a linha do pedido'
+
+    # ---- OpenSSH: arquitetura (Sysnative -> canonico) e status ----
+    $sel = Select-SshCandidato -Candidatos @([pscustomobject]@{
+        Exec = $sshBom; Caminho = 'C:/Windows/System32/OpenSSH/ssh.exe' })
+    eq $sel.Caminho 'C:/Windows/System32/OpenSSH/ssh.exe' `
+        'Sysnative: caminho APROVADO e o canonico (alias nunca e gravado)'
+    ok ($sel.Caminho -notmatch 'Sysnative') 'Sysnative: alias nao vaza para o caminho aprovado'
+    $st = Get-SshStatus
+    ok ($st.Status -in 'ok','ausente','incompativel') 'Get-SshStatus: status tipado (ok/ausente/incompativel)'
+    # agente (fonte): Sysnative listado com Caminho canonico; GUI:
+    # verificacao definitiva na ativacao distingue os estados
+    $agSrc = Get-Content -LiteralPath $script:AgentePath -Raw
+    ok ($agSrc.Contains('Sysnative\OpenSSH\ssh.exe') -and $agSrc.Contains('Caminho = $canonico')) 'agente: Sysnative consultado, caminho aprovado canonico'
+    ok ($agSrc.Contains('Get-SshStatus')) 'agente: status OpenSSH separado (ausente vs incompativel)'
+    ok ($guiSrc.Contains('INCOMPATIVEL') -and $guiSrc.Contains('Get-SshStatus')) 'ativacao: distingue ausente de incompativel'
+
     # Restore-Arquivo: destino = origem / dentro da origem / junction
     throws { Restore-Arquivo -Estado $estado -Config $b1.Config -Snapshot ('c'*64) -Arquivo '/o/amostra.txt' -Destino $origem -Origem $origem } 'restaurar: destino = origem recusado'
     throws { Restore-Arquivo -Estado $estado -Config $b1.Config -Snapshot ('c'*64) -Arquivo '/o/amostra.txt' -Destino (Join-Path $origem 'sub') -Origem $origem } 'restaurar: destino dentro da origem recusado'
