@@ -2037,3 +2037,54 @@ makensis/payload). Validacao na VM segue PENDENTE: roteiro 4b.4 cobre o
 pedido com Agendador devolvendo dados antigos e a consistencia linha/
 orientacao/cor/botao. Ensaio pos-reinicio mantido para 17/11 13:26 —
 VM, tarefa do laboratorio e repositorio SFTP nao tocados.
+
+## Revisao 15 (branch feature/windows-backup-gui-pilot)
+
+**Horario do Agendador exibido com deslocamento: 13:26 local podia
+aparecer como 10:26 em Brasilia.**
+
+Causa: `Get-InfoTarefa` serializava `LastRunTime`/`NextRunTime` do COM
+(`[string]$t.LastRunTime`) e `Format-DataBR` re-interpretava o texto via
+`ConvertTo-DataObj` — cujo primeiro TryParse usa cultura invariante com
+`AssumeUniversal`. Uma string sem deslocamento que o formato invariante
+aceita (ex.: saida de cultura en-US) virava UTC, e a conversao para
+horario local deslocava -3h em Brasilia.
+
+Correcao — preservar o TIPO do Agendador ate a formatacao:
+
+- `Get-InfoTarefa` devolve `Ultima`/`Proxima` como o `DateTime` LOCAL do
+  COM, sem serializacao intermediaria. `Format-DataBR` recebe o objeto:
+  `DateTime` -> `DateTimeOffset` local -> `dd/MM/yyyy HH:mm`.
+- `New-PedidoDisparo.UltimaRef` guarda a referencia tipada (antes
+  stringificada) — `ConvertTo-DataLocal` aceita DateTime/DateTimeOffset.
+- `Classify-Resultado` passa a usar `ConvertTo-DataLocal` (mesma regra
+  semantica do pedido) em vez de `DateTimeOffset.Parse` sobre texto.
+- Distincao preservada: horarios do Agendador sao LOCAIS; `inicio_utc`/
+  `fim_utc` do agente sao instantes UTC — `16:26Z` gravado aparece
+  `13:26` em Brasilia tanto no "Ultimo backup confirmado" quanto nos
+  Detalhes. Formato `dd/MM/yyyy HH:mm` e sentinela 1899/ausente -> `-`
+  mantidos.
+- Nenhum agendamento, configuracao HH:mm ou fluxo de Executar agora
+  alterado — so exibicao.
+
+Regressao (simulada, pwsh 7.4.6): bloco "horario SP" forca
+`TZ=America/Sao_Paulo` (onde o fuso nao obedecer, o bloco pula — nunca
+falsifica) e cobre os caminhos reais da tela: `Format-DataBR` do
+`DateTime`/`DateTimeOffset` local do COM -> `13:26`; `16:26Z` do agente
+-> `13:26`; data ambigua `06/11/2026` nao vira `11/06`; "Proxima
+execucao" tipada; "ultimo disparo registrado" em Detalhes; referencia do
+pedido preserva o tipo; sentinela COM -> `-`. `New-InfoFalsa` passou a
+entregar `DateTime` local como o COM real — toda a suíte do pedido
+reexercita o caminho tipado.
+
+Verificacao: GUI **269 ok, 0 falha** (1 pulado: COM real fora do
+Windows); agente **150 ok, 0 falha**; `unittest test_windows_agent_ps1`
+**5/5** (bridges rodaram as suites reais); `git diff --check` limpo;
+linhas novas em ASCII.
+
+Separacao de prova: TUDO SIMULADO — o bloco SP prova a formatacao por
+fuso dentro do processo de teste; o DateTime REAL do COM (Kind/cultura
+da VM) e a exibicao em PS 5.1 seguem para o aceite na VM (roteiro
+4b.14). Instalador NAO recompilado (sem makensis/payload). Ensaio
+pos-reinicio mantido para 17/11 13:26 — VM, tarefa do laboratorio e
+repositorio SFTP nao tocados.

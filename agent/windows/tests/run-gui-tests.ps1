@@ -654,6 +654,41 @@ exit 0
     ok ($resumo -match 'Pasta protegida: D:\\Dados' -and $resumo -match 'todos os dias as 13:26' -and $resumo -match 'LAB\\operador') 'resumo: pasta+horario+conta presentes'
     ok ((Get-ResumoConfiguracao -Origem '' -HHmm '13:26' -Destino '' -Conta 'c') -match 'reusa o destino atual') 'resumo: sem perfil novo -> reusa destino atual'
 
+    # ---- horarios na tela: LOCAL do Agendador x UTC do agente ----
+    # Tarefa das 13:26 em Brasilia tem de aparecer 13:26 em todos os
+    # caminhos: "Proxima execucao" (salvar e Situacao, com ou sem
+    # pedido aberto) e "ultimo disparo registrado" em Detalhes usam o
+    # DateTime LOCAL preservado do COM; o "16:26Z" do agente e um
+    # instante UTC convertido para o local -> 13:26. O env TZ muda o
+    # fuso local do processo no pwsh/Core; onde o fuso nao obedecer,
+    # o bloco e pulado (nunca falsifica).
+    $tzSave = $env:TZ
+    $env:TZ = 'America/Sao_Paulo'
+    try {
+        if ([DateTimeOffset]::Now.Offset -eq [TimeSpan]::FromHours(-3)) {
+            $agUlt  = [DateTime]::new(2026,11,17,13,26,0)   # LastRunTime do COM: hora local
+            $agProx = [DateTime]::new(2026,11,18,13,26,0)   # NextRunTime do COM: hora local
+            eq (Format-DataBR $agUlt)  '17/11/2026 13:26' 'horario SP: LastRunTime local (DateTime) -> 13:26'
+            eq (Format-DataBR $agProx) '18/11/2026 13:26' 'horario SP: NextRunTime local (DateTime) -> 13:26'
+            eq (Format-DataBR '2026-11-16T16:26:00Z') '16/11/2026 13:26' 'horario SP: 16:26Z do agente -> 13:26'
+            eq (Format-DataBR ([DateTime]::new(2026,11,6,13,26,0))) '06/11/2026 13:26' 'horario SP: data ambigua 06/11 nao vira 11/06'
+            eq (Format-DataBR ([DateTimeOffset]::new(2026,11,17,13,26,0,[TimeSpan]::FromHours(-3)))) '17/11/2026 13:26' 'horario SP: DateTimeOffset local -> 13:26'
+            eq (Format-DataBR ([DateTime]::new(1899,12,30,0,0,0))) '-' 'horario SP: sentinela COM (nunca rodou) -> -'
+            # "Proxima execucao" chega tipada (Get-InfoTarefa preserva) --
+            # o mesmo Format-DataBR e usado apos salvar e na aba Situacao.
+            $infoProx = [pscustomobject]@{ Conta='x'; Codigo=0; Ultima=$agUlt; Proxima=$agProx }
+            eq (Format-DataBR $infoProx.Proxima) '18/11/2026 13:26' 'horario SP: Proxima execucao tipada -> 13:26'
+            $detT = Get-DetalhesSuporte -Info $infoProx -Res $null -Conf $null -Estado 'E' -ConfigPath 'C'
+            ok ($detT -match 'ultimo disparo registrado: 17/11/2026 13:26') 'horario SP: Detalhes mostra LastRunTime local (13:26)'
+            # o pedido tambem nao desloca: a referencia tipada e
+            # interpretada como LOCAL na comparacao com inicio_utc (UTC)
+            $pedH = New-PedidoDisparo -InfoTarefa $infoProx -Res $null
+            ok ($pedH.UltimaRef -is [DateTime]) 'horario SP: referencia do pedido preserva o tipo do COM'
+        } else {
+            pula 'horario SP: fuso local nao e Sao Paulo - formatacao por fuso nao verificavel'
+        }
+    } finally { $env:TZ = $tzSave }
+
     # ---- abertura direta na Situacao (config valida) ----
     $script:Backend = New-BackendFalso
     $script:Backend.defData = @{ descricao='MACIP Backup - agente de backup do piloto'; userId=$contaPrep; logon=1
@@ -705,9 +740,12 @@ exit 0
     # linha do pedido nem na linha principal "Execucao atual".
 
     function New-InfoFalsa {
-        param($Ultima = $null, [int]$Estado = 1, [int]$Codigo = 0, $Insts = @())
+        # Como o COM: Ultima chega como DateTime LOCAL (nunca texto) --
+        # Get-InfoTarefa preserva o tipo ate a formatacao.
+        param($Ultima = $null, [int]$Estado = 1, [int]$Codigo = 0, $Insts = @(), $Proxima = $null)
+        if ($Ultima -is [string] -and $Ultima) { $Ultima = [DateTime]::Parse($Ultima) }
         return [pscustomobject]@{ Habilitada = $true; Estado = $Estado; Ultima = $Ultima
-                                 Proxima = ''; Codigo = $Codigo; Conta = 'x'; DoApp = $true
+                                 Proxima = $Proxima; Codigo = $Codigo; Conta = 'x'; DoApp = $true
                                  Instancias = @($Insts) }
     }
     # Fixture independente de fuso: Ultima (COM) e HORA LOCAL da maquina;

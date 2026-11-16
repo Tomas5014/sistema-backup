@@ -451,11 +451,15 @@ function Get-InfoTarefa {
             if ($i) { $g = [string]$i.InstanceGuid; if ($g) { $insts += $g } }
         }
     } catch { }
+    # LastRunTime/NextRunTime chegam do COM como DateTime LOCAL. O TIPO
+    # e preservado ate a formatacao: converter para texto e re-interpretar
+    # podia assumir UTC (string invariante sem offset + AssumeUniversal)
+    # e exibir 10:26 para uma tarefa que roda as 13:26 em Brasilia.
     return [pscustomobject]@{
         Habilitada = [bool]$t.Enabled
         Estado     = [int]$t.State          # 4 = em execucao
-        Ultima     = [string]$t.LastRunTime
-        Proxima    = [string]$t.NextRunTime
+        Ultima     = $t.LastRunTime
+        Proxima    = $t.NextRunTime
         Codigo     = [int]$t.LastTaskResult
         Conta      = $contaTarefa
         DoApp      = (Test-TarefaDoApp -Tarefa $t)
@@ -492,7 +496,10 @@ function Classify-Resultado {
     if ($InfoTarefa -and $InfoTarefa.Estado -eq 4) { return 'em_execucao' }
     $ultima = $null
     if ($InfoTarefa -and $InfoTarefa.Ultima) {
-        try { $u = [DateTimeOffset]::Parse($InfoTarefa.Ultima); if ($u.Year -gt 2000) { $ultima = $u } } catch { }
+        # LastRunTime e LOCAL (COM): ConvertTo-DataLocal aceita o DateTime
+        # preservado e tambem texto, sempre interpretando como hora local.
+        $u = ConvertTo-DataLocal -Valor $InfoTarefa.Ultima
+        if ($u -and $u.Year -gt 2000) { $ultima = $u }
     }
     $agendadorTentou = ($null -ne $ultima)
     # o resultado pertence a ESTE disparo?
@@ -561,7 +568,9 @@ function New-PedidoDisparo {
         foreach ($g in @($InfoTarefa.Instancias)) { if ($g) { $inst[[string]$g] = $true } }
     }
     return [pscustomobject]@{
-        UltimaRef    = $(if ($InfoTarefa) { [string]$InfoTarefa.Ultima } else { $null })
+        # LastRunTime preservado no TIPO do COM (DateTime local); os
+        # comparadores usam ConvertTo-DataLocal, que aceita o objeto.
+        UltimaRef    = $(if ($InfoTarefa) { $InfoTarefa.Ultima } else { $null })
         InstRef      = $inst
         ResInicioRef = $(if ($Res -and $Res.inicio_utc) { ConvertTo-DataObj -Valor $Res.inicio_utc } else { $null })
         PedidoUtc    = [DateTimeOffset]::UtcNow

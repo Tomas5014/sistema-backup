@@ -115,7 +115,9 @@ faz **pela interface**, sem terminal, JSON ou Agendador.
    caixa de resumo mostra pasta, horário, destino e conta **antes** do
    clique; a senha Windows é pedida na janela nativa; depois de gravado,
    a tela mostra a **próxima execução informada pelo Agendador** em
-   data/hora local brasileira. Salvar com a tarefa **pausada preserva a
+   data/hora local brasileira — o `DateTime` local do COM chega **tipado**
+   até a formatação (uma tarefa das 13:26 aparece 13:26, nunca 10:26).
+   Salvar com a tarefa **pausada preserva a
    pausa** (só *Retomar* religa); cancelar a credencial ou uma falha
    preserva a configuração e a tarefa anteriores.
 4. **Aba 3 — Situação:** com configuração válida a janela **abre direto
@@ -202,6 +204,15 @@ faz **pela interface**, sem terminal, JSON ou Agendador.
     agendamento deveria estar ativo (o ensaio de disparo após reinício
     continua agendado para 17/11 às 13:26 — não alterar a VM nem o
     repositório SFTP de laboratório até lá).
+14. **Horários na tela (fuso local):** uma tarefa agendada para 13:26
+    no horário do computador aparece **13:26** em todos os lugares —
+    "Próxima execução" logo após salvar e na aba Situação (com e sem
+    pedido de *Executar agora* aberto) e "Último disparo registrado"
+    em Detalhes. `LastRunTime`/`NextRunTime` chegam **tipados** do COM
+    (`DateTime` local) até a formatação — nunca convertidos a texto e
+    reinterpretados como UTC. O horário do agente é o inverso:
+    `16:26Z` gravado aparece `13:26` em Brasília (formato
+    `dd/MM/yyyy HH:mm`; ausente/inválido/sentinela 1899 → `-`).
 
 ### 4c. Pelo script (diagnóstico)
 
