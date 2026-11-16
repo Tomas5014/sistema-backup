@@ -160,16 +160,45 @@ faz **pela interface**, sem terminal, JSON ou Agendador.
 5. Prova sem sessão: encerrar a sessão antes do horário, religar e
    conferir *BACKUP CONCLUIDO* (resultado vinculado ao disparo) ou a
    ação indicada.
-6. **Aba *Restaurar*:** três etapas numeradas — *1. Data do backup →
-   2. Arquivo → 3. Pasta de destino*. O ponto mostra a **data local**
-   primeiro e o ID depois; o **nome do arquivo** escolhido aparece em
-   destaque com o **caminho completo** logo abaixo; carregando, lista
-   vazia e erro são estados distintos na linha de mensagem.
-   Destino separado e vazio (o original nunca é sobrescrito); vínculos
-   SSH/destino reconferidos antes de qualquer acesso. Após sucesso
-   confirmado: **Abrir pasta restaurada** e conferir snapshot + SHA-256
-   em **Detalhes** — comparar o SHA-256 do arquivo restaurado com o
-   original (o **segundo** arquivo selecionado também deve conferir).
+6. **Aba *Restaurar* — os dois modos pela interface:** o técnico
+   escolhe a **Data do backup** e o **modo** (*Restaurar um arquivo* /
+   *Restaurar toda a pasta protegida*); a linha de revisão mostra
+   **ponto + escopo + caminho final** antes de iniciar; vínculos
+   SSH/destino reconferidos antes de qualquer acesso; após sucesso,
+   **Abrir pasta restaurada**; snapshot, raiz do ponto e SHA-256 ficam
+   em **Detalhes**.
+   - **Restaurar um arquivo** — três etapas numeradas (*1. Data →
+     2. Arquivo → 3. Destino*). O ponto mostra a **data local** primeiro
+     e o ID depois; o **nome do arquivo** escolhido aparece em destaque
+     com o **caminho completo** logo abaixo; carregando, lista vazia e
+     erro são estados distintos. Destino separado e vazio (o original
+     nunca é sobrescrito). Comparar o SHA-256 do restaurado com o
+     original — o **segundo** arquivo selecionado também deve conferir.
+   - **Restaurar toda a pasta protegida** — a etapa 2 dispensa seleção
+     e mostra a **raiz registrada no ponto** (metadados confirmados
+     pelo catálogo do ID completo). O destino precisa ser um caminho
+     **NOVO** fora da pasta protegida; a restauração materializa a
+     árvore do ponto em temporário no mesmo volume e só publica por
+     renomeação após sucesso e verificação — nunca sobrescreve e nunca
+     anuncia parcial como completo.
+6a. **Aceite da restauração completa (dois pontos, dados fictícios):**
+    antes do ponto **A**, gravar na origem um **manifesto** (caminho
+    relativo + SHA-256 de cada arquivo) incluindo uma **subpasta**, um
+    arquivo com **espaços e acentos** no nome e um arquivo coberto pela
+    exclusão corrente (ex.: `*.tmp`) — deixar o backup do ponto A rodar.
+    Depois **alterar um arquivo** e **remover outro** da origem e
+    deixar o ponto **B** rodar. Na aba Restaurar: escolher o **ponto
+    A** no modo *Restaurar toda a pasta protegida*, conferir que a raiz
+    mostrada é a origem registrada, apontar destino **novo** e
+    restaurar. **Aprovado se:** todo caminho relativo do manifesto
+    existe no destino com SHA-256 igual; o arquivo removido **volta**;
+    o alterado volta com o **conteúdo do ponto A**; o arquivo excluído
+    **continua ausente** (foi salvo sem ele — as exclusões não filtram
+    a restauração, ela traz o que o ponto gravou); a origem **não foi
+    tocada**. Repetir no mesmo passe: modo arquivo com o **segundo
+    arquivo** do ponto B (SHA-256 confere); destino **já existente**
+    recusado com o conteúdo intacto; erro durante a cópia (SFTP fora)
+    **não publica** a pasta e não anuncia sucesso.
 7. **Sucesso → falha com a janela fechada:** com a GUI fechada, forçar
    um disparo que falhe (ex.: pausar o SFTP ou cortar a rede no
    horário) depois de um sucesso confirmado. Ao reabrir, a tela deve
@@ -431,12 +460,14 @@ Aprovação exige, registrado na ficha:
   recebe o instalador + o perfil de laboratório, abre pelo Menu
   Iniciar, valida, escolhe pasta e horário **no seletor**, salva na
   janela nativa de credencial, acompanha um backup na aba Situação (a
-  mensagem de disparo cede lugar ao estado real) e restaura o **segundo
-  arquivo** de um ponto — tudo só pela interface. Na validação
-  técnica, comparar o SHA-256 do restaurado com o original. Cobrir
-  também: abertura direta na Situação com config válida, OpenSSH
-  presente/ausente (item 4b.10), escalas 100/125/150 % (4b.11) e
-  cancelamento na credencial preservando config+tarefa.
+  mensagem de disparo cede lugar ao estado real) e restaura pela
+  interface — o **segundo arquivo** de um ponto **e** a **pasta
+  protegida inteira** de outro ponto, conferida por manifesto de
+  caminhos relativos + SHA-256 (roteiro 6a) — tudo só pela interface.
+  Na validação técnica, comparar o SHA-256 do restaurado com o
+  original. Cobrir também: abertura direta na Situação com config
+  válida, OpenSSH presente/ausente (item 4b.10), escalas 100/125/150 %
+  (4b.11) e cancelamento na credencial preservando config+tarefa.
 - **Execução após reinício:** backup agendado confirmado depois de
   reboot/logoff, sem sessão — **pendente**, não aprovar sem isso.
 - Evidência dos **7 disparos** (tabela completa, sem execução ausente

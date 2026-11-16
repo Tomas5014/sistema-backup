@@ -749,6 +749,13 @@ exit 0
     ok ($guiSrc.Contains('Caminho completo:')) 'restaurar: caminho completo acessivel'
     ok ($guiSrc.Contains('Nenhum ponto de restauração')) 'restaurar: estado de lista vazia distinto'
     ok ($guiSrc.Contains('SetDetalhes')) 'auto-atualizacao: detalhes so regravam quando mudam (preserva foco/selecao)'
+    ok ($guiSrc.Contains('Restore-PastaCompleta') -and $guiSrc.Contains('Get-RaizSnapshot') -and $guiSrc.Contains('Invoke-ResticRestore')) 'pasta: funcoes da restauracao completa isoladas e testaveis'
+    ok ($guiSrc.Contains('Restaurar um arquivo') -and $guiSrc.Contains('Restaurar toda a pasta protegida')) 'restaurar: seletor de modo com os dois caminhos'
+    ok ($guiSrc.Contains('Pasta protegida registrada nesse ponto')) 'restaurar pasta: raiz do ponto exibida sem selecao de arquivo'
+    ok ($guiSrc.Contains('Escopo:') -and $guiSrc.Contains('Ponto:')) 'restaurar: revisao ao vivo mostra ponto+escopo+destino antes de iniciar'
+    ok ($guiSrc.Contains('O destino precisa ser NOVO') -or $guiSrc.Contains('precisa ser NOVO')) 'restaurar pasta: colisao de destino recusada na regra'
+    ok (-not ($guiSrc -match "restore\s+'latest'|restore\s+latest")) 'restaurar pasta: nunca usa latest'
+    ok ($guiSrc -match "restore `"\{3\}`" --target") 'restaurar pasta: comando restic restore com ID do ponto + target'
     $bytes = [IO.File]::ReadAllBytes($gui)
     ok ($bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) 'codificacao: UTF-8 com BOM (PS 5.1 le os acentos)'
 
@@ -1042,6 +1049,130 @@ exit 0
         -Arquivo '/o/a[1].txt' -Destino $dest5 -Origem $origem
     eq (Get-FileHash -LiteralPath $alvo5 -Algorithm SHA256).Hash `
        ([BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($bin)).Replace('-','')) 'restaurar: binario a[1].txt -- SHA-256 confere'
+
+    # ================= restauracao da PASTA inteira =================
+    # Cenario do aceite: dois pontos com dados ficticios; entre eles
+    # 'alterado.txt' mudou e 'removido.txt' saiu da origem. Restaurar a
+    # arvore do ponto ANTIGO devolve exatamente o que foi salvo naquela
+    # data — caminhos relativos e SHA-256 conferidos por manifesto.
+    $snapAnt = 'a' * 64; $snapNov = 'b' * 64
+    @"
+{"id":"$snapAnt","short_id":"aaaaaaaa","time":"2026-11-16T16:26:00Z","paths":["$origem"]}
+{"id":"$snapNov","short_id":"bbbbbbbb","time":"2026-11-17T16:26:00Z","paths":["$origem"]}
+"@ | Set-Content -LiteralPath (Join-Path $stubDir 'snaps.jsonl') -Encoding Ascii
+    @"
+{"type":"snapshot","paths":["$origem"],"id":"$snapAnt"}
+{"name":".","type":"dir","path":"$origem"}
+{"name":"alterado.txt","type":"file","path":"$origem/alterado.txt"}
+{"name":"removido.txt","type":"file","path":"$origem/removido.txt"}
+{"name":"interno.txt","type":"file","path":"$origem/sub/interno.txt"}
+"@ | Set-Content -LiteralPath (Join-Path $stubDir 'ls.jsonl') -Encoding Ascii
+    # arvore que o ponto ANTIGO tinha (fixture que o stub materializa)
+    $arvore = Join-Path $stubDir 'restaurar'; New-Item -ItemType Directory $arvore -Force | Out-Null
+    New-Item -ItemType Directory (Join-Path $arvore 'sub') -Force | Out-Null
+    'VERSAO-ANTIGA' | Set-Content (Join-Path $arvore 'alterado.txt') -Encoding Ascii -NoNewline
+    'REMOVIDO-DEPOIS' | Set-Content (Join-Path $arvore 'removido.txt') -Encoding Ascii -NoNewline
+    'INTERNO' | Set-Content (Join-Path $arvore 'sub\interno.txt') -Encoding Ascii -NoNewline
+    'ACENTOS' | Set-Content (Join-Path $arvore 'nome com espaços e ação.txt') -Encoding Ascii -NoNewline
+    [IO.File]::WriteAllText((Join-Path $stubDir 'restore.root'), $origem)
+    # manifesto gravado "antes daquele backup": caminho relativo -> sha256
+    $manifesto = @{}
+    Get-ChildItem -LiteralPath $arvore -Recurse -File | ForEach-Object {
+        $rel = $_.FullName.Substring($arvore.Length).TrimStart('\','/')
+        $manifesto[$rel] = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLower() }
+    # arquivo excluido: existe na ORIGEM atual mas nunca entrou no ponto
+    'NAO-ENTRA' | Set-Content (Join-Path $origem 'excluido.tmp') -Encoding Ascii -NoNewline
+
+    $destPasta = Join-Path $tmp 'restaurado-antigo'
+    $resP = Restore-PastaCompleta -Estado $estado -Config $b1.Config `
+        -Snapshot $snapAnt -PathsMeta @($origem) -Destino $destPasta -Origem $origem
+    eq ([IO.Path]::GetFullPath($destPasta)) ([IO.Path]::GetFullPath($resP.Destino)) 'pasta: publicada no destino pedido'
+    eq $resP.Raiz $origem 'pasta: raiz registrada no ponto devolvida'
+    ok ($resP.Itens -ge 4) 'pasta: contagem de itens restaurados'
+    # cada item do manifesto existe com o MESMO sha-256
+    $faltaHash = @()
+    foreach ($rel in $manifesto.Keys) {
+        $alvoRel = Join-Path $destPasta ($rel -replace '/', [IO.Path]::DirectorySeparatorChar)
+        if (-not (Test-Path -LiteralPath $alvoRel -PathType Leaf)) { $faltaHash += $rel; continue }
+        if ((Get-FileHash -LiteralPath $alvoRel -Algorithm SHA256).Hash.ToLower() -cne $manifesto[$rel]) { $faltaHash += $rel }
+    }
+    eq ($faltaHash -join ',') '' 'pasta: manifesto completo — caminhos relativos e SHA-256 iguais'
+    eq (Get-Content -LiteralPath (Join-Path $destPasta 'alterado.txt') -Raw) 'VERSAO-ANTIGA' 'pasta: arquivo alterado volta com o conteudo do ponto antigo'
+    ok (Test-Path -LiteralPath (Join-Path $destPasta 'removido.txt') -PathType Leaf) 'pasta: arquivo removido da origem volta'
+    ok (Test-Path -LiteralPath (Join-Path $destPasta 'sub\interno.txt') -PathType Leaf) 'pasta: subpasta preservada'
+    ok (Test-Path -LiteralPath (Join-Path $destPasta 'nome com espaços e ação.txt') -PathType Leaf) 'pasta: nome com espacos e acentos preservado'
+    ok (-not (Test-Path -LiteralPath (Join-Path $destPasta 'excluido.tmp'))) 'pasta: excluido continua ausente (exclusoes NAO filtram restore, arquivo nunca entrou)'
+    eq (Get-Content -LiteralPath (Join-Path $origem 'excluido.tmp') -Raw) 'NAO-ENTRA' 'pasta: origem preservada intocada'
+    # restaura o que foi salvo naquela data: sem --exclude/--include na linha do restore
+    $argsLog = Get-Content -LiteralPath (Join-Path $stubDir 'args.log') -Raw
+    $linhaRestore = (($argsLog -split '---') | Where-Object { $_ -match '\brestore\b' } | Select-Object -Last 1)
+    ok ($linhaRestore -match 'restore' -and $linhaRestore -notmatch '--exclude' -and $linhaRestore -notmatch '--include') 'pasta: restore da arvore inteira, sem filtros'
+    ok ($linhaRestore -match [regex]::Escape($snapAnt)) 'pasta: ID COMPLETO do ponto usado'
+    ok ($linhaRestore -notmatch 'latest') 'pasta: nunca latest'
+
+    # destino JA EXISTENTE -> recusa antes de qualquer chamada ao restic
+    $destExist = Join-Path $tmp 'dest-existe'; New-Item -ItemType Directory $destExist | Out-Null
+    'ORIGINAL' | Set-Content (Join-Path $destExist 'intacto.txt') -Encoding Ascii -NoNewline
+    throws { Restore-PastaCompleta -Estado $estado -Config $b1.Config -Snapshot $snapAnt -PathsMeta @($origem) -Destino $destExist -Origem $origem } 'pasta: destino ja existente recusado'
+    eq (Get-Content -LiteralPath (Join-Path $destExist 'intacto.txt') -Raw) 'ORIGINAL' 'pasta: conteudo do destino existente intacto'
+
+    # destino dentro/igual a origem e pai-junction -> recusados
+    throws { Restore-PastaCompleta -Estado $estado -Config $b1.Config -Snapshot $snapAnt -PathsMeta @($origem) -Destino (Join-Path $origem 'novo-dir') -Origem $origem } 'pasta: destino dentro da protegida recusado'
+    throws { Restore-PastaCompleta -Estado $estado -Config $b1.Config -Snapshot $snapAnt -PathsMeta @($origem) -Destino $origem -Origem $origem } 'pasta: destino = origem recusado'
+    $linkPaiP = Join-Path $tmp 'link-pai-pasta'
+    if (-not (Test-IsWindows)) { New-Item -ItemType SymbolicLink -Path $linkPaiP -Target $origem | Out-Null }
+    else { cmd /c mklink /J "$linkPaiP" "$origem" | Out-Null }
+    throws { Restore-PastaCompleta -Estado $estado -Config $b1.Config -Snapshot $snapAnt -PathsMeta @($origem) -Destino (Join-Path $linkPaiP 'novo') -Origem $origem } 'pasta: pai junction para a origem recusado'
+
+    # raiz nao identificavel -> para com motivo (nunca arvore alheia)
+    throws { Restore-PastaCompleta -Estado $estado -Config $b1.Config -Snapshot $snapAnt -PathsMeta @() -Destino (Join-Path $tmp 'd1') -Origem $origem } 'pasta: metadados sem raiz recusados'
+    throws { Restore-PastaCompleta -Estado $estado -Config $b1.Config -Snapshot $snapAnt -PathsMeta @('a','b') -Destino (Join-Path $tmp 'd2') -Origem $origem } 'pasta: raiz multipla recusada'
+    # catalogo que NAO confirma a raiz -> para (paths dizem /x, catalogo /o)
+    @"
+{"type":"snapshot","paths":["/x/alheia"],"id":"$snapAnt"}
+{"name":".","type":"dir","path":"/o"}
+"@ | Set-Content -LiteralPath (Join-Path $stubDir 'ls.jsonl') -Encoding Ascii
+    throws { Restore-PastaCompleta -Estado $estado -Config $b1.Config -Snapshot $snapAnt -PathsMeta @('/x/alheia') -Destino (Join-Path $tmp 'd3') -Origem $origem } 'pasta: catalogo nao confirma a raiz -> recusado'
+    # devolve o catalogo coerente
+    @"
+{"type":"snapshot","paths":["$origem"],"id":"$snapAnt"}
+{"name":".","type":"dir","path":"$origem"}
+"@ | Set-Content -LiteralPath (Join-Path $stubDir 'ls.jsonl') -Encoding Ascii
+
+    # erro DURANTE a copia: nada publicado, temporario limpo, origem intacta
+    '1' | Set-Content -LiteralPath (Join-Path $stubDir 'restore-code') -Encoding Ascii -NoNewline
+    $destFalha = Join-Path $tmp 'restaurado-falha'
+    throws { Restore-PastaCompleta -Estado $estado -Config $b1.Config -Snapshot $snapAnt -PathsMeta @($origem) -Destino $destFalha -Origem $origem } 'pasta: erro na copia -> falha'
+    ok (-not (Test-Path -LiteralPath $destFalha)) 'pasta: erro na copia -- destino NAO publicado'
+    eq (@(Get-ChildItem -LiteralPath $tmp -Directory -Filter '.macip-rest-*' -Force)).Count 0 'pasta: erro na copia -- temporario da tentativa limpo'
+    Remove-Item -LiteralPath (Join-Path $stubDir 'restore-code') -Force
+
+    # timeout: Kill + nada publicado + temporario limpo
+    '5' | Set-Content -LiteralPath (Join-Path $stubDir 'restore-sleep') -Encoding Ascii -NoNewline
+    $script:DumpTimeoutMs = 300
+    $destLento = Join-Path $tmp 'restaurado-lento'
+    $t0 = Get-Date
+    throws { Restore-PastaCompleta -Estado $estado -Config $b1.Config -Snapshot $snapAnt -PathsMeta @($origem) -Destino $destLento -Origem $origem } 'pasta: timeout -> erro e Kill'
+    ok (((Get-Date) - $t0).TotalSeconds -lt 20) 'pasta: timeout retornou dentro do prazo'
+    ok (-not (Test-Path -LiteralPath $destLento)) 'pasta: timeout -- destino NAO publicado'
+    eq (@(Get-ChildItem -LiteralPath $tmp -Directory -Filter '.macip-rest-*' -Force)).Count 0 'pasta: timeout -- temporario limpo'
+    $script:DumpTimeoutMs = 600000
+    Remove-Item -LiteralPath (Join-Path $stubDir 'restore-sleep') -Force
+
+    # flatten da subarvore: raiz do ponto vira subpastas do temporario
+    eq (Get-PastaSubarvore -Tmp 'T' -Raiz 'C:\Dados\Cliente') (Join-Path 'T' ('C' + [IO.Path]::DirectorySeparatorChar + 'Dados' + [IO.Path]::DirectorySeparatorChar + 'Cliente')) 'pasta: flatten de raiz Windows'
+    eq (Get-PastaSubarvore -Tmp 'T' -Raiz '/srv/dados') (Join-Path 'T' ('srv' + [IO.Path]::DirectorySeparatorChar + 'dados')) 'pasta: flatten de raiz POSIX'
+
+    # restauracao individual segue intacta (segundo arquivo, SHA-256)
+    [IO.File]::WriteAllBytes((Join-Path $stubDir 'dump.bin'), [Text.Encoding]::UTF8.GetBytes('SEG-DEPOIS'))
+    $destS3 = Join-Path $tmp 'dest-seg-pos'
+    $alvoS3 = Restore-Arquivo -Estado $estado -Config $b1.Config -Snapshot $snapNov `
+        -Arquivo '/o/a[1].txt' -Destino $destS3 -Origem $origem
+    eq (Get-Content -LiteralPath $alvoS3 -Raw) 'SEG-DEPOIS' 'pasta: restauracao individual do segundo arquivo segue ok'
+
+    Remove-Item -LiteralPath (Join-Path $stubDir 'restaurar') -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path $stubDir 'restore.root') -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path $stubDir 'snaps.jsonl') -Force -ErrorAction SilentlyContinue
 
     # ---- desinstalacao estruturada (Desinstalar-Tarefa.ps1) ----
     . (Join-Path $PSScriptRoot '..\installer\Desinstalar-Tarefa.ps1')

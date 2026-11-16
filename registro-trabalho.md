@@ -2148,3 +2148,82 @@ escala, fluxo so com teclado e por acesso remoto, caminhos longos,
 ausencia de config, espera e falha (roteiro 4b.11 reescrito). Instalador
 NAO recompilado (sem makensis/payload). Ensaio pos-reinicio mantido para
 17/11 13:26 — VM, tarefa do laboratorio e repositorio SFTP nao tocados.
+
+## Revisao 17 — restauracao da pasta protegida inteira pela interface
+
+Pedido: aba Restaurar com dois modos — "Restaurar um arquivo" (mantido)
+e "Restaurar toda a pasta protegida", os dois so pela interface.
+
+Decisao: WinForms + PS 5.1 preservados; nenhuma dependencia nova; SFTP,
+credenciais, agendamento, correlacao e protecao contra sobrescrita
+intocados.
+
+Backend (`agent/windows/gui/MacipBackup-Gui.ps1`):
+
+- `Get-RaizSnapshot`: raiz protegida vem dos METADADOS do ponto
+  (`paths` do snapshot) confirmada pelo catalogo (`restic ls --json`
+  do ID COMPLETO — nunca `latest`): sem raiz unica ou catalogo que nao
+  confirma -> para com o motivo, nunca arvore alheia. Origem mudou desde
+  o backup -> vale a raiz do ponto, nao a atual.
+- `Invoke-ResticRestore`: `restic restore <id> --target <tmp>` —
+  arvore inteira do ponto, SEM --include/--exclude (as exclusoes atuais
+  nao filtram: volta o que foi salvo naquela data). Mesma disciplina do
+  dump: stdout/stderr drenados em paralelo, um prazo monotonico cobre
+  processo e leituras, estouro -> Kill.
+- `Get-PastaSubarvore`: a raiz absoluta do ponto vira subpastas do
+  temporario ('C:\Dados' -> 'tmp\C\Dados') — conferida antes de publicar.
+- `Restore-PastaCompleta`: destino precisa ser NOVO (caminho existente
+  recusado antes de qualquer chamada), pai existente obrigatorio, fora
+  da raiz do ponto E da origem atual — inclusive por link/junction
+  resolvido em todos os componentes (`Resolve-PathSeguro`). Materializa
+  em temporario irmao do destino (mesmo volume), confere a subarvore
+  esperada e publica por renomeacao atomica; erro/timeout limpa APENAS
+  o temporario da tentativa e nunca anuncia parcial como completo.
+  Reusa `Get-CfgOperacional` + `Confirm-DestinoOperacional` (conta,
+  preparo, vinculos e ID do repositorio — mesmas verificacoes do backup
+  e do modo arquivo).
+
+Interface (aba Restaurar):
+
+- Seletor de modo (radio) apos a data do backup; linha de REVISAO ao
+  vivo mostra ponto + escopo + caminho final antes de iniciar.
+- Modo arquivo: lista de arquivos do ponto, nome em destaque, caminho
+  completo — inalterado.
+- Modo pasta: etapa 2 vira "Pasta protegida registrada nesse ponto" com
+  a raiz dos metadados; seletor de arquivo some; destino pedido como
+  caminho NOVO; botao primario vira "Restaurar pasta inteira"; sucesso
+  oferece "Abrir pasta restaurada" (abre a pasta; arquivo continua com
+  /select); Detalhes guardam destino, raiz do ponto, snapshot completo
+  e contagem de itens.
+
+Testes (`agent/windows/tests/run-gui-tests.ps1` + `restic-stub.ps1`):
+
+- Stub ganhou `restore`: materializa fixture `restaurar/` sob
+  `<target>/<raiz achatada>`, com gatilhos `restore.root`,
+  `restore-code`, `restore-sleep`, `restore-nothing`.
+- Cenario do aceite coberto: dois pontos; entre eles um arquivo
+  alterado e outro removido; subpasta + nome com espacos e acentos;
+  arquivo excluido presente na origem. Restaurado o ponto ANTIGO:
+  manifesto (caminho relativo -> SHA-256) confere item a item; removido
+  volta; alterado volta com conteudo antigo; excluido ausente; origem
+  intocada; linha do comando sem --exclude/--include e com o ID
+  completo; nunca `latest`. Recusados: destino existente (conteudo
+  intacto), destino = origem, destino dentro da protegida, pai
+  junction, metadados sem raiz, raiz multipla, catalogo que nao
+  confirma. Erro na copia: nada publicado, temporario limpo. Timeout:
+  Kill, nada publicado, temporario limpo. Restauracao individual do
+  segundo arquivo segue ok; flatten de raiz Windows/POSIX conferido.
+- Asserts de contrato: funcoes isoladas, seletor de modo, raiz no
+  ponto, revisao, recusa de destino existente, comando sem `latest`.
+
+Verificacao: GUI **321 ok, 0 falha** (1 pulado: COM real); agente
+**150 ok, 0 falha**; `unittest test_windows_agent_ps1` **5/5** (suites
+reais rodadas); `git diff --check` limpo; BOM `EF BB BF` conferido;
+parse `PSParser::Tokenize` 0 erros.
+
+Separacao de prova: simulado — NAO comprova `restic restore` real nem
+layout. Aceite pendente na VM (roteiro 4b.6a — novo): dois pontos,
+manifesto, removido/alterado/excluido, destino existente, erro na copia
+e preservacao da origem, junto do aceite visual aberto (4b.11).
+Instalador NAO recompilado (sem makensis/payload). VM, tarefa do
+laboratorio e repositorio SFTP nao tocados.

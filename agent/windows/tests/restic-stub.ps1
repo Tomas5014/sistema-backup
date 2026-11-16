@@ -40,6 +40,38 @@ elseif ($args -contains 'ls') {
     # ls.jsonl: nos de "restic ls --json" (type file/dir/symlink/snapshot)
     if (Test-Path (Join-Path $d 'ls.jsonl')) { Get-Content (Join-Path $d 'ls.jsonl') }
 }
+elseif ($args -contains 'restore') {
+    # Simula 'restic restore <id> --target <dir>': materializa a arvore
+    # fixture de <stub>/restaurar/ em <target>/<raiz achatada>.
+    #   restore.root   raiz gravada no ponto (ex.: 'C:\Dados' ou '/o')
+    #   restaurar/     arvore a publicar (nomes com espacos/acentos ok)
+    #   restore-sleep  segundos de espera (timeout)
+    #   restore-code   codigo de saida != 0 (falha apos materializar)
+    #   restore-nothing: falha sem materializar nada
+    if (Test-Path (Join-Path $d 'restore-sleep')) {
+        Start-Sleep -Seconds ([int](Get-Content (Join-Path $d 'restore-sleep') -Raw))
+    }
+    if (Test-Path (Join-Path $d 'restore-nothing')) {
+        $global:LASTEXITCODE = 1
+        [Console]::Error.WriteLine('restore: falha simulada sem materializar')
+    } else {
+        $ti = [array]::IndexOf([string[]]$args, '--target')
+        $target = $(if ($ti -ge 0 -and $ti + 1 -lt $args.Count) { [string]$args[$ti + 1] } else { Join-Path $d 'target-fallback' })
+        $root = if (Test-Path (Join-Path $d 'restore.root')) { (Get-Content (Join-Path $d 'restore.root') -Raw).Trim() } else { 'raiz' }
+        $segs = @($root -split '[\\/]+' | Where-Object { $_ -ne '' } | ForEach-Object { $_.TrimEnd(':') })
+        $sub = Join-Path $target ($segs -join [IO.Path]::DirectorySeparatorChar)
+        New-Item -ItemType Directory -Path $sub -Force | Out-Null
+        if (Test-Path (Join-Path $d 'restaurar')) {
+            Get-ChildItem -LiteralPath (Join-Path $d 'restaurar') -Force |
+                Copy-Item -Destination $sub -Recurse -Force
+        }
+        $global:LASTEXITCODE = 0
+        if (Test-Path (Join-Path $d 'restore-code')) {
+            $global:LASTEXITCODE = [int](Get-Content (Join-Path $d 'restore-code') -Raw)
+            [Console]::Error.WriteLine('restore: falha simulada apos materializar')
+        }
+    }
+}
 elseif ($args -contains 'dump') {
     # dump.bin: conteudo do arquivo "restaurado" (bytes, para Invoke-ResticDump)
     # stderr-big: despeja volume grande em stderr (pipe cheio nao pode travar)

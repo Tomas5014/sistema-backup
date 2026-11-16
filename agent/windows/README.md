@@ -250,34 +250,57 @@ repositório e o `Preparar` (DPAPI na conta) são os mesmos do agente.
   `Não foi possível confirmar a execução` com orientação — resolução
   que segue na linha principal até um disparo mais novo aparecer.
   Cliques repetidos ficam bloqueados enquanto houver pedido aberto.
-- **Restaurar** (aba de mesmo nome): fluxo em três etapas numeradas —
-  *1. Data do backup → 2. Arquivo → 3. Pasta de destino*. Pontos via
-  `restic snapshots`, exibidos com a **data local** primeiro e o ID
-  depois; arquivos via `restic ls --json` filtrados a **arquivos
-  regulares** — a escolha vem da lista, nunca de texto livre. O **nome
-  do arquivo** aparece em destaque com o **caminho completo** logo
-  abaixo; carregando, lista vazia e erro são estados distintos. ID do
-  snapshot e SHA-256 do restaurado ficam em **Detalhes**; após sucesso
-  confirmado, **Abrir pasta restaurada** abre o destino no Explorador. Antes de listar ou
-  restaurar vale a
-  **mesma verificação do preparo do backup** (`Confirm-PreparoVigente`):
-  SID da sessão, repositório + ID, e vínculo efetivo de
-  `identidade_ssh`/`known_hosts`/`ssh_config` por caminho **e** SHA-256
-  — divergência bloqueia e indica refazer a ativação; falha na listagem
-  descarta a seleção anterior. Consultas têm prazo (`Invoke-ResticConsulta`)
-  e rodam fora da thread da janela. O destino é resolvido em **todos os
-  componentes** (link/junction até em pasta pai, mesmo com a final
-  inexistente, cadeias encadeadas e componentes ilegíveis são recusados)
-  e precisa ser **vazio e fora da pasta protegida**.
-  `restic dump` traz **somente o arquivo escolhido** — nome com
-  `[`/`]`/`*` é literal — gravado em **temporário exclusivo** com
-  `stdout`/`stderr` drenados em paralelo e **um único prazo monotônico**
-  cobre processo e ambas as leituras (cada espera confere o retorno;
-  um neto que segure `stderr` aberto não trava — timeout sem nova
-  espera ilimitada); o arquivo só é **publicado no nome final depois
-  de código 0** (`File.Move` não sobrescreve — colisão preserva o
-  existente; falha remove só o parcial), e a tela só mostra sucesso
-  quando o arquivo esperado existe no destino.
+- **Restaurar** (aba de mesmo nome): o técnico escolhe a **Data do
+  backup** e o **modo** — *Restaurar um arquivo* ou *Restaurar toda a
+  pasta protegida*. Uma linha de **revisão** mostra ponto, escopo e
+  caminho final antes de iniciar; após sucesso, **Abrir pasta
+  restaurada** abre o destino no Explorador; ID do snapshot, raiz do
+  ponto e SHA-256 ficam em **Detalhes**. Antes de listar ou restaurar
+  vale a **mesma verificação do preparo do backup**
+  (`Confirm-DestinoOperacional`): SID da sessão, repositório + ID, e
+  vínculo efetivo de `identidade_ssh`/`known_hosts`/`ssh_config` por
+  caminho **e** SHA-256 — divergência bloqueia e indica refazer a
+  ativação; consultas têm prazo (`Invoke-ResticConsulta`) e rodam fora
+  da thread da janela.
+  - **Restaurar um arquivo** — fluxo em três etapas: *1. Data do backup
+    → 2. Arquivo → 3. Pasta de destino*. Pontos via `restic snapshots`
+    (data local primeiro, ID depois); arquivos via `restic ls --json`
+    filtrados a **arquivos regulares** — a escolha vem da lista, nunca
+    de texto livre. O **nome do arquivo** aparece em destaque com o
+    **caminho completo** logo abaixo; carregando, lista vazia e erro
+    são estados distintos. O destino é resolvido em **todos os
+    componentes** (link/junction até em pasta pai, mesmo com a final
+    inexistente, cadeias encadeadas e componentes ilegíveis são
+    recusados) e precisa ser **vazio e fora da pasta protegida**.
+    `restic dump` traz **somente o arquivo escolhido** — nome com
+    `[`/`]`/`*` é literal — gravado em **temporário exclusivo** com
+    `stdout`/`stderr` drenados em paralelo e **um único prazo
+    monotônico** cobre processo e ambas as leituras (um neto que segure
+    `stderr` aberto não trava); o arquivo só é **publicado no nome
+    final depois de código 0** (`File.Move` não sobrescreve — colisão
+    preserva o existente; falha remove só o parcial), e a tela só
+    mostra sucesso quando o arquivo esperado existe no destino.
+  - **Restaurar toda a pasta protegida** — a etapa 2 dispensa seleção
+    de arquivo e mostra a **raiz registrada naquele ponto**. A raiz vem
+    dos **metadados do snapshot** (`paths`), confirmada pelo
+    **catálogo** (`restic ls --json` do **ID completo** escolhido —
+    nunca `latest`, nunca árvore alheia): metadados sem raiz única ou
+    catálogo que não confirma a raiz **param com o motivo**. Se a
+    origem mudou desde o backup, vale a raiz do ponto — não a atual.
+    `restic restore <id> --target <tmp>` materializa a árvore inteira
+    do ponto — **sem `--include`/`--exclude`**: volta o que foi
+    efetivamente salvo naquela data (arquivos hoje excluídos ou já
+    removidos da origem voltam se existiam no ponto), preservando nomes,
+    subpastas, espaços e acentos. O destino precisa ser **NOVO** —
+    caminho que já existe é recusado antes de qualquer chamada — e
+    fora da raiz do ponto **e** da origem atual, inclusive por
+    link/junction resolvido em todos os componentes. A árvore
+    materializa em **temporário irmão do destino** (mesmo volume), é
+    conferida (`Get-PastaSubarvore` — a raiz absoluta do ponto vira
+    subpastas do temporário) e só então é **publicada por renomeação
+    atômica** — erro, cancelamento ou timeout matam o processo, limpam
+    **apenas** o temporário da própria tentativa e nunca anunciam
+    sucesso nem publicam pasta parcial.
 - **Acabamento visual:** fonte do Windows (Segoe UI), superfícies
   neutras e **um acento** para a ação principal de cada aba; cor de
   estado sempre acompanhada de texto. As telas usam
