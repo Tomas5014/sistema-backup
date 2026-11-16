@@ -157,7 +157,7 @@ Dot-sourcing do próprio `Backup-MacipCliente.ps1`: a validação do
 `backup.json`, o `ssh_config` restrito, a conferência do ID do
 repositório e o `Preparar` (DPAPI na conta) são os mesmos do agente.
 
-- **Validar e continuar** (aba 1): importa um `perfil.json` da MAC IP
+- **Validar e continuar** (aba *Ativar*, passo 1 de 3): importa um `perfil.json` da MAC IP
   (repositório, ID esperado e `known_hosts` embutidos — dados, sem
   segredos; perfis com campo de senha/chave são recusados). Chave
   privada e senha Restic entram separadas pela tela. Um clique prova
@@ -165,17 +165,18 @@ repositório e o `Preparar` (DPAPI na conta) são os mesmos do agente.
   gravar estado — **só avança se os dois conferirem**, e mudar perfil,
   chave ou senha depois invalida a prova (o Salvar confere de novo).
   A consulta roda fora da thread da janela, com prazo.
-- **Configurar:** fluxo em três passos na mesma aba — *Escolher pasta e
-  horário* → *Revisar e salvar*. O seletor de pasta é o diálogo nativo
-  do Windows; o horário é um **DateTimePicker `HH:mm` com setas**
-  (mouse e teclado) — não há texto livre, e a linha abaixo mostra a
-  prévia *"Todos os dias às HH:mm, no horário deste computador"* antes
-  de salvar. Exclusões ficam recolhidas em **Opções avançadas** (abrem
-  sozinhas quando a config ativa já tem itens). O resumo **Revisar e
-  salvar** lista pasta, horário, destino (novo perfil ou reuso do
-  atual) e conta da tarefa antes do clique. Depois de gravado, a tela
-  mostra a **próxima execução informada pelo Agendador** (não a
-  digitada), em data/hora local brasileira. Salvar é **transacional em
+- **Pasta e horário / Revisar e salvar** (passos 2 e 3 de 3, na aba de
+  mesmo nome — *Voltar: Ativação* preserva o preenchido): o seletor de
+  pasta é o diálogo nativo do Windows; o horário é um
+  **DateTimePicker `HH:mm` com setas** (mouse e teclado) — não há texto
+  livre, e a linha abaixo mostra a prévia *"Todos os dias às HH:mm, no
+  horário deste computador"* antes de salvar. Exclusões ficam
+  recolhidas em **Opções avançadas** (abrem sozinhas quando a config
+  ativa já tem itens). O resumo **Revisar e salvar** lista pasta,
+  horário local, **frequência diária**, destino (novo perfil ou reuso
+  do atual) e conta da tarefa antes do clique. Depois de gravado, a
+  tela mostra o **próximo backup informado pelo Agendador** (não o
+  digitado), em data/hora local brasileira, e abre a aba **Situação**. Salvar é **transacional em
   duas fases**: primeiro um
   conjunto novo (`config-N`, identidade e `backup.json`; `estado-N` novo
   só quando o perfil muda — DPAPI do estado anterior é reaproveitado se
@@ -197,14 +198,19 @@ repositório e o `Preparar` (DPAPI na conta) são os mesmos do agente.
   divergentes é recusada e a consulta por texto é proibida (só o código
   "tarefa inexistente" do próprio `GetTask` classifica ausência).
   Salvar duas vezes atualiza a mesma tarefa, nunca duplica.
-- **Operar:** com configuração válida a janela **abre direto** na aba
-  Situação; sem ela, começa pela Ativar. Pasta protegida, situação
-  deste disparo, **último backup confirmado** com data/hora própria,
-  próxima execução e **ação necessária** aparecem em linhas
-  separadas, atualizadas a cada **15 s** por `Timer` do WinForms (o
-  disparo solicitado cede lugar ao estado real sozinho; o timer pausa
-  durante operação de rede). IDs, conta, SID e versões ficam em
-  **Detalhes** (`Get-DetalhesSuporte` — sem segredos). Classificação
+- **Situação** (aba de operação — a janela **abre direto** nela com
+  configuração válida; sem ela, começa pela Ativar): três informações
+  distintas em linhas próprias — **Execução atual** (estado + cor +
+  mensagem única por execução), **Último backup bem-sucedido** com
+  data/hora própria e **Próximo backup**. **Executar backup agora** é o
+  botão em destaque (acento); **Pausar agenda** ou **Retomar agenda**
+  aparece conforme o estado — nunca os dois. IDs, conta, SID, versões
+  e a pasta protegida ficam em **Detalhes** (`Get-DetalhesSuporte` —
+  sem segredos, rolagem horizontal para caminhos longos). Atualização a
+  cada **15 s** por `Timer` do WinForms (o disparo solicitado cede
+  lugar ao estado real sozinho; o timer pausa durante operação de rede
+  e **só regrava os Detalhes quando o conteúdo muda** — não apaga a
+  seleção nem rouba o foco de quem copia). Classificação
   em concluído/falhou/incompleto/em
   execução/**sem resultado deste disparo**/ainda não executou —
   "concluído" exige resultado válido **vinculado ao disparo**
@@ -244,13 +250,15 @@ repositório e o `Preparar` (DPAPI na conta) são os mesmos do agente.
   `Não foi possível confirmar a execução` com orientação — resolução
   que segue na linha principal até um disparo mais novo aparecer.
   Cliques repetidos ficam bloqueados enquanto houver pedido aberto.
-- **Restaurar:** fluxo em três passos na mesma aba — *Data do backup →
-  Arquivo → Pasta de destino*. Pontos via `restic snapshots`; arquivos
-  via `restic ls --json` filtrados a **arquivos regulares** — a escolha
-  vem da lista, nunca de texto livre. O nome **completo** do arquivo
-  escolhido aparece na tela; ID do snapshot e SHA-256 do restaurado
-  ficam em **Detalhes**; após sucesso confirmado, **Abrir pasta
-  restaurada** abre o destino no Explorador. Antes de listar ou
+- **Restaurar** (aba de mesmo nome): fluxo em três etapas numeradas —
+  *1. Data do backup → 2. Arquivo → 3. Pasta de destino*. Pontos via
+  `restic snapshots`, exibidos com a **data local** primeiro e o ID
+  depois; arquivos via `restic ls --json` filtrados a **arquivos
+  regulares** — a escolha vem da lista, nunca de texto livre. O **nome
+  do arquivo** aparece em destaque com o **caminho completo** logo
+  abaixo; carregando, lista vazia e erro são estados distintos. ID do
+  snapshot e SHA-256 do restaurado ficam em **Detalhes**; após sucesso
+  confirmado, **Abrir pasta restaurada** abre o destino no Explorador. Antes de listar ou
   restaurar vale a
   **mesma verificação do preparo do backup** (`Confirm-PreparoVigente`):
   SID da sessão, repositório + ID, e vínculo efetivo de
@@ -270,6 +278,16 @@ repositório e o `Preparar` (DPAPI na conta) são os mesmos do agente.
   de código 0** (`File.Move` não sobrescreve — colisão preserva o
   existente; falha remove só o parcial), e a tela só mostra sucesso
   quando o arquivo esperado existe no destino.
+- **Acabamento visual:** fonte do Windows (Segoe UI), superfícies
+  neutras e **um acento** para a ação principal de cada aba; cor de
+  estado sempre acompanhada de texto. As telas usam
+  `TableLayoutPanel`/`FlowLayoutPanel` — **sem coordenadas fixas**:
+  redimensionam, acomodam textos longos e rolam; janela com
+  `MinimumSize` e escala de DPI (100/125/150%). Ordem de `Tab`
+  explícita, `AcceptButton` por aba (Enter aciona a ação segura),
+  foco no primeiro dado ao trocar de aba e `AccessibleName` nos
+  campos. O arquivo é **UTF-8 com BOM** — o PS 5.1 só lê os acentos
+  assim.
 - **Conta:** a GUI roda na conta dedicada do backup — DPAPI, preparo e
   tarefa ficam na mesma identidade; se for aberta elevada em outra
   conta, a conta da tarefa registrada será a da sessão, e o aviso na

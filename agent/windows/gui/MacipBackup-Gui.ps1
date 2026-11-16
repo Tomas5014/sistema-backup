@@ -1,10 +1,10 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 # MacipBackup-Gui.ps1 - interface grafica do agente Windows da MAC IP (piloto).
 # WinForms sobre Windows PowerShell 5.1: sem dependencia nova -- a mesma
-# tecnologia do agente. Todas as strings em ASCII: o arquivo roda em PS 5.1
-# sem BOM como o agente.
+# tecnologia do agente. ARQUIVO UTF-8 COM BOM: os textos levam acentos e o
+# PS 5.1 so interpreta UTF-8 corretamente quando o BOM esta presente.
 #
-# Fluxo pensado para o tecnico: Ativar -> Configurar -> Operar -> Restaurar.
+# Fluxo pensado para o tecnico: Ativar -> Pasta e horario -> Situacao -> Restaurar.
 # Nenhuma etapa pede terminal, edicao de JSON ou o Agendador de Tarefas.
 # O Agendador continua por tras: a tarefa MACIP-Backup roda com o app fechado,
 # sem sessao aberta e apos reinicio.
@@ -528,25 +528,25 @@ function Classify-Resultado {
 }
 
 $script:RotulosStatus = @{
-    concluido          = 'BACKUP CONCLUIDO - resultado confirmado'
-    falhou             = 'FALHOU - a execucao terminou com erro'
-    incompleto         = 'INCOMPLETO - Restic codigo 3 (nem todo arquivo lido)'
-    em_execucao        = 'EM EXECUCAO - backup rodando agora'
-    sem_resultado      = 'SEM RESULTADO DESTE DISPARO - o Agendador tentou, nada foi gravado'
-    ainda_nao          = 'AINDA NAO EXECUTOU - nenhum disparo ate agora'
-    sem_tarefa         = 'SEM TAREFA - configure e salve primeiro'
-    tarefa_estranha    = 'TAREFA ESTRANHA - existe MACIP-Backup que nao e do aplicativo'
+    concluido          = 'Backup concluído — resultado confirmado'
+    falhou             = 'Falhou — a execução terminou com erro'
+    incompleto         = 'Incompleto — Restic código 3 (nem todo arquivo lido)'
+    em_execucao        = 'Em execução — backup rodando agora'
+    sem_resultado      = 'Sem resultado deste disparo — o Agendador tentou, nada foi gravado'
+    ainda_nao          = 'Ainda não executou — nenhum disparo até agora'
+    sem_tarefa         = 'Sem tarefa — configure e salve primeiro'
+    tarefa_estranha    = 'Tarefa estranha — existe MACIP-Backup que não é do aplicativo'
 }
 
 $script:AcaoStatus = @{
-    concluido          = 'Nenhuma acao pendente.'
-    falhou             = 'Acao necessaria: veja o resultado na pasta de estado e confira o destino na aba 1.'
-    incompleto         = 'Acao necessaria: confira o que ficou de fora (arquivos em uso/abertos).'
-    em_execucao        = 'Aguarde o termino do backup em execucao.'
-    sem_resultado      = 'Acao necessaria: verifique destino, conta da tarefa e permissao de execucao sem sessao.'
-    ainda_nao          = 'Aguarde o proximo disparo ou use "Executar agora".'
-    sem_tarefa         = 'Acao necessaria: valide na aba 1 e salve na aba 2.'
-    tarefa_estranha    = 'Acao necessaria: chame a MAC IP - a tarefa estranha nao e tocada.'
+    concluido          = 'Nenhuma ação pendente.'
+    falhou             = 'Ação necessária: veja o resultado na pasta de estado e confira o destino na aba Ativar.'
+    incompleto         = 'Ação necessária: confira o que ficou de fora (arquivos em uso/abertos).'
+    em_execucao        = 'Aguarde o término do backup em execução.'
+    sem_resultado      = 'Ação necessária: verifique destino, conta da tarefa e permissão de execução sem sessão.'
+    ainda_nao          = 'Aguarde o próximo disparo ou use “Executar backup agora”.'
+    sem_tarefa         = 'Ação necessária: valide na aba Ativar e salve em “Pasta e horário”.'
+    tarefa_estranha    = 'Ação necessária: chame a MAC IP — a tarefa estranha não é tocada.'
 }
 
 # ---------- pedido de "Executar agora" ----------
@@ -665,23 +665,23 @@ function Update-PedidoDisparo {
 }
 
 $script:RotulosPedido = @{
-    aguardando     = 'aguardando inicio - o Agendador ainda nao registrou uma execucao nova.'
-    em_execucao    = 'Disparo em execucao agora.'
-    concluido      = 'Disparo concluido - resultado confirmado DESTA execucao.'
-    falhou         = 'Disparo terminou com falha - veja a acao indicada e os Detalhes.'
-    incompleto     = 'Disparo terminou incompleto - veja a acao indicada e os Detalhes.'
-    sem_resultado  = 'Disparo tentou e nada foi gravado - veja a acao indicada e os Detalhes.'
-    nao_confirmado = 'Nao foi possivel confirmar a execucao - consulte o Agendador de Tarefas ou chame a MAC IP.'
+    aguardando     = 'Aguardando início — o Agendador ainda não registrou uma execução nova.'
+    em_execucao    = 'Backup em execução agora.'
+    concluido      = 'Backup concluído — resultado confirmado desta execução.'
+    falhou         = 'A execução terminou com falha — veja a ação indicada e os Detalhes.'
+    incompleto     = 'A execução terminou incompleta — veja a ação indicada e os Detalhes.'
+    sem_resultado  = 'O Agendador tentou e nada foi gravado — veja a ação indicada e os Detalhes.'
+    nao_confirmado = 'Não foi possível confirmar a execução — consulte o Agendador de Tarefas ou chame a MAC IP.'
 }
 
 $script:AcaoPedido = @{
-    aguardando     = 'Aguarde - a tela acompanha sozinha enquanto o Agendador registra o disparo.'
-    em_execucao    = 'Aguarde o termino do backup em execucao.'
-    concluido      = 'Nenhuma acao pendente.'
-    falhou         = 'Acao necessaria: veja o resultado na pasta de estado e confira o destino na aba 1.'
-    incompleto     = 'Acao necessaria: confira o que ficou de fora (arquivos em uso/abertos).'
-    sem_resultado  = 'Acao necessaria: verifique destino, conta da tarefa e permissao de execucao sem sessao.'
-    nao_confirmado = 'Acao necessaria: consulte o Agendador de Tarefas ou chame a MAC IP.'
+    aguardando     = 'Aguarde — a tela acompanha sozinha enquanto o Agendador registra o disparo.'
+    em_execucao    = 'Aguarde o término do backup em execução.'
+    concluido      = 'Nenhuma ação pendente.'
+    falhou         = 'Ação necessária: veja o resultado na pasta de estado e confira o destino na aba Ativar.'
+    incompleto     = 'Ação necessária: confira o que ficou de fora (arquivos em uso/abertos).'
+    sem_resultado  = 'Ação necessária: verifique destino, conta da tarefa e permissão de execução sem sessão.'
+    nao_confirmado = 'Ação necessária: consulte o Agendador de Tarefas ou chame a MAC IP.'
 }
 
 function Get-CorEstadoPedido {
@@ -1102,10 +1102,10 @@ function Get-PreRequisitos {
     $st = Get-SshStatus
     switch ($st.Status) {
         'ok'           { $sshResolvido = $st.Caminho }
-        'incompativel' { $falta += ("Cliente OpenSSH INCOMPATIVEL: $($st.Mensagem). O ssh.exe encontrado " +
-            "nao serve para o backup - ative o recurso opcional 'Cliente OpenSSH' ou chame a MAC IP.") }
-        default        { $falta += ("Cliente OpenSSH ausente: nenhum ssh.exe utilizavel encontrado nesta " +
-            "conta. Ative o recurso opcional 'Cliente OpenSSH' (Configuracoes > Aplicativos > Recursos " +
+        'incompativel' { $falta += ("Cliente OpenSSH incompatível: $($st.Mensagem). O ssh.exe encontrado " +
+            "não serve para o backup — ative o recurso opcional 'Cliente OpenSSH' ou chame a MAC IP.") }
+        default        { $falta += ("Cliente OpenSSH ausente: nenhum ssh.exe utilizável encontrado nesta " +
+            "conta. Ative o recurso opcional 'Cliente OpenSSH' (Configurações > Aplicativos > Recursos " +
             "opcionais > Adicionar recurso) ou chame a MAC IP.") }
     }
     $restic = Join-Path $script:BaseDir $script:ResticExeNome
@@ -1113,7 +1113,7 @@ function Get-PreRequisitos {
         $restic = Join-Path $PSScriptRoot $script:ResticExeNome
     }
     if (-not (Test-Path -LiteralPath $restic -PathType Leaf)) {
-        $falta += "$($script:ResticExeNome) ausente - o instalador da MAC IP coloca o binario aprovado na pasta do aplicativo."
+        $falta += "$($script:ResticExeNome) ausente — o instalador da MAC IP coloca o binário aprovado na pasta do aplicativo."
     }
     return [pscustomobject]@{ Ok = ($falta.Count -eq 0); Faltas = $falta; ResticExe = $restic; SshExe = $sshResolvido }
 }
@@ -1422,17 +1422,18 @@ function Format-DataBR {
 function Format-PreviaHorario {
     # Previa do agendamento diario mostrada ANTES de salvar.
     param([string]$HHmm)
-    if ($HHmm -cnotmatch '^([01][0-9]|2[0-3]):[0-5][0-9]$') { return 'Horario invalido (use HH:mm).' }
-    return ("Todos os dias as {0}, no horario deste computador." -f $HHmm)
+    if ($HHmm -cnotmatch '^([01][0-9]|2[0-3]):[0-5][0-9]$') { return 'Horário inválido (use HH:mm).' }
+    return ("Todos os dias às {0}, no horário deste computador." -f $HHmm)
 }
 
 function Get-ResumoConfiguracao {
     # Resumo exibido em "Revisar e salvar" -- o que vai ser gravado.
     param([string]$Origem, [string]$HHmm, [string]$Destino, [string]$Conta)
     $linhas = @(
-        ('Pasta protegida: ' + $(if ($Origem) { $Origem } else { '(nao escolhida)' }))
-        ('Horario: ' + $(if ($HHmm -cmatch '^([01][0-9]|2[0-3]):[0-5][0-9]$') { "todos os dias as $HHmm" } else { '(invalido)' }))
-        ('Destino: ' + $(if ($Destino) { $Destino } else { '(sem perfil novo - reusa o destino atual)' }))
+        ('Pasta protegida: ' + $(if ($Origem) { $Origem } else { '(não escolhida)' }))
+        ('Horário: ' + $(if ($HHmm -cmatch '^([01][0-9]|2[0-3]):[0-5][0-9]$') { "todos os dias às $HHmm (horário local)" } else { '(inválido)' }))
+        ('Frequência: diária')
+        ('Destino: ' + $(if ($Destino) { $Destino } else { '(sem perfil novo — reusa o destino atual)' }))
         ('Conta da tarefa: ' + $(if ($Conta) { $Conta } else { '-' }))
     )
     return ($linhas -join "`r`n")
@@ -1441,19 +1442,20 @@ function Get-ResumoConfiguracao {
 function Get-DetalhesSuporte {
     # Bloco "Detalhes (suporte)" da aba Situacao: IDs e dados tecnicos
     # para repassar a MAC IP -- SEM segredos (nunca chave/senha).
-    param($Info, $Res, $Conf, [string]$Estado, [string]$ConfigPath)
+    param($Info, $Res, $Conf, [string]$Estado, [string]$ConfigPath, [string]$Origem = '')
     $linhas = @()
     $linhas += ('conta da tarefa: ' + $(if ($Info -and $Info.Conta) { [string]$Info.Conta } else { '-' }))
-    $linhas += ('ultimo codigo do Agendador: ' + $(if ($Info) { ('0x{0:X8}' -f ([int]$Info.Codigo)) } else { '-' }))
-    $linhas += ('ultimo disparo registrado: ' + $(if ($Info) { (Format-DataBR $Info.Ultima) } else { '-' }))
+    $linhas += ('pasta protegida: ' + $(if ($Origem) { $Origem } else { '-' }))
+    $linhas += ('último código do Agendador: ' + $(if ($Info) { ('0x{0:X8}' -f ([int]$Info.Codigo)) } else { '-' }))
+    $linhas += ('último disparo registrado: ' + $(if ($Info) { (Format-DataBR $Info.Ultima) } else { '-' }))
     if ($Res) {
-        $linhas += ('ultimo resultado gravado: status=' + [string]$Res.status +
+        $linhas += ('último resultado gravado: status=' + [string]$Res.status +
             ' restic=' + $(if ($null -ne $Res.codigo_restic) { [string]$Res.codigo_restic } else { '-' }))
-        $linhas += ('  inicio: ' + (Format-DataBR $Res.inicio_utc) + '   fim: ' + (Format-DataBR $Res.fim_utc))
+        $linhas += ('  início: ' + (Format-DataBR $Res.inicio_utc) + '   fim: ' + (Format-DataBR $Res.fim_utc))
         if ($Res.snapshot) { $linhas += ('  snapshot: ' + [string]$Res.snapshot) }
         if ($Res.confirmado_erro) { $linhas += ('  confirmado_erro: ' + [string]$Res.confirmado_erro) }
         if ($Res.erro) { $linhas += ('  erro: ' + [string]$Res.erro) }
-    } else { $linhas += 'ultimo resultado gravado: nenhum arquivo' }
+    } else { $linhas += 'último resultado gravado: nenhum arquivo' }
     if ($Conf) {
         $linhas += ('confirmado: ' + (Format-DataBR $Conf.fim_utc) + '   snapshot ' + [string]$Conf.snapshot)
     } else { $linhas += 'confirmado: nenhum ainda' }
@@ -1582,67 +1584,137 @@ function Show-Gui {
 
     $form = New-Object "$W.Form"
     $form.Text = 'MAC IP Backup'
-    $form.Size = New-Object System.Drawing.Size(660, 640)
+    $form.Size = New-Object System.Drawing.Size(720, 680)
+    $form.MinimumSize = New-Object System.Drawing.Size(660, 560)
     $form.StartPosition = 'CenterScreen'
-    $form.MaximizeBox = $false
-    $form.FormBorderStyle = 'FixedSingle'
-    # Escala com a densidade da tela (100/125/150%); cada aba tambem tem
-    # AutoScroll -- nada fica cortado nem em acesso remoto.
+    # Janela redimensionavel + AutoScroll: textos longos e telas remotas
+    # nunca cortam. Escala com a densidade da tela (100/125/150%).
     $form.AutoScaleMode = 'Dpi'
+    # Fonte do Windows, superficie neutra, UM acento para a acao
+    # principal de cada aba; estado sempre vem com cor E texto.
+    try { $form.Font = New-Object System.Drawing.Font('Segoe UI', 9) } catch { }
+    $corAcento = [Drawing.Color]::FromArgb(0, 120, 215)      # acento Windows
+    $corNeutra = [Drawing.Color]::FromArgb(250, 250, 250)
 
     $tabs = New-Object "$W.TabControl"
     $tabs.Dock = 'Fill'
     $form.Controls.Add($tabs)
 
-    function New-Tab([string]$t) {
-        $p = New-Object "$W.TabPage"; $p.Text = $t; $p.AutoScroll = $true
-        $tabs.TabPages.Add($p); return $p
+    # Helpers de LAYOUT: cada aba e um TableLayoutPanel em uma coluna --
+    # linhas AutoSize empilham os blocos; nenhuma coordenada fixa. Um
+    # controle por linha via Add-Linha; rotulos quebram na largura
+    # disponivel (Dock=Top + AutoSize) e campos expandem com a janela.
+    $script:Aba = @{}   # titulo -> TabPage (SelectedTab aceita a pagina, nao o painel)
+    function New-Aba([string]$t) {
+        $p = New-Object "$W.TabPage"; $p.Text = $t; $p.BackColor = $corNeutra
+        $tabs.TabPages.Add($p)
+        $script:Aba[$t] = $p
+        $ly = New-Object 'System.Windows.Forms.TableLayoutPanel'
+        $ly.Dock = 'Fill'; $ly.AutoScroll = $true; $ly.ColumnCount = 1
+        $ly.Padding = New-Object "$W.Padding"(18, 16, 18, 16)
+        $p.Controls.Add($ly)
+        return $ly
     }
-    # ATENCAO: o parametro $w (largura) destes helpers esconde o $W de
-    # System.Windows.Forms -- o PowerShell nao distingue maiusculas e
-    # "$W.Label" viraria "500.Label" (TypeNotFound). Por isso os tipos
-    # aqui sao escritos COMPLETOS, nunca via a variavel.
-    function New-Label([System.Windows.Forms.Control]$p, [string]$t, [int]$x, [int]$y, [int]$w = 500) {
-        $l = New-Object 'System.Windows.Forms.Label'; $l.Text = $t; $l.Location = New-Object System.Drawing.Point($x, $y)
-        $l.Size = New-Object System.Drawing.Size($w, 20); $p.Controls.Add($l); return $l
+    function Add-Linha([System.Windows.Forms.TableLayoutPanel]$ly, $c, [int]$tab) {
+        $row = $ly.RowCount
+        $ly.RowCount += 1
+        $ly.RowStyles.Add((New-Object 'System.Windows.Forms.RowStyle'('AutoSize')))
+        $c.Dock = 'Top'
+        $c.Margin = New-Object "$W.Padding"(0, 3, 0, 3)
+        if ($tab -ge 0) { $c.TabIndex = $tab }
+        $ly.Controls.Add($c, 0, $row)
+        return $c
     }
-    function New-Button([System.Windows.Forms.Control]$p, [string]$t, [int]$x, [int]$y, [int]$w = 130) {
-        $b = New-Object 'System.Windows.Forms.Button'; $b.Text = $t; $b.Location = New-Object System.Drawing.Point($x, $y)
-        $b.Size = New-Object System.Drawing.Size($w, 28); $p.Controls.Add($b); return $b
+    function New-Rotulo([string]$t, [bool]$titulo = $false) {
+        # AutoSize + Dock=Top: o texto longo QUEBRA na largura da aba,
+        # nunca e cortado -- redimensionar so muda a quebra.
+        $l = New-Object 'System.Windows.Forms.Label'
+        $l.Text = $t; $l.AutoSize = $true
+        if ($titulo) { $l.Font = New-Object System.Drawing.Font($form.Font, [Drawing.FontStyle]::Bold) }
+        return $l
     }
-    function New-TextBox([System.Windows.Forms.Control]$p, [string]$t, [int]$x, [int]$y, [int]$w = 380) {
-        $tb = New-Object 'System.Windows.Forms.TextBox'; $tb.Text = $t; $tb.Location = New-Object System.Drawing.Point($x, $y)
-        $tb.Size = New-Object System.Drawing.Size($w, 24); $p.Controls.Add($tb); return $tb
+    function New-CampoRotulo([string]$t) { return (New-Rotulo $t) }
+    function New-LinhaCampo($campo, $botao) {
+        # campo ocupa toda a largura livre; botao a direita no tamanho dele
+        $ln = New-Object 'System.Windows.Forms.TableLayoutPanel'
+        $ln.AutoSize = $true; $ln.ColumnCount = 2
+        $ln.ColumnStyles.Add((New-Object 'System.Windows.Forms.ColumnStyle'('Percent', 100))) | Out-Null
+        $ln.ColumnStyles.Add((New-Object 'System.Windows.Forms.ColumnStyle'('AutoSize'))) | Out-Null
+        $campo.Dock = 'Fill'
+        if ($botao) { $botao.Margin = New-Object "$W.Padding"(8, 0, 0, 0) }
+        $ln.Controls.Add($campo, 0, 0)
+        if ($botao) { $ln.Controls.Add($botao, 1, 0) }
+        return $ln
+    }
+    function New-Caixa([string]$nomeAcessivel) {
+        $tb = New-Object 'System.Windows.Forms.TextBox'
+        $tb.AccessibleName = $nomeAcessivel
+        return $tb
+    }
+    function New-Botao([string]$t, [int]$larg = 0, [bool]$primario = $false) {
+        $b = New-Object 'System.Windows.Forms.Button'
+        $b.Text = $t; $b.AutoSize = $true
+        $b.MinimumSize = New-Object System.Drawing.Size($(if ($larg -gt 0) { $larg } else { 110 }), 30)
+        $b.Padding = New-Object "$W.Padding"(10, 0, 10, 0)
+        if ($primario) {
+            # a UNICA acao em destaque da aba: acento solido + texto branco
+            $b.FlatStyle = 'Flat'; $b.BackColor = $corAcento; $b.ForeColor = [Drawing.Color]::White
+            $b.FlatAppearance.BorderSize = 0
+            $b.Font = New-Object System.Drawing.Font($form.Font, [Drawing.FontStyle]::Bold)
+        }
+        return $b
+    }
+    function New-LinhaBotoes([object[]]$botoes) {
+        $ln = New-Object 'System.Windows.Forms.FlowLayoutPanel'
+        $ln.AutoSize = $true; $ln.FlowDirection = 'LeftToRight'; $ln.WrapContents = $true
+        foreach ($b in $botoes) { $b.Margin = New-Object "$W.Padding"(0, 0, 8, 0); $ln.Controls.Add($b) }
+        return $ln
     }
 
     $pre = Get-PreRequisitos
     if (-not $pre.Ok) {
         [void][System.Windows.Forms.MessageBox]::Show($form,
-            ("Pre-requisitos faltando:`n`n" + ($pre.Faltas -join "`n")),
+            ("Pré-requisitos faltando:`n`n" + ($pre.Faltas -join "`n")),
             'MAC IP Backup', 'OK', 'Warning')
     }
 
     $conta = (Get-IdentidadeAtual).Nome
     $meta = Read-GuiMeta
 
-    # ----- Tab 1: Ativacao -----
-    $t1 = New-Tab '1. Ativar'
-    New-Label $t1 "Conta Windows em uso: $conta" 10 12 600 | Out-Null
-    New-Label $t1 'A conta acima sera a conta da tarefa de backup (o preparo e a senha ficam vinculados a ela).' 10 34 600 | Out-Null
-    New-Label $t1 'Passo 1 - Perfil MAC IP (.json) e chave privada fornecidos:' 10 66 600 | Out-Null
-    $tbPerfil = New-TextBox $t1 '' 10 90 460
-    $tbPerfil.ReadOnly = $true
+    # ----- Tab 1: Ativar (passo 1 de 3 do primeiro uso) -----
+    $t1 = New-Aba '1. Ativar'
+    Add-Linha $t1 (New-Rotulo 'Passo 1 de 3 — Ativação' $true) -1 | Out-Null
+    Add-Linha $t1 (New-Rotulo ("Conta Windows em uso: $conta — é ela quem roda o backup, inclusive sem sessão aberta.")) -1 | Out-Null
+    Add-Linha $t1 (New-Rotulo 'A MAC IP fornece o perfil (.json), a chave privada e a senha Restic pelos canais combinados. Importe os três aqui — a senha nunca vai para o perfil nem para o arquivo de configuração.') -1 | Out-Null
+    Add-Linha $t1 (New-Rotulo 'Perfil MAC IP (.json):') -1 | Out-Null
+    $tbPerfil = New-Caixa 'Caminho do perfil MAC IP importado'
+    $tbPerfil.ReadOnly = $true; $tbPerfil.TabStop = $false
     $script:perfilAtual = $null
-    $btPerfil = New-Button $t1 'Importar perfil...' 480 88
-    $tbChave = New-TextBox $t1 '' 10 128 460
-    $tbChave.ReadOnly = $true
-    $btChave = New-Button $t1 'Chave privada...' 480 126
-    New-Label $t1 'Senha Restic (fornecida pela MAC IP - nunca vai para o perfil nem para o JSON):' 10 164 600 | Out-Null
-    $tbSenha = New-TextBox $t1 '' 10 186 240
+    $btPerfil = New-Botao 'Importar perfil...' 140
+    Add-Linha $t1 (New-LinhaCampo $tbPerfil $btPerfil) 0 | Out-Null
+    Add-Linha $t1 (New-Rotulo 'Chave privada SSH:') -1 | Out-Null
+    $tbChave = New-Caixa 'Caminho da chave privada SSH'
+    $tbChave.ReadOnly = $true; $tbChave.TabStop = $false
+    $btChave = New-Botao 'Escolher chave...' 140
+    Add-Linha $t1 (New-LinhaCampo $tbChave $btChave) 1 | Out-Null
+    Add-Linha $t1 (New-Rotulo 'Senha Restic:') -1 | Out-Null
+    $tbSenha = New-Caixa 'Senha Restic fornecida pela MAC IP'
     $tbSenha.UseSystemPasswordChar = $true
-    $btValidar = New-Button $t1 'Validar e continuar' 10 220 170
-    $lblAtv = New-Label $t1 '' 10 256 600
-    $lblAtv.Size = New-Object System.Drawing.Size(600, 56)   # mensagens longas: ate ~3 linhas
+    Add-Linha $t1 $tbSenha 2 | Out-Null
+    $lblFalta = New-Rotulo 'Ainda falta: perfil, chave privada e senha.'
+    Add-Linha $t1 $lblFalta -1 | Out-Null
+    $btValidar = New-Botao 'Validar e continuar' 0 $true
+    Add-Linha $t1 (New-LinhaBotoes @($btValidar)) 3 | Out-Null
+    $lblAtv = New-Rotulo ''
+    Add-Linha $t1 $lblAtv -1 | Out-Null
+    $script:AtualizaFaltaAtv = {
+        $f = @()
+        if (-not $tbPerfil.Text) { $f += 'perfil' }
+        if (-not $tbChave.Text) { $f += 'chave privada' }
+        if (-not $tbSenha.Text) { $f += 'senha' }
+        $lblFalta.Text = $(if ($f.Count -eq 0) { 'Tudo preenchido — pode validar.' } else { 'Ainda falta: ' + ($f -join ', ') + '.' })
+    }
+    foreach ($ctl in @($tbPerfil, $tbChave, $tbSenha)) { $ctl.Add_TextChanged({ & $script:AtualizaFaltaAtv }) }
     $script:ativacaoToken = $null     # prova de que ESTA combinacao perfil+chave+senha validou
     $script:OpRede = $false           # trava: uma operacao de rede por vez
     $entradasAtv = @($tbPerfil, $btPerfil, $tbChave, $btChave, $tbSenha)
@@ -1692,19 +1764,20 @@ function Show-Gui {
         # captura do que vai ser validado -- NAO o que estiver na tela depois
         $perfilV = $script:perfilAtual; $chaveV = [string]$tbChave.Text; $senhaV = [string]$tbSenha.Text
         $tokenV = Get-TokenAtivacao -Perfil $perfilV -ChavePath $chaveV -SenhaTxt $senhaV
-        $lblAtv.ForeColor = 'DarkBlue'; $lblAtv.Text = 'Validando destino...'
+        $lblAtv.ForeColor = 'DarkBlue'; $lblAtv.Text = 'Validando destino…'
         try {
             $id = Invoke-Assincrono -Funcao 'Test-ConexaoDestino' -Form $form -PrazoMs ([int]$script:ConsultaTimeoutMs + 30000) -Params @{
                 Perfil = $perfilV; ChavePath = $chaveV
                 SenhaRestic = (ConvertTo-SecureString $senhaV -AsPlainText -Force) }
             # so aceita se os dados continuam exatamente os capturados
             if ($tokenV -ne (Get-TokenAtivacao -Perfil $script:perfilAtual -ChavePath $tbChave.Text -SenhaTxt $tbSenha.Text)) {
-                throw 'Os dados mudaram durante a validacao - valide de novo.'
+                throw 'Os dados mudaram durante a validação — valide de novo.'
             }
             $script:ativacaoToken = $tokenV
             $lblAtv.ForeColor = 'DarkGreen'
-            $lblAtv.Text = "Destino validado - identidade do servidor e ID do repositorio conferem ($($id.Substring(0,12))...)."
-            $tabs.SelectedTab = $t2     # avanca so com a prova
+            $lblAtv.Text = "Destino validado — identidade do servidor e ID do repositório conferem ($($id.Substring(0,12))…)."
+            $tabs.SelectedTab = $script:Aba['2. Pasta e horário']     # avanca so com a prova
+            $tbOrigem.Focus()                                       # foco ja cai no proximo dado
         } catch {
             $script:ativacaoToken = $null
             $lblAtv.ForeColor = 'DarkRed'; $lblAtv.Text = "Recusado: $($_.Exception.Message)"
@@ -1714,51 +1787,62 @@ function Show-Gui {
         }
     })
 
-    # ----- Tab 2: Configurar (Pasta e horario -> Revisar e salvar) -----
-    $t2 = New-Tab '2. Configurar'
-    New-Label $t2 'Passo 1 - Escolha a pasta a proteger:' 10 12 600 | Out-Null
-    $tbOrigem = New-TextBox $t2 '' 10 34 460
-    $btOrigem = New-Button $t2 'Escolher pasta...' 480 32
-    New-Label $t2 'Passo 2 - Escolha o horario diario (hora e minuto):' 10 70 600 | Out-Null
+    # ----- Tab 2: Pasta e horario (passos 2 e 3 do primeiro uso) -----
+    $t2 = New-Aba '2. Pasta e horário'
+    Add-Linha $t2 (New-Rotulo 'Passo 2 de 3 — Pasta e horário' $true) -1 | Out-Null
+    Add-Linha $t2 (New-Rotulo 'Pasta a proteger (tudo dentro dela entra no backup):') -1 | Out-Null
+    $tbOrigem = New-Caixa 'Caminho da pasta a proteger'
+    $btOrigem = New-Botao 'Escolher pasta...' 140
+    Add-Linha $t2 (New-LinhaCampo $tbOrigem $btOrigem) 0 | Out-Null
+    Add-Linha $t2 (New-Rotulo 'Horário diário (hora e minuto, no horário deste computador):') -1 | Out-Null
     # Seletor de hora/minuto nativo -- visivel e operavel por mouse e
     # teclado. O valor sai como HH:mm (mesmo formato do backup.json).
     $dtpHora = New-Object 'System.Windows.Forms.DateTimePicker'
     $dtpHora.Format = 'Custom'; $dtpHora.CustomFormat = 'HH:mm'
     $dtpHora.ShowUpDown = $true
-    $dtpHora.Location = New-Object System.Drawing.Point(10, 92)
     $dtpHora.Size = New-Object System.Drawing.Size(110, 26)
+    $dtpHora.AccessibleName = 'Horário diário do backup, formato HH:mm'
+    $dtpHora.TabIndex = 1
     $dtpHora.Value = [DateTime]::Today.AddHours(2).AddMinutes(30)
-    $t2.Controls.Add($dtpHora)
-    $lblPrevHora = New-Label $t2 '' 140 94 470
+    $lblPrevHora = New-Rotulo ''
+    $linhaHora = New-Object 'System.Windows.Forms.FlowLayoutPanel'
+    $linhaHora.AutoSize = $true; $linhaHora.FlowDirection = 'LeftToRight'; $linhaHora.WrapContents = $false
+    $linhaHora.Controls.Add($dtpHora)
+    $lblPrevHora.Margin = New-Object "$W.Padding"(12, 6, 0, 0)
+    $linhaHora.Controls.Add($lblPrevHora)
+    Add-Linha $t2 $linhaHora 1 | Out-Null
     $ckAvanc = New-Object 'System.Windows.Forms.CheckBox'
-    $ckAvanc.Text = 'Opcoes avancadas (exclusoes)'
-    $ckAvanc.Location = New-Object System.Drawing.Point(10, 130)
-    $ckAvanc.Size = New-Object System.Drawing.Size(400, 22)
-    $t2.Controls.Add($ckAvanc)
+    $ckAvanc.Text = 'Opções avançadas (exclusões)'
+    $ckAvanc.AutoSize = $true
+    Add-Linha $t2 $ckAvanc 2 | Out-Null
     $grpAdv = New-Object 'System.Windows.Forms.GroupBox'
-    $grpAdv.Text = 'Exclusoes - uma por linha (ex.: *.tmp; deixe vazio para proteger tudo)'
-    $grpAdv.Location = New-Object System.Drawing.Point(10, 156)
-    $grpAdv.Size = New-Object System.Drawing.Size(600, 104)
-    $grpAdv.Visible = $false
-    $t2.Controls.Add($grpAdv)
+    $grpAdv.Text = 'Exclusões — uma por linha (ex.: *.tmp; vazio protege tudo)'
+    $grpAdv.AutoSize = $true; $grpAdv.Visible = $false
     $tbExcl = New-Object "$W.TextBox"
     $tbExcl.Multiline = $true; $tbExcl.ScrollBars = 'Vertical'
-    $tbExcl.Location = New-Object System.Drawing.Point(12, 24)
-    $tbExcl.Size = New-Object System.Drawing.Size(576, 70)
+    $tbExcl.Dock = 'Fill'; $tbExcl.MinimumSize = New-Object System.Drawing.Size(300, 70)
+    $tbExcl.AccessibleName = 'Lista de exclusões, uma por linha'
     $grpAdv.Controls.Add($tbExcl)
+    Add-Linha $t2 $grpAdv -1 | Out-Null
     $ckAvanc.Add_CheckedChanged({ $grpAdv.Visible = $ckAvanc.Checked })
-    New-Label $t2 'Passo 3 - Revisar e salvar:' 10 272 600 | Out-Null
+    Add-Linha $t2 (New-Rotulo 'Passo 3 de 3 — Revisar e salvar' $true) -1 | Out-Null
+    Add-Linha $t2 (New-Rotulo 'Confira antes de gravar — pasta, horário local e frequência:') -1 | Out-Null
     $tbResumo = New-Object "$W.TextBox"
     $tbResumo.Multiline = $true; $tbResumo.ReadOnly = $true
     $tbResumo.ScrollBars = 'Vertical'
-    $tbResumo.Location = New-Object System.Drawing.Point(10, 294)
-    $tbResumo.Size = New-Object System.Drawing.Size(600, 76)
+    $tbResumo.MinimumSize = New-Object System.Drawing.Size(300, 76)
     $tbResumo.BackColor = [Drawing.Color]::WhiteSmoke
-    $t2.Controls.Add($tbResumo)
-    $btSalvar = New-Button $t2 'Salvar e agendar' 10 380 170
-    $lblCfg = New-Label $t2 '' 10 416 600
-    $lblCfg.Size = New-Object System.Drawing.Size(600, 56)
-    $lblProxSalvo = New-Label $t2 '' 10 476 600
+    $tbResumo.AccessibleName = 'Resumo da configuração a salvar'
+    $tbResumo.TabStop = $false
+    Add-Linha $t2 $tbResumo -1 | Out-Null
+    $btVoltar = New-Botao 'Voltar: Ativação' 150
+    $btSalvar = New-Botao 'Salvar e agendar' 0 $true
+    Add-Linha $t2 (New-LinhaBotoes @($btVoltar, $btSalvar)) 3 | Out-Null
+    $btVoltar.Add_Click({ $tabs.SelectedTab = $script:Aba['1. Ativar'] })   # dados preenchidos ficam
+    $lblCfg = New-Rotulo ''
+    Add-Linha $t2 $lblCfg -1 | Out-Null
+    $lblProxSalvo = New-Rotulo ''
+    Add-Linha $t2 $lblProxSalvo -1 | Out-Null
 
     $script:AtualizaResumo = {
         $destino = $null
@@ -1803,7 +1887,7 @@ function Show-Gui {
         $script:OpRede = $true
         $btSalvar.Enabled = $false; $btValidar.Enabled = $false
         foreach ($c in $entradasAtv) { $c.Enabled = $false }
-        $lblCfg.ForeColor = 'DarkBlue'; $lblCfg.Text = 'Salvando...'
+        $lblCfg.ForeColor = 'DarkBlue'; $lblCfg.Text = 'Salvando…'
         $lblProxSalvo.Text = ''
         $built = $null
         $horario = $dtpHora.Value.ToString('HH:mm')
@@ -1825,11 +1909,11 @@ function Show-Gui {
             }
             # credencial do Windows na janela nativa; cancelar => desfaz a fase 1
             $cred = $host.UI.PromptForCredential('MAC IP Backup',
-                "Senha do Windows da conta $conta (a tarefa roda mesmo sem sessao aberta)",
+                "Senha do Windows da conta $conta (a tarefa roda mesmo sem sessão aberta)",
                 $conta, '')
             if (-not $cred) {
                 $aviso = Remove-ConjuntoNovo -Built $built
-                throw ('Agendamento cancelado - a configuracao anterior continua valendo.' +
+                throw ('Agendamento cancelado — a configuração anterior continua valendo.' +
                     $(if ($aviso) { " $aviso" } else { '' }))
             }
             # FASE 2: publica (COM + arquivo; operacao local)
@@ -1838,15 +1922,17 @@ function Show-Gui {
             $script:perfilAtual = $null; $script:ativacaoToken = $null
             $script:Disparo = $null    # pedido aberto pertencia a config anterior
             $script:UltimaResolucao = $null
+            # a aba Ativar nao exibe dados que ja nao estao mais carregados
+            $tbPerfil.Text = ''; $tbChave.Text = ''; $tbSenha.Text = ''; $lblAtv.Text = ''
             $built = $null
             $lblCfg.ForeColor = 'DarkGreen'
-            $lblCfg.Text = ("Salvo. Agendamento SOLICITADO para $horario na conta $conta - " +
-                'a execucao programada so fica comprovada quando o disparo real aparecer na aba Situacao.')
+            $lblCfg.Text = ("Salvo. Agendamento solicitado para $horario na conta $conta — " +
+                'a execução programada só fica comprovada quando o disparo real aparecer na aba Situação.')
             # Proxima execucao REAL informada pelo Agendador (nao a digitada)
             $proxTxt = '-'
             try { $inf2 = Get-InfoTarefa; if ($inf2) { $proxTxt = Format-DataBR $inf2.Proxima } } catch { }
             $lblProxSalvo.ForeColor = 'DarkBlue'
-            $lblProxSalvo.Text = "Proxima execucao informada pelo Agendador: $proxTxt (horario deste computador)"
+            $lblProxSalvo.Text = "Próximo backup informado pelo Agendador: $proxTxt (horário deste computador)"
             & $script:AtualizarTela
         } catch {
             # Limpeza so aqui se a fase 2 ainda nao assumiu (Publicado):
@@ -1860,31 +1946,45 @@ function Show-Gui {
     })
 
     # ----- Tab 3: Situacao -----
-    $t3 = New-Tab '3. Situacao'
-    $lblStatus = New-Label $t3 'Execucao atual: -' 10 12 600
-    $lblStatus.Font = New-Object System.Drawing.Font($lblStatus.Font, 'Bold')
-    $lblStatus.Size = New-Object System.Drawing.Size(600, 40)
-    $lblUlt = New-Label $t3 'Ultimo backup confirmado: -' 10 54 600
-    $lblProx = New-Label $t3 'Proxima execucao: -' 10 76 600
-    $lblPasta = New-Label $t3 'Pasta protegida: -' 10 98 600
-    $lblPasta.Size = New-Object System.Drawing.Size(600, 36)
-    $lblAcao = New-Label $t3 '' 10 136 600
-    $lblAcao.Size = New-Object System.Drawing.Size(600, 40)
-    $btAgora = New-Button $t3 'Executar agora' 10 182 170
-    $btPausa = New-Button $t3 'Pausar' 190 182 90
-    $btRetomar = New-Button $t3 'Retomar' 290 182 90
-    $btAtual = New-Button $t3 'Atualizar' 390 182 100
-    $lblOp = New-Label $t3 '' 10 220 600
-    $lblOp.Size = New-Object System.Drawing.Size(600, 40)
-    New-Label $t3 'Detalhes (suporte):' 10 264 600 | Out-Null
+    # Tres informacoes DISTINTAS: execucao atual (estado + cor), ultimo
+    # backup bem-sucedido (evidencia duravel) e proximo backup. Uma
+    # mensagem de estado por execucao; IDs e caminhos longos em Detalhes.
+    $t3 = New-Aba '3. Situação'
+    $script:SetDetalhes = {
+        # so reescreve quando o conteudo mudou: nao apaga a selecao de
+        # quem esta copiando os Detalhes nem rouba o foco a cada tick.
+        param([string]$txt)
+        if ($tbDetalhes.Text -cne $txt) { $tbDetalhes.Text = $txt }
+    }
+    $lblStatus = New-Rotulo 'Execução atual: -' $true
+    Add-Linha $t3 $lblStatus -1 | Out-Null
+    $lblUlt = New-Rotulo 'Último backup bem-sucedido: -'
+    Add-Linha $t3 $lblUlt -1 | Out-Null
+    $lblProx = New-Rotulo 'Próximo backup: -'
+    Add-Linha $t3 $lblProx -1 | Out-Null
+    $lblAcao = New-Rotulo ''
+    Add-Linha $t3 $lblAcao -1 | Out-Null
+    $btAgora = New-Botao 'Executar backup agora' 190 $true
+    $btPausa = New-Botao 'Pausar agenda' 140
+    $btRetomar = New-Botao 'Retomar agenda' 140
+    $btAtual = New-Botao 'Atualizar' 110
+    Add-Linha $t3 (New-LinhaBotoes @($btAgora, $btPausa, $btRetomar, $btAtual)) 0 | Out-Null
+    $lblOp = New-Rotulo ''
+    Add-Linha $t3 $lblOp -1 | Out-Null
+    Add-Linha $t3 (New-Rotulo 'Detalhes (suporte técnico — envie à MAC IP quando pedirem):') -1 | Out-Null
     $tbDetalhes = New-Object "$W.TextBox"
     $tbDetalhes.Multiline = $true; $tbDetalhes.ReadOnly = $true
-    $tbDetalhes.ScrollBars = 'Vertical'; $tbDetalhes.WordWrap = $false
+    $tbDetalhes.ScrollBars = 'Both'; $tbDetalhes.WordWrap = $false   # caminhos longos: rolagem horizontal
     $tbDetalhes.Font = New-Object System.Drawing.Font('Consolas', 9)
     $tbDetalhes.BackColor = [Drawing.Color]::White
-    $tbDetalhes.Location = New-Object System.Drawing.Point(10, 286)
-    $tbDetalhes.Size = New-Object System.Drawing.Size(600, 250)
-    $t3.Controls.Add($tbDetalhes)
+    $tbDetalhes.AccessibleName = 'Detalhes técnicos da situação do backup'
+    # ultima linha cresce com a janela: os detalhes ocupam o espaco livre
+    $rowDet = $t3.RowCount
+    $t3.RowCount += 1
+    $t3.RowStyles.Add((New-Object 'System.Windows.Forms.RowStyle'('Percent', 100))) | Out-Null
+    $tbDetalhes.Dock = 'Fill'; $tbDetalhes.Margin = New-Object "$W.Padding"(0, 3, 0, 3)
+    $tbDetalhes.TabStop = $false
+    $t3.Controls.Add($tbDetalhes, 0, $rowDet)
 
     $script:Atualizando = $false
     $script:Disparo = $null            # pedido de "Executar agora" aberto (estado proprio)
@@ -1896,8 +1996,9 @@ function Show-Gui {
             $info = $null; $infoErro = $null
             try { $info = Get-InfoTarefa } catch { $infoErro = $_.Exception.Message }
             $cfgPath = Get-ConfigAtual
+            $origem = ''
             if ($cfgPath -and (Test-Path -LiteralPath $cfgPath -PathType Leaf)) {
-                try { $lblPasta.Text = 'Pasta protegida: ' + (Read-AgenteConfig -Caminho $cfgPath).origem } catch { }
+                try { $origem = [string](Read-AgenteConfig -Caminho $cfgPath).origem } catch { }
             }
             $estado = Get-EstadoAtual
             $res = if ($estado) { Read-UltimoResultado -Estado $estado } else { $null }
@@ -1915,7 +2016,7 @@ function Show-Gui {
                         -InicioUtc ([string]$res.inicio_utc) -FimUtc ([string]$res.fim_utc) } catch { }
             }
             $conf = if ($estado) { Read-Confirmado -Estado $estado -RepositorioId $repoId } else { $null }
-            $lblUlt.Text = 'Ultimo backup confirmado: ' + $(if ($conf) {
+            $lblUlt.Text = 'Último backup bem-sucedido: ' + $(if ($conf) {
                 ('{0} (snapshot {1})' -f (Format-DataBR $conf.fim_utc), ([string]$conf.snapshot).Substring(0,12))
             } else { 'nenhum ainda' })
             # MODELO unico de renderizacao: um pedido de "Executar agora"
@@ -1937,22 +2038,22 @@ function Show-Gui {
             if ($tela.Origem -ne 'generica') {
                 # MODO PEDIDO/RESOLUCAO: todas as linhas no mesmo estado.
                 $lblStatus.ForeColor = $tela.Cor
-                $lblStatus.Text = 'Execucao atual: ' + $tela.Texto
+                $lblStatus.Text = 'Execução atual: ' + $tela.Texto
                 $lblAcao.Text = $tela.Acao
                 $lblOp.ForeColor = $tela.Cor
                 $lblOp.Text = $tela.Mensagem
                 if ($info) {
-                    $lblProx.Text = 'Proxima execucao: ' + $(if ($info.Habilitada) {
-                        ((Format-DataBR $info.Proxima) + ' (horario deste computador)') } else { 'PAUSADO - so Retomar religa' })
-                    $tbDetalhes.Text = Get-DetalhesSuporte -Info $info -Res $res -Conf $conf -Estado $estado -ConfigPath $cfgPath
-                    $btPausa.Enabled = $info.Habilitada
-                    $btRetomar.Enabled = -not $info.Habilitada
+                    $lblProx.Text = 'Próximo backup: ' + $(if ($info.Habilitada) {
+                        ((Format-DataBR $info.Proxima) + ' (horário deste computador)') } else { 'pausado — só “Retomar agenda” religa' })
+                    & $script:SetDetalhes (Get-DetalhesSuporte -Info $info -Res $res -Conf $conf -Estado $estado -ConfigPath $cfgPath -Origem $origem)
+                    # UM dos dois visivel: Pausar OU Retomar conforme o estado
+                    $btPausa.Visible = $info.Habilitada; $btRetomar.Visible = -not $info.Habilitada
                     $btAgora.Enabled = ($info.Estado -ne 4) -and (-not $script:Disparo)
-                    $btAgora.Text = $(if (Test-ResConfirmado -Res $res) { 'Executar agora' } else { 'Executar primeiro backup' })
+                    $btAgora.Text = $(if (Test-ResConfirmado -Res $res) { 'Executar backup agora' } else { 'Executar primeiro backup' })
                 } else {
-                    $lblProx.Text = 'Proxima execucao: (inconclusiva)'
-                    $tbDetalhes.Text = Get-DetalhesSuporte -Info $null -Res $res -Conf $conf -Estado $estado -ConfigPath $cfgPath
-                    $btAgora.Enabled = $false; $btPausa.Enabled = $false; $btRetomar.Enabled = $false
+                    $lblProx.Text = 'Próximo backup: (consulta inconclusiva)'
+                    & $script:SetDetalhes (Get-DetalhesSuporte -Info $null -Res $res -Conf $conf -Estado $estado -ConfigPath $cfgPath -Origem $origem)
+                    $btAgora.Enabled = $false; $btPausa.Visible = $false; $btRetomar.Visible = $false
                 }
                 return
             }
@@ -1960,40 +2061,39 @@ function Show-Gui {
                 # consulta inconclusiva NAO e "sem tarefa" -- exibe o erro.
                 if ($infoErro) {
                     $lblStatus.ForeColor = 'DarkRed'
-                    $lblStatus.Text = 'Execucao atual: consulta do Agendador inconclusiva - ' + $infoErro
-                    $lblProx.Text = 'Proxima execucao: (inconclusiva)'
-                    $lblAcao.Text = 'Acao necessaria: verifique o servico do Agendador de Tarefas.'
+                    $lblStatus.Text = 'Execução atual: consulta do Agendador inconclusiva — ' + $infoErro
+                    $lblProx.Text = 'Próximo backup: (consulta inconclusiva)'
+                    $lblAcao.Text = 'Ação necessária: verifique o serviço do Agendador de Tarefas.'
                 } else {
-                    $lblStatus.ForeColor = 'DarkRed'; $lblStatus.Text = 'Execucao atual: ' + $script:RotulosStatus.sem_tarefa
-                    $lblProx.Text = 'Proxima execucao: -'; $lblAcao.Text = $script:AcaoStatus.sem_tarefa
+                    $lblStatus.ForeColor = 'DarkRed'; $lblStatus.Text = 'Execução atual: ' + $script:RotulosStatus.sem_tarefa
+                    $lblProx.Text = 'Próximo backup: -'; $lblAcao.Text = $script:AcaoStatus.sem_tarefa
                 }
-                $btAgora.Enabled = $false; $btPausa.Enabled = $false; $btRetomar.Enabled = $false
-                $tbDetalhes.Text = Get-DetalhesSuporte -Info $null -Res $res -Conf $conf -Estado $estado -ConfigPath $cfgPath
+                $btAgora.Enabled = $false; $btPausa.Visible = $false; $btRetomar.Visible = $false
+                & $script:SetDetalhes (Get-DetalhesSuporte -Info $null -Res $res -Conf $conf -Estado $estado -ConfigPath $cfgPath -Origem $origem)
                 return
             }
             if (-not $info.DoApp) {
-                $lblStatus.ForeColor = 'DarkRed'; $lblStatus.Text = 'Execucao atual: ' + $script:RotulosStatus.tarefa_estranha
+                $lblStatus.ForeColor = 'DarkRed'; $lblStatus.Text = 'Execução atual: ' + $script:RotulosStatus.tarefa_estranha
                 $lblAcao.Text = $script:AcaoStatus.tarefa_estranha
-                $btAgora.Enabled = $false; $btPausa.Enabled = $false; $btRetomar.Enabled = $false
-                $tbDetalhes.Text = Get-DetalhesSuporte -Info $info -Res $res -Conf $conf -Estado $estado -ConfigPath $cfgPath
+                $btAgora.Enabled = $false; $btPausa.Visible = $false; $btRetomar.Visible = $false
+                & $script:SetDetalhes (Get-DetalhesSuporte -Info $info -Res $res -Conf $conf -Estado $estado -ConfigPath $cfgPath -Origem $origem)
                 return
             }
             $lblStatus.ForeColor = $tela.Cor
-            $lblStatus.Text = 'Execucao atual: ' + $tela.Texto
-            $lblProx.Text = 'Proxima execucao: ' + $(if ($info.Habilitada) {
-                ((Format-DataBR $info.Proxima) + ' (horario deste computador)') } else { 'PAUSADO - so Retomar religa' })
+            $lblStatus.Text = 'Execução atual: ' + $tela.Texto
+            $lblProx.Text = 'Próximo backup: ' + $(if ($info.Habilitada) {
+                ((Format-DataBR $info.Proxima) + ' (horário deste computador)') } else { 'pausado — só “Retomar agenda” religa' })
             $lblAcao.Text = $(if (-not $info.Habilitada -and $tela.Classe -ne 'em_execucao') {
-                'Acao necessaria: a tarefa esta PAUSADA - so "Retomar" religa o agendamento.'
+                'Ação necessária: a agenda está pausada — só “Retomar agenda” religa o agendamento.'
             } else { $tela.Acao })
-            $tbDetalhes.Text = Get-DetalhesSuporte -Info $info -Res $res -Conf $conf -Estado $estado -ConfigPath $cfgPath
-            $btPausa.Enabled = $info.Habilitada
-            $btRetomar.Enabled = -not $info.Habilitada
+            & $script:SetDetalhes (Get-DetalhesSuporte -Info $info -Res $res -Conf $conf -Estado $estado -ConfigPath $cfgPath -Origem $origem)
+            $btPausa.Visible = $info.Habilitada; $btRetomar.Visible = -not $info.Habilitada
             # Sem cliques duplicados enquanto um pedido estiver aberto.
             $btAgora.Enabled = ($info.Estado -ne 4) -and (-not $script:Disparo)
-            $btAgora.Text = $(if (Test-ResConfirmado -Res $res) { 'Executar agora' } else { 'Executar primeiro backup' })
+            $btAgora.Text = $(if (Test-ResConfirmado -Res $res) { 'Executar backup agora' } else { 'Executar primeiro backup' })
         } catch {
             $lblStatus.ForeColor = 'DarkRed'
-            $lblStatus.Text = 'Execucao atual: erro ao ler - ' + $_.Exception.Message
+            $lblStatus.Text = 'Execução atual: erro ao ler — ' + $_.Exception.Message
         } finally { $script:Atualizando = $false }
     }
     $btAgora.Add_Click({
@@ -2019,59 +2119,73 @@ function Show-Gui {
         }
         & $script:AtualizarTela
     })
-    $btPausa.Add_Click({ try { Set-TarefaHabilitada $false; $lblOp.ForeColor='DarkBlue'; $lblOp.Text = 'Tarefa pausada - o disparo agendado nao roda ate retomar.' } catch { $lblOp.ForeColor='DarkRed'; $lblOp.Text = $_.Exception.Message }; & $script:AtualizarTela })
-    $btRetomar.Add_Click({ try { Set-TarefaHabilitada $true; $lblOp.ForeColor='DarkBlue'; $lblOp.Text = 'Tarefa retomada.' } catch { $lblOp.ForeColor='DarkRed'; $lblOp.Text = $_.Exception.Message }; & $script:AtualizarTela })
+    $btPausa.Add_Click({ try { Set-TarefaHabilitada $false; $lblOp.ForeColor='DarkBlue'; $lblOp.Text = 'Agenda pausada — o disparo agendado não roda até “Retomar agenda”.' } catch { $lblOp.ForeColor='DarkRed'; $lblOp.Text = $_.Exception.Message }; & $script:AtualizarTela })
+    $btRetomar.Add_Click({ try { Set-TarefaHabilitada $true; $lblOp.ForeColor='DarkBlue'; $lblOp.Text = 'Agenda retomada — o próximo backup segue o horário.' } catch { $lblOp.ForeColor='DarkRed'; $lblOp.Text = $_.Exception.Message }; & $script:AtualizarTela })
     $btAtual.Add_Click({ & $script:AtualizarTela })
 
     # ----- Tab 4: Restaurar (Data do backup -> Arquivo -> Pasta) -----
-    $t4 = New-Tab '4. Restaurar'
-    New-Label $t4 'Passo 1 - Data do backup (ponto de restauracao):' 10 12 600 | Out-Null
+    $t4 = New-Aba '4. Restaurar'
+    Add-Linha $t4 (New-Rotulo 'Restauração de arquivo — leitura em três etapas' $true) -1 | Out-Null
+    Add-Linha $t4 (New-Rotulo '1. Data do backup (ponto de restauração):') -1 | Out-Null
     $cbSnap = New-Object "$W.ComboBox"
-    $cbSnap.DropDownStyle = 'DropDownList'; $cbSnap.Location = New-Object System.Drawing.Point(10, 34)
-    $cbSnap.Size = New-Object System.Drawing.Size(460, 24); $t4.Controls.Add($cbSnap)
-    $btSnaps = New-Button $t4 'Carregar pontos' 480 32 120
-    New-Label $t4 'Passo 2 - Arquivo do ponto escolhido (somente lista):' 10 70 600 | Out-Null
+    $cbSnap.DropDownStyle = 'DropDownList'
+    $cbSnap.AccessibleName = 'Data do backup, ponto de restauração'
+    $btSnaps = New-Botao 'Carregar pontos' 140
+    Add-Linha $t4 (New-LinhaCampo $cbSnap $btSnaps) 0 | Out-Null
+    Add-Linha $t4 (New-Rotulo '2. Arquivo do ponto escolhido (somente pela lista):') -1 | Out-Null
     $cbArq = New-Object "$W.ComboBox"
     $cbArq.DropDownStyle = 'DropDownList'          # selecao fechada: sem texto livre
-    $cbArq.Location = New-Object System.Drawing.Point(10, 92)
-    $cbArq.Size = New-Object System.Drawing.Size(600, 24); $t4.Controls.Add($cbArq)
-    $lblArqFull = New-Label $t4 'Arquivo escolhido: -' 10 122 600
-    $lblArqFull.Size = New-Object System.Drawing.Size(600, 40)
-    New-Label $t4 'Passo 3 - Pasta de destino (separada e vazia):' 10 166 600 | Out-Null
-    $tbDest = New-TextBox $t4 '' 10 188 460
-    $btDest = New-Button $t4 'Pasta de destino...' 480 186 130
-    $btRest = New-Button $t4 'Restaurar arquivo' 10 224 150
-    $btAbrirDest = New-Button $t4 'Abrir pasta restaurada' 170 224 170
+    $cbArq.AccessibleName = 'Arquivo a restaurar do ponto escolhido'
+    Add-Linha $t4 $cbArq 1 | Out-Null
+    $lblArqFull = New-Rotulo 'Arquivo: -' $true          # nome em destaque
+    Add-Linha $t4 $lblArqFull -1 | Out-Null
+    $lblArqPath = New-Rotulo 'Caminho completo: -'       # caminho sempre acessivel
+    Add-Linha $t4 $lblArqPath -1 | Out-Null
+    Add-Linha $t4 (New-Rotulo '3. Pasta de destino (separada e vazia — o original nunca é sobrescrito):') -1 | Out-Null
+    $tbDest = New-Caixa 'Caminho da pasta de destino da restauração'
+    $btDest = New-Botao 'Pasta de destino...' 150
+    Add-Linha $t4 (New-LinhaCampo $tbDest $btDest) 2 | Out-Null
+    $btRest = New-Botao 'Restaurar arquivo' 160 $true
+    $btAbrirDest = New-Botao 'Abrir pasta restaurada' 180
     $btAbrirDest.Visible = $false
-    $lblRes = New-Label $t4 '' 10 262 600
-    $lblRes.Size = New-Object System.Drawing.Size(600, 56)
-    New-Label $t4 'Detalhes (suporte):' 10 322 600 | Out-Null
+    Add-Linha $t4 (New-LinhaBotoes @($btRest, $btAbrirDest)) 3 | Out-Null
+    $lblRes = New-Rotulo ''
+    Add-Linha $t4 $lblRes -1 | Out-Null
+    Add-Linha $t4 (New-Rotulo 'Detalhes (suporte técnico):') -1 | Out-Null
     $tbRestDet = New-Object "$W.TextBox"
     $tbRestDet.Multiline = $true; $tbRestDet.ReadOnly = $true
-    $tbRestDet.ScrollBars = 'Vertical'; $tbRestDet.WordWrap = $false
+    $tbRestDet.ScrollBars = 'Both'; $tbRestDet.WordWrap = $false     # snapshot/SHA-256 completos
     $tbRestDet.Font = New-Object System.Drawing.Font('Consolas', 9)
     $tbRestDet.BackColor = [Drawing.Color]::White
-    $tbRestDet.Location = New-Object System.Drawing.Point(10, 344)
-    $tbRestDet.Size = New-Object System.Drawing.Size(600, 190)
-    $t4.Controls.Add($tbRestDet)
+    $tbRestDet.AccessibleName = 'Detalhes da restauração: snapshot e SHA-256'
+    $rowRestDet = $t4.RowCount
+    $t4.RowCount += 1
+    $t4.RowStyles.Add((New-Object 'System.Windows.Forms.RowStyle'('Percent', 100))) | Out-Null
+    $tbRestDet.Dock = 'Fill'; $tbRestDet.Margin = New-Object "$W.Padding"(0, 3, 0, 3)
+    $tbRestDet.TabStop = $false
+    $t4.Controls.Add($tbRestDet, 0, $rowRestDet)
     $script:ultimoRestaurado = $null
 
     $script:LimpaSelecaoRest = {
         $script:snaps = @(); $cbSnap.Items.Clear(); $cbArq.Items.Clear()
-        $lblArqFull.Text = 'Arquivo escolhido: -'
+        $lblArqFull.Text = 'Arquivo: -'; $lblArqPath.Text = 'Caminho completo: -'
     }
     $btSnaps.Add_Click({
-        $btSnaps.Enabled = $false; $lblRes.ForeColor = 'DarkBlue'; $lblRes.Text = 'Listando pontos...'
+        $btSnaps.Enabled = $false; $lblRes.ForeColor = 'DarkBlue'; $lblRes.Text = 'Carregando pontos de restauração…'
         $btAbrirDest.Visible = $false
         try {
             $estado = Get-EstadoAtual; $cfgPath = Get-ConfigAtual
-            if (-not $estado -or -not $cfgPath) { throw 'Sem preparo concluido - valide na aba 1 e salve na aba 2.' }
+            if (-not $estado -or -not $cfgPath) { throw 'Sem preparo concluído — valide na aba “Ativar” e salve em “Pasta e horário”.' }
             $snaps = Invoke-Assincrono -Funcao 'Get-Snapshots' -Form $form -PrazoMs ([int]$script:ConsultaTimeoutMs + 30000) -Params @{ Estado = $estado; Config = $cfgPath }
             & $script:LimpaSelecaoRest                       # selecao anterior nunca sobrevive a nova listagem
             $script:snaps = @($snaps)
-            foreach ($s in $script:snaps) { [void]$cbSnap.Items.Add(('{0} - {1}' -f $s.short_id, $s.time)) }
+            # data LOCAL do ponto primeiro; o ID curto vem depois
+            foreach ($s in $script:snaps) { [void]$cbSnap.Items.Add(('{0} — {1}' -f (Format-DataBR $s.time), $s.short_id)) }
             if ($cbSnap.Items.Count -gt 0) { $cbSnap.SelectedIndex = $cbSnap.Items.Count - 1 }
-            $lblRes.ForeColor = 'DarkGreen'; $lblRes.Text = "$($cbSnap.Items.Count) ponto(s) disponivel(is)."
+            $lblRes.ForeColor = 'DarkGreen'
+            $lblRes.Text = $(if ($cbSnap.Items.Count -eq 0) {
+                'Nenhum ponto de restauração encontrado neste destino.'
+            } else { "$($cbSnap.Items.Count) ponto(s) de restauração disponível(is)." })
         } catch {
             & $script:LimpaSelecaoRest                       # listagem falhou -> descarta a selecao
             $lblRes.ForeColor = 'DarkRed'; $lblRes.Text = $_.Exception.Message
@@ -2080,16 +2194,24 @@ function Show-Gui {
     $cbSnap.Add_SelectedIndexChanged({
         if ($cbSnap.SelectedIndex -lt 0) { return }
         $cbArq.Items.Clear()
+        $lblRes.ForeColor = 'DarkBlue'; $lblRes.Text = 'Carregando arquivos do ponto…'
         try {
             $estado = Get-EstadoAtual; $cfgPath = Get-ConfigAtual
             $snap = $script:snaps[$cbSnap.SelectedIndex]
             $arqs = Invoke-Assincrono -Funcao 'Get-ArquivosSnapshot' -Form $form -PrazoMs ([int]$script:ConsultaTimeoutMs + 30000) -Params @{ Estado = $estado; Config = $cfgPath; Snapshot = $snap.id }
             foreach ($a in $arqs) { [void]$cbArq.Items.Add($a) }
             if ($cbArq.Items.Count -gt 0) { $cbArq.SelectedIndex = 0 }
+            $lblRes.ForeColor = 'DarkBlue'
+            $lblRes.Text = $(if ($cbArq.Items.Count -eq 0) { 'Este ponto não contém arquivos.' } else { '' })
         } catch { $cbArq.Items.Clear(); $lblRes.ForeColor = 'DarkRed'; $lblRes.Text = $_.Exception.Message }
     })
     $cbArq.Add_SelectedIndexChanged({
-        $lblArqFull.Text = 'Arquivo escolhido: ' + $(if ($cbArq.SelectedItem) { [string]$cbArq.SelectedItem } else { '-' })
+        # nome do arquivo em destaque; caminho completo logo abaixo
+        if ($cbArq.SelectedItem) {
+            $p = [string]$cbArq.SelectedItem
+            $lblArqFull.Text = 'Arquivo: ' + ([IO.Path]::GetFileName($p.TrimEnd('/','\')))
+            $lblArqPath.Text = 'Caminho completo: ' + $p
+        } else { $lblArqFull.Text = 'Arquivo: -'; $lblArqPath.Text = 'Caminho completo: -' }
     })
     $btDest.Add_Click({
         $dlg = New-Object "$W.FolderBrowserDialog"
@@ -2097,26 +2219,26 @@ function Show-Gui {
         if ($dlg.ShowDialog() -eq 'OK') { $tbDest.Text = $dlg.SelectedPath }
     })
     $btRest.Add_Click({
-        $btRest.Enabled = $false; $lblRes.ForeColor = 'DarkBlue'; $lblRes.Text = 'Restaurando...'
+        $btRest.Enabled = $false; $lblRes.ForeColor = 'DarkBlue'; $lblRes.Text = 'Restaurando…'
         $btAbrirDest.Visible = $false; $script:ultimoRestaurado = $null
         try {
             $estado = Get-EstadoAtual; $cfgPath = Get-ConfigAtual
             $snap = $script:snaps[$cbSnap.SelectedIndex]
             $cfg = Read-AgenteConfig -Caminho $cfgPath
-            if (-not $cbArq.SelectedItem) { throw 'Escolha o arquivo a restaurar na lista.' }
+            if (-not $cbArq.SelectedItem) { throw 'Escolha o arquivo a restaurar na lista (etapa 2).' }
             $alvo = Invoke-Assincrono -Funcao 'Restore-Arquivo' -Form $form -PrazoMs ([int]$script:DumpTimeoutMs + 60000) -Params @{
                 Estado = $estado; Config = $cfgPath; Snapshot = $snap.id
                 Arquivo = $cbArq.SelectedItem; Destino = $tbDest.Text; Origem = $cfg.origem }
             $sha = (Get-FileHash -LiteralPath $alvo -Algorithm SHA256).Hash.ToLower()
             $script:ultimoRestaurado = $alvo
             $lblRes.ForeColor = 'DarkGreen'
-            $lblRes.Text = "Restaurado com sucesso: $alvo - o original NAO foi sobrescrito."
+            $lblRes.Text = "Restaurado com sucesso: $alvo — o original NÃO foi sobrescrito."
             # ID do snapshot + SHA-256 do arquivo vao para Detalhes --
             # a mensagem principal nao e cortada.
             $tbRestDet.Text = (@(
                 'arquivo restaurado: ' + $alvo
                 'snapshot: ' + [string]$snap.id
-                ('sha-256: ' + $sha + '   (confira com o original na pasta protegida)')
+                ('sha-256: ' + $sha + '   (mesmo hash do arquivo no backup — comprove se necessário)')
                 'destino: ' + $tbDest.Text
             ) -join "`r`n")
             $btAbrirDest.Visible = $true
@@ -2126,7 +2248,7 @@ function Show-Gui {
     $btAbrirDest.Add_Click({
         if (-not (Open-PastaRestaurada -Alvo $script:ultimoRestaurado)) {
             $lblRes.ForeColor = 'DarkRed'
-            $lblRes.Text = 'Nao foi possivel abrir a pasta agora - o arquivo continua restaurado no destino.'
+            $lblRes.Text = 'Não foi possível abrir a pasta agora — o arquivo continua restaurado no destino.'
         }
     })
 
@@ -2143,11 +2265,20 @@ function Show-Gui {
     $timer.Start()
     $form.Add_FormClosed({ try { $timer.Stop(); $timer.Dispose() } catch { } })
 
-    $tabs.Add_SelectedIndexChanged({ if ($tabs.SelectedTab -eq $t3) { & $script:AtualizarTela } })
+    # Por aba: Enter aciona a acao segura da tela e o foco cai no
+    # primeiro dado -- o fluxo inteiro fecha so com teclado.
+    $tabs.Add_SelectedIndexChanged({
+        $form.AcceptButton = $null
+        if ($tabs.SelectedTab -eq $script:Aba['1. Ativar']) { $form.AcceptButton = $btValidar; $btPerfil.Focus() }
+        elseif ($tabs.SelectedTab -eq $script:Aba['2. Pasta e horário']) { $form.AcceptButton = $btSalvar; $tbOrigem.Focus() }
+        elseif ($tabs.SelectedTab -eq $script:Aba['3. Situação']) { $form.AcceptButton = $btAtual; $btAgora.Focus(); & $script:AtualizarTela }
+        elseif ($tabs.SelectedTab -eq $script:Aba['4. Restaurar']) { $form.AcceptButton = $btSnaps; $btSnaps.Focus() }
+    })
     & $script:AtualizarTela
     # Com configuracao valida, abre DIRETO na Situacao (sem o tecnico
     # procurar aba); sem config, comeca pela Ativacao.
-    if (Test-ConfiguracaoPronta) { $tabs.SelectedTab = $t3 }
+    if (Test-ConfiguracaoPronta) { $tabs.SelectedTab = $script:Aba['3. Situação'] }
+    else { $form.AcceptButton = $btValidar }
     [void]$form.ShowDialog()
 }
 

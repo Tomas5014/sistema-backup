@@ -103,30 +103,40 @@ faz **pela interface**, sem terminal, JSON ou Agendador.
 
 1. Abrir **MAC IP Backup** no Menu Iniciar, **na conta dedicada** —
    preparo, senha DPAPI e tarefa ficam nessa conta.
-2. **Aba 1 — Validar e continuar:** *Importar perfil*, *Chave privada*,
-   *Senha Restic* → um clique só. Avança **somente** quando a identidade
-   do servidor e o ID do repositório conferem; mudar perfil, chave ou
-   senha depois exige nova validação.
-3. **Aba 2 — Escolher pasta e horário → Revisar e salvar:** o horário é
+2. **Aba *Ativar* (passo 1 de 3):** *Importar perfil*, *Chave privada*,
+   *Senha Restic* → um clique só em *Validar e continuar*. A linha
+   "Ainda falta:" diz o que falta; a origem dos dados (perfil, chave e
+   senha pelos canais da MAC IP) está explicada na própria aba. Avança
+   **somente** quando a identidade do servidor e o ID do repositório
+   conferem; mudar perfil, chave ou senha depois exige nova validação.
+3. **Aba *Pasta e horário* (passos 2 e 3 de 3):** *Voltar: Ativação*
+   preserva o preenchido. O horário é
    um **seletor `HH:mm` com setas** (mouse e teclado), com a prévia
    *"Todos os dias às HH:mm, no horário deste computador"* visível antes
    de salvar — a TextBox de uma linha que não aceitava edição na VM foi
    substituída. Exclusões ficam recolhidas em **Opções avançadas**. A
-   caixa de resumo mostra pasta, horário, destino e conta **antes** do
-   clique; a senha Windows é pedida na janela nativa; depois de gravado,
-   a tela mostra a **próxima execução informada pelo Agendador** em
-   data/hora local brasileira — o `DateTime` local do COM chega **tipado**
-   até a formatação (uma tarefa das 13:26 aparece 13:26, nunca 10:26).
+   caixa de resumo mostra pasta, horário local, **frequência diária**,
+   destino e conta **antes** do clique; a senha Windows é pedida na
+   janela nativa; depois de gravado, a tela mostra o **próximo backup
+   informado pelo Agendador** em data/hora local brasileira — o
+   `DateTime` local do COM chega **tipado**
+   até a formatação (uma tarefa das 13:26 aparece 13:26, nunca 10:26) —
+   e abre a **Situação**.
    Salvar com a tarefa **pausada preserva a
-   pausa** (só *Retomar* religa); cancelar a credencial ou uma falha
-   preserva a configuração e a tarefa anteriores.
-4. **Aba 3 — Situação:** com configuração válida a janela **abre direto
-   nesta aba**. Mostra em linhas separadas a **execução atual** (o
-   sucesso de outro disparo nunca conta como novo), o **último backup
-   confirmado** com data/hora e a **próxima execução**, com **ação
-   necessária** — atualizadas sozinhas a cada 15 s, sem o técnico clicar
-   (o aviso de disparo solicitado cede lugar ao estado real). IDs,
-   conta, SID e versões ficam em **Detalhes**. O botão *Executar agora*
+   pausa** (só *Retomar agenda* religa); cancelar a credencial ou uma
+   falha preserva a configuração e a tarefa anteriores.
+4. **Aba *Situação*:** com configuração válida a janela **abre direto
+   nesta aba**. Três informações distintas em linhas próprias:
+   **Execução atual** (o sucesso de outro disparo nunca conta como
+   novo), **Último backup bem-sucedido** com data/hora e **Próximo
+   backup**, com **ação necessária** — atualizadas sozinhas a cada 15 s,
+   sem o técnico clicar (o aviso de disparo solicitado cede lugar ao
+   estado real; os Detalhes só regravam quando o conteúdo muda, sem
+   apagar a seleção nem roubar o foco). IDs, conta, SID, versões e a
+   pasta protegida ficam em **Detalhes** (rolagem horizontal para
+   caminhos longos). **Executar backup agora** é o botão em destaque;
+   **Pausar agenda** ou **Retomar agenda** aparece conforme o estado.
+   O botão *Executar backup agora*
    abre um **pedido com estado próprio**: antes de solicitar, a tela
    registra o último `LastRunTime`, as instâncias em execução e o
    `inicio_utc` do resultado que já existia — só o que vier **depois**
@@ -134,8 +144,8 @@ faz **pela interface**, sem terminal, JSON ou Agendador.
    **mesma decisão** alimenta a linha "Execução atual", a cor, a ação
    necessária, a mensagem sob os botões e a disponibilidade do botão —
    nunca `Aguardando início` embaixo com `Backup concluído` em cima
-   (ex.: "Execução atual: aguardando início" + "Último backup
-   confirmado: 16/11 às 13:26"). Um `LastRunTime` novo antes do JSON
+   (ex.: "Execução atual: Aguardando início" + "Último backup
+   bem-sucedido: 16/11/2026 13:26"). Um `LastRunTime` novo antes do JSON
    continua acompanhando — `LastTaskResult` **nunca** identifica a
    tentativa: um código de falha antigo não encerra o pedido como falha
    e um JSON que já existia no clique não encerra como sucesso, mesmo
@@ -150,13 +160,16 @@ faz **pela interface**, sem terminal, JSON ou Agendador.
 5. Prova sem sessão: encerrar a sessão antes do horário, religar e
    conferir *BACKUP CONCLUIDO* (resultado vinculado ao disparo) ou a
    ação indicada.
-6. **Aba 4 — Restaurar:** três passos — *Data do backup → Arquivo →
-   Pasta de destino*. O nome **completo** do arquivo aparece na tela;
-   destino separado e vazio (o original nunca é sobrescrito); vínculos
+6. **Aba *Restaurar*:** três etapas numeradas — *1. Data do backup →
+   2. Arquivo → 3. Pasta de destino*. O ponto mostra a **data local**
+   primeiro e o ID depois; o **nome do arquivo** escolhido aparece em
+   destaque com o **caminho completo** logo abaixo; carregando, lista
+   vazia e erro são estados distintos na linha de mensagem.
+   Destino separado e vazio (o original nunca é sobrescrito); vínculos
    SSH/destino reconferidos antes de qualquer acesso. Após sucesso
    confirmado: **Abrir pasta restaurada** e conferir snapshot + SHA-256
    em **Detalhes** — comparar o SHA-256 do arquivo restaurado com o
-   original.
+   original (o **segundo** arquivo selecionado também deve conferir).
 7. **Sucesso → falha com a janela fechada:** com a GUI fechada, forçar
    um disparo que falhe (ex.: pausar o SFTP ou cortar a rede no
    horário) depois de um sucesso confirmado. Ao reabrir, a tela deve
@@ -187,11 +200,17 @@ faz **pela interface**, sem terminal, JSON ou Agendador.
     três casos (presente, ausente renomeando o `ssh.exe`, e um
     `ssh.exe` falso no PATH) — a mensagem nunca pode anunciar ausência
     numa consulta inconclusiva.
-11. **Escalas de tela:** repetir a abertura da janela com DPI em
-    **100 %, 125 % e 150 %** (e por acesso remoto, se for o caso) —
-    campos, botões, caminhos e mensagens longas não podem cortar nem se
-    sobrepor, e o seletor de horário continua operável por mouse e
-    teclado.
+11. **Aceite visual e de interação:** capturar **antes e depois** das
+    abas Situação, Configuração (Pasta e horário) e Restauração; repetir
+    com DPI em **100 %, 125 % e 150 %** e por **acesso remoto** — as
+    telas usam `TableLayoutPanel`/`FlowLayoutPanel` sem coordenadas
+    fixas, então campos, botões, caminhos longos e mensagens devem
+    fluir sem cortar nem se sobrepor. Percorrer o fluxo **só com
+    teclado** (Tab, setas, Enter — o `AcceptButton` de cada aba executa
+    a ação segura) e conferir o foco visível. Usar **caminhos longos e
+    dados fictícios**; cobrir também **ausência de configuração**,
+    **espera pelo início** e **falha de backup** — avisos e botões
+    precisam continuar legíveis.
 12. **Atalho falho → diagnóstico:** se a janela não abrir pelo Menu
     Iniciar, a mensagem de erro informa a causa e o arquivo
     `diagnostico-macip.txt` (sem senhas nem conteúdo de chave) fica
@@ -200,13 +219,13 @@ faz **pela interface**, sem terminal, JSON ou Agendador.
     `%ProgramData%\MacipBackup` (configuração, estado, senha protegida)
     **mas desabilita a tarefa** — é a primeira ação do
     `Desinstalar-Tarefa.ps1`. Depois de instalar a build nova, abrir a
-    interface, conferir a aba Situação e usar **Retomar** se o
+    interface, conferir a aba Situação e usar **Retomar agenda** se o
     agendamento deveria estar ativo (o ensaio de disparo após reinício
     continua agendado para 17/11 às 13:26 — não alterar a VM nem o
     repositório SFTP de laboratório até lá).
 14. **Horários na tela (fuso local):** uma tarefa agendada para 13:26
     no horário do computador aparece **13:26** em todos os lugares —
-    "Próxima execução" logo após salvar e na aba Situação (com e sem
+    "Próximo backup" logo após salvar e na aba Situação (com e sem
     pedido de *Executar agora* aberto) e "Último disparo registrado"
     em Detalhes. `LastRunTime`/`NextRunTime` chegam **tipados** do COM
     (`DateTime` local) até a formatação — nunca convertidos a texto e

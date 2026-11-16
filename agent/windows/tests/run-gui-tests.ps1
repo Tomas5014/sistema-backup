@@ -51,9 +51,9 @@ try {
     # o controle WinForms de verdade so acontece no Windows.)
     $guiSrc = Get-Content -LiteralPath $gui -Raw
     foreach ($alvo in @(
-        @('New-Label',   'System.Windows.Forms.Label'),
-        @('New-Button',  'System.Windows.Forms.Button'),
-        @('New-TextBox', 'System.Windows.Forms.TextBox'))) {
+        @('New-Rotulo',  'System.Windows.Forms.Label'),
+        @('New-Botao',   'System.Windows.Forms.Button'),
+        @('New-Caixa',   'System.Windows.Forms.TextBox'))) {
         $fn = [regex]::Escape($alvo[0]); $tipo = [regex]::Escape($alvo[1])
         ok ($guiSrc -match "(?s)function\s+$fn\([^)]*\)\s*\{[^}]*New-Object '$tipo'") "$($alvo[0]): cria o tipo esperado $($alvo[1])"
     }
@@ -648,10 +648,10 @@ exit 0
     $esperadoIso = ([DateTimeOffset]::Parse($iso, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal)).LocalDateTime.ToString('dd/MM/yyyy HH:mm')
     eq (Format-DataBR $iso) $esperadoIso 'data BR: ISO UTC convertido p/ horario local'
     eq (Format-DataBR ([DateTime]'0001-01-01')) '-' 'data BR: sentinela COM -> -'
-    eq (Format-PreviaHorario '13:26') 'Todos os dias as 13:26, no horario deste computador.' 'previa do agendamento diario'
-    eq (Format-PreviaHorario '25:00') 'Horario invalido (use HH:mm).' 'previa: horario invalido'
+    eq (Format-PreviaHorario '13:26') 'Todos os dias às 13:26, no horário deste computador.' 'previa do agendamento diario'
+    eq (Format-PreviaHorario '25:00') 'Horário inválido (use HH:mm).' 'previa: horario invalido'
     $resumo = Get-ResumoConfiguracao -Origem 'D:\Dados' -HHmm '13:26' -Destino 'sftp:u@h:/dados/x' -Conta 'LAB\operador'
-    ok ($resumo -match 'Pasta protegida: D:\\Dados' -and $resumo -match 'todos os dias as 13:26' -and $resumo -match 'LAB\\operador') 'resumo: pasta+horario+conta presentes'
+    ok ($resumo -match 'Pasta protegida: D:\\Dados' -and $resumo -match 'todos os dias às 13:26' -and $resumo -match 'Frequência: diária' -and $resumo -match 'LAB\\operador') 'resumo: pasta+horario+frequencia+conta presentes'
     ok ((Get-ResumoConfiguracao -Origem '' -HHmm '13:26' -Destino '' -Conta 'c') -match 'reusa o destino atual') 'resumo: sem perfil novo -> reusa destino atual'
 
     # ---- horarios na tela: LOCAL do Agendador x UTC do agente ----
@@ -679,7 +679,7 @@ exit 0
             $infoProx = [pscustomobject]@{ Conta='x'; Codigo=0; Ultima=$agUlt; Proxima=$agProx }
             eq (Format-DataBR $infoProx.Proxima) '18/11/2026 13:26' 'horario SP: Proxima execucao tipada -> 13:26'
             $detT = Get-DetalhesSuporte -Info $infoProx -Res $null -Conf $null -Estado 'E' -ConfigPath 'C'
-            ok ($detT -match 'ultimo disparo registrado: 17/11/2026 13:26') 'horario SP: Detalhes mostra LastRunTime local (13:26)'
+            ok ($detT -match 'último disparo registrado: 17/11/2026 13:26') 'horario SP: Detalhes mostra LastRunTime local (13:26)'
             # o pedido tambem nao desloca: a referencia tipada e
             # interpretada como LOCAL na comparacao com inicio_utc (UTC)
             $pedH = New-PedidoDisparo -InfoTarefa $infoProx -Res $null
@@ -725,12 +725,32 @@ exit 0
     ok ($guiSrc.Contains('DateTimePicker') -and $guiSrc.Contains('ShowUpDown = $true') -and $guiSrc.Contains("CustomFormat = 'HH:mm'")) 'seletor de horario: DateTimePicker HH:mm com ShowUpDown'
     ok (-not $guiSrc.Contains('$tbHora')) 'seletor de horario: TextBox livre removida (bug da linha na VM)'
     ok ($guiSrc.Contains('System.Windows.Forms.Timer')) 'auto-atualizacao: Timer da Situacao presente'
-    ok ($guiSrc.Contains('Opcoes avancadas')) 'exclusoes em Opcoes avancadas (colapsavel)'
+    ok ($guiSrc.Contains('Opções avançadas')) 'exclusoes em Opcoes avancadas (colapsavel)'
     ok ($guiSrc.Contains('Abrir pasta restaurada')) 'restaurar: botao Abrir pasta restaurada'
     ok ($guiSrc.Contains('Write-Diagnostico') -and $guiSrc.Contains('diagnostico-macip.txt')) 'lancamento: diagnostico sem segredos'
     ok ($guiSrc.Contains('Test-ConfiguracaoPronta')) 'abertura direta na Situacao: decisao isolada'
     ok ($guiSrc.Contains('Get-DetalhesSuporte')) 'detalhes de suporte: bloco isolado'
     ok ($guiSrc -match "AutoScaleMode = .Dpi.") 'layout: escala de DPI (100/125/150%)'
+
+    # ---- contrato do refinamento visual (estatico) ----
+    ok ($guiSrc.Contains('TableLayoutPanel') -and $guiSrc.Contains('FlowLayoutPanel')) 'layout: TableLayout/Flow substituem coordenadas fixas'
+    ok (-not ($guiSrc -match '\.Location = ')) 'layout: nenhuma coordenada fixa (.Location) nas telas'
+    ok ($guiSrc.Contains('AccessibleName')) 'a11y: rotulos acessiveis nos campos'
+    ok ($guiSrc.Contains('TabIndex')) 'a11y: ordem de Tab explicita'
+    ok ($guiSrc.Contains('AcceptButton')) 'a11y: Enter aciona a acao segura de cada aba'
+    ok ($guiSrc.Contains('MinimumSize')) 'layout: janela redimensionavel com tamanho minimo'
+    ok ($guiSrc.Contains('Passo 1 de 3') -and $guiSrc.Contains('Passo 2 de 3') -and $guiSrc.Contains('Passo 3 de 3')) 'primeiro uso: tres passos indicados'
+    ok ($guiSrc.Contains('Ainda falta:')) 'primeiro uso: diz o que ainda falta'
+    ok ($guiSrc.Contains('Voltar: Ativação')) 'primeiro uso: Voltar sem perder dados'
+    ok ($guiSrc.Contains('Executar backup agora')) 'situacao: acao principal destacada'
+    ok ($guiSrc.Contains('Último backup bem-sucedido') -and $guiSrc.Contains('Próximo backup') -and $guiSrc.Contains('Execução atual')) 'situacao: tres informacoes distintas'
+    ok ($guiSrc.Contains('Pausar agenda') -and $guiSrc.Contains('Retomar agenda')) 'situacao: Pausar/Retomar agenda'
+    ok ($guiSrc.Contains('Data do backup') -and $guiSrc.Contains('Pasta de destino') -and $guiSrc.Contains('Arquivo do ponto')) 'restaurar: tres etapas na ordem'
+    ok ($guiSrc.Contains('Caminho completo:')) 'restaurar: caminho completo acessivel'
+    ok ($guiSrc.Contains('Nenhum ponto de restauração')) 'restaurar: estado de lista vazia distinto'
+    ok ($guiSrc.Contains('SetDetalhes')) 'auto-atualizacao: detalhes so regravam quando mudam (preserva foco/selecao)'
+    $bytes = [IO.File]::ReadAllBytes($gui)
+    ok ($bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) 'codificacao: UTF-8 com BOM (PS 5.1 le os acentos)'
 
     # ================= pedido de "Executar agora" =================
     # REPRODUCAO OBRIGATORIA (bug da tela): backup anterior bem-sucedido
@@ -877,7 +897,7 @@ exit 0
     # contrato estatico do pedido
     ok ($guiSrc.Contains('New-PedidoDisparo') -and $guiSrc.Contains('Update-PedidoDisparo')) 'pedido: helpers separados e testaveis'
     ok ($guiSrc.Contains('UltimaRef') -and $guiSrc.Contains('InstRef') -and $guiSrc.Contains('ResInicioRef')) 'pedido: referencia completa antes do Run'
-    ok ($guiSrc.Contains('nao_confirmado') -and $guiSrc.Contains('aguardando inicio')) 'pedido: estados aguardando/nao_confirmado presentes'
+    ok ($guiSrc.Contains('nao_confirmado') -and $guiSrc.Contains('Aguardando início')) 'pedido: estados aguardando/nao_confirmado presentes'
     ok ($guiSrc.Contains('if ($script:Disparo) { return }')) 'pedido: clique repetido bloqueado enquanto ha pedido aberto'
     ok (-not $guiSrc.Contains("-like 'Disparo*'")) 'pedido: classificacao generica nao dirige mais a linha do pedido'
     ok ($guiSrc.Contains('Get-TelaExecucao') -and $guiSrc.Contains('UltimaResolucao')) 'pedido: modelo unico + resolucao persistida'
@@ -895,7 +915,7 @@ exit 0
     $agSrc = Get-Content -LiteralPath $script:AgentePath -Raw
     ok ($agSrc.Contains('Sysnative\OpenSSH\ssh.exe') -and $agSrc.Contains('Caminho = $canonico')) 'agente: Sysnative consultado, caminho aprovado canonico'
     ok ($agSrc.Contains('Get-SshStatus')) 'agente: status OpenSSH separado (ausente vs incompativel)'
-    ok ($guiSrc.Contains('INCOMPATIVEL') -and $guiSrc.Contains('Get-SshStatus')) 'ativacao: distingue ausente de incompativel'
+    ok ($guiSrc.Contains('incompatível') -and $guiSrc.Contains('Get-SshStatus')) 'ativacao: distingue ausente de incompativel'
 
     # Restore-Arquivo: destino = origem / dentro da origem / junction
     throws { Restore-Arquivo -Estado $estado -Config $b1.Config -Snapshot ('c'*64) -Arquivo '/o/amostra.txt' -Destino $origem -Origem $origem } 'restaurar: destino = origem recusado'

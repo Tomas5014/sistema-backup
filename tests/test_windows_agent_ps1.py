@@ -120,7 +120,7 @@ class TestWindowsAgentPs1(unittest.TestCase):
         self.assertIn("Get-DetalhesSuporte", fonte)
         self.assertIn("Test-ConfiguracaoPronta", fonte)
         # exclusoes em Opcoes avancadas; janela de credencial nativa mantida
-        self.assertIn("Opcoes avancadas", fonte)
+        self.assertIn("Opções avançadas", fonte)
         # restauracao: abrir pasta restaurada apos sucesso
         self.assertIn("Abrir pasta restaurada", fonte)
         # lancamento falho -> diagnostico sem segredos
@@ -139,6 +139,18 @@ class TestWindowsAgentPs1(unittest.TestCase):
         self.assertIn("if ($script:Disparo) { return }", fonte)
         # layout que acompanha a escala de DPI
         self.assertIn("AutoScaleMode", fonte)
+        # refinamento visual: sem coordenadas fixas, um acento, a11y,
+        # tres passos do primeiro uso e UTF-8 com BOM (acentos no PS 5.1)
+        self.assertIn("TableLayoutPanel", fonte)
+        self.assertIn("FlowLayoutPanel", fonte)
+        self.assertNotIn(".Location = ", fonte)
+        self.assertIn("AccessibleName", fonte)
+        self.assertIn("TabIndex", fonte)
+        self.assertIn("Passo 1 de 3", fonte)
+        self.assertIn("Executar backup agora", fonte)
+        self.assertIn("Último backup bem-sucedido", fonte)
+        self.assertTrue(fonte.startswith("\ufeff"),
+                        "GUI deve ser UTF-8 com BOM para o PS 5.1 ler os acentos")
 
     def test_contrato_instalador(self):
         """Contrato estatico do instalador NSIS."""

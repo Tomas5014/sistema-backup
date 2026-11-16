@@ -2088,3 +2088,63 @@ da VM) e a exibicao em PS 5.1 seguem para o aceite na VM (roteiro
 4b.14). Instalador NAO recompilado (sem makensis/payload). Ensaio
 pos-reinicio mantido para 17/11 13:26 — VM, tarefa do laboratorio e
 repositorio SFTP nao tocados.
+
+## Revisao 16 — refinamento visual e de uso da interface (Operate)
+
+Pedido: o tecnico configura, acompanha e restaura sem terminal; telas com
+portugues acentuado, hierarquia clara, layout que acomoda redimensionar,
+textos longos e rolagem, ordem de Tab, foco e rotulos acessiveis.
+
+Decisao: WinForms + PS 5.1 preservados; nenhuma dependencia nova; SFTP,
+credenciais, agendamento, correlacao dos disparos, horario local e
+protecao contra sobrescrita intocados.
+
+Mudancas por tela (`agent/windows/gui/MacipBackup-Gui.ps1`):
+
+- Sistema visual: fonte Segoe UI 9, superficie neutra (250,250,250), UM
+  acento (0,120,215) so na acao principal de cada aba; estado sempre com
+  cor + texto; janela redimensionavel (MinimumSize 660x560, AutoScale Dpi).
+  Abas viraram `TableLayoutPanel` em coluna unica com linhas AutoSize
+  (`New-Aba`/`Add-Linha`/`New-Rotulo`/`New-Caixa`/`New-Botao`/
+  `New-LinhaCampo`/`New-LinhaBotoes`) — ZERO `.Location` fixo restante.
+- Primeiro uso em 3 passos: `1. Ativar` (passo 1/3 — explica de onde vem
+  perfil/chave/senha e a linha "Ainda falta:" diz o que falta); `2. Pasta
+  e horario` (passos 2/3 e 3/3 — botao "Voltar: Ativacao" preserva o
+  preenchido; resumo mostra pasta, horario local, frequencia diaria,
+  destino e conta; exclusoes seguem em Opcoes avancadas).
+- Situacao: tres informacoes distintas — `Execucao atual`, `Ultimo
+  backup bem-sucedido`, `Proximo backup`; `Executar backup agora` em
+  destaque; `Pausar agenda` OU `Retomar agenda` visivel conforme o
+  estado; pasta protegida moveu para Detalhes (rolagem horizontal p/
+  caminhos longos); uma mensagem de estado por execucao (modelo
+  `Get-TelaExecucao` intacto); detalhes so regravam quando o conteudo
+  muda (`SetDetalhes`) — nao apagam selecao nem roubam foco a cada tick.
+- Restaurar: tres etapas numeradas; pontos mostram a DATA LOCAL antes do
+  ID; nome do arquivo em destaque + `Caminho completo:` sempre visivel;
+  carregando/lista vazia/erro sao estados distintos; `Restaurar arquivo`
+  em destaque; `Abrir pasta restaurada` apos sucesso; snapshot + SHA-256
+  em Detalhes.
+- Interacao: `TabIndex` explicito via `Add-Linha`, `AcceptButton` por
+  aba (Enter aciona a acao segura), foco cai no primeiro dado ao trocar
+  de aba, `AccessibleName` nos campos, `TabStop=$false` nas caixas
+  somente-leitura; estado stale pos-salvar limpo (campos da aba Ativar
+  esvaziam junto com a prova descartada).
+- Textos: toda a interface em portugues com acentos — o arquivo virou
+  UTF-8 COM BOM (PS 5.1 so interpreta UTF-8 assim; header do arquivo
+  atualizado). Jargao reduzido ("Restic codigo 3" -> "nem todo arquivo
+  lido" nos rotulos).
+
+Verificacao: GUI **283 ok, 0 falha** (1 pulado: COM real fora do
+Windows) — inclui 17 asserts novos do contrato visual (layout sem
+coordenadas, a11y, passos, estados, BOM); agente **150 ok, 0 falha**;
+`unittest test_windows_agent_ps1` **5/5** (contrato Python atualizado:
+Opções avançadas, BOM, TableLayout); `git diff --check` limpo; detector
+Impeccable manual sobre o .ps1: 0 achados (sem regras para UI nativa —
+registrado como nao aplicavel).
+
+Separacao de prova: tudo simulado/estatico — NAO comprova layout. Aceite
+visual PENDENTE na VM: antes/depois das tres telas, 100/125/150% de
+escala, fluxo so com teclado e por acesso remoto, caminhos longos,
+ausencia de config, espera e falha (roteiro 4b.11 reescrito). Instalador
+NAO recompilado (sem makensis/payload). Ensaio pos-reinicio mantido para
+17/11 13:26 — VM, tarefa do laboratorio e repositorio SFTP nao tocados.
