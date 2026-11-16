@@ -701,7 +701,8 @@ exit 0
     # REPRODUCAO OBRIGATORIA (bug da tela): backup anterior bem-sucedido
     # -> clique -> Agendador ainda devolve dados anteriores -> disparo
     # novo observado -> novo resultado. A tela NUNCA pode anunciar o
-    # sucesso antigo como resultado do pedido recem-feito.
+    # sucesso antigo como resultado do pedido recem-feito -- nem na
+    # linha do pedido nem na linha principal "Execucao atual".
 
     function New-InfoFalsa {
         param($Ultima = $null, [int]$Estado = 1, [int]$Codigo = 0, $Insts = @())
@@ -709,80 +710,139 @@ exit 0
                                  Proxima = ''; Codigo = $Codigo; Conta = 'x'; DoApp = $true
                                  Instancias = @($Insts) }
     }
+    # Fixture independente de fuso: Ultima (COM) e HORA LOCAL da maquina;
+    # inicio_utc e UTC de verdade. As duas descrevem o MESMO instante.
+    # t1 = instante do clique: a execucao nova comeca DEPOIS dele (o
+    # vinculo exige inicio_utc >= PedidoUtc).
     $agora = [DateTimeOffset]::UtcNow
+    $t0 = [DateTimeOffset]::Now.AddDays(-1)      # execucao anterior
+    $t1 = [DateTimeOffset]::Now                  # execucao do pedido (agora)
+    function Iso-Utc { param($d) return $d.UtcDateTime.ToString('o') }
+    function Hora-Local { param($d) return $d.ToString('yyyy-MM-dd HH:mm:ss') }
     $resAntigo = [pscustomobject]@{ status = 'sucesso'; codigo_restic = 0; snapshot = $snapOk
-                                    inicio_utc = '2026-11-16T13:26:05Z'; fim_utc = '2026-11-16T13:27:00Z' }
+                                    inicio_utc = (Iso-Utc $t0.AddSeconds(5)); fim_utc = (Iso-Utc $t0.AddMinutes(1)) }
+    $resNovo = [pscustomobject]@{ status = 'sucesso'; codigo_restic = 0; snapshot = ('b'*64)
+                                  inicio_utc = (Iso-Utc $t1.AddSeconds(2)); fim_utc = (Iso-Utc $t1.AddMinutes(1)) }
+    $resFalha = [pscustomobject]@{ status = 'falha'; codigo_restic = 1; snapshot = $null
+                                   inicio_utc = (Iso-Utc $t1.AddSeconds(2)); fim_utc = (Iso-Utc $t1.AddMinutes(1)) }
 
-    # 1) sucesso anterior + clique + Agendador devolve os dados ANTIGOS
-    #    -> aguardando (NUNCA concluido)
-    $infoAnt = New-InfoFalsa -Ultima '2026-11-16 13:26:00' -Codigo 0
-    $ped = New-PedidoDisparo -InfoTarefa $infoAnt
-    eq (Update-PedidoDisparo -Pedido $ped -InfoTarefa $infoAnt -Res $resAntigo -AgoraUtc $agora) 'aguardando' `
-        'pedido: dados antigos do Agendador -> aguardando (sucesso antigo NAO conta)'
+    # 1) sucesso anterior + clique + Agendador devolve os dados ANTIGOS:
+    #    modelo de renderizacao diz aguardando -- NUNCA concluido -- e a
+    #    linha principal e a orientacao ficam no MESMO estado.
+    $infoAnt = New-InfoFalsa -Ultima (Hora-Local $t0) -Codigo 0
+    $ped = New-PedidoDisparo -InfoTarefa $infoAnt -Res $resAntigo
+    $t = Get-TelaExecucao -InfoTarefa $infoAnt -Res $resAntigo -Pedido $ped
+    eq $t.Classe 'aguardando' 'tela: dados antigos do Agendador -> aguardando'
+    eq $t.Texto $t.Mensagem 'tela: linha principal e mensagem no mesmo estado'
+    eq $t.Origem 'pedido' 'tela: pedido aberto dita a renderizacao'
+    ok ($t.Acao -match 'Aguarde') 'tela: orientacao coerente com aguardando'
 
     # 2) novo LastRunTime + rodando -> em_execucao
-    $infoRun = New-InfoFalsa -Ultima '2026-11-17 14:00:00' -Estado 4
-    eq (Update-PedidoDisparo -Pedido $ped -InfoTarefa $infoRun -Res $resAntigo -AgoraUtc $agora) 'em_execucao' `
-        'pedido: novo LastRunTime + rodando -> em_execucao'
+    $infoRun = New-InfoFalsa -Ultima (Hora-Local $t1) -Estado 4
+    $t = Get-TelaExecucao -InfoTarefa $infoRun -Res $resAntigo -Pedido $ped
+    eq $t.Classe 'em_execucao' 'tela: novo LastRunTime + rodando -> em_execucao'
     ok $ped.Iniciado 'pedido: execucao nova registrada (Iniciado)'
 
-    # 3) resultado VINCULADO a execucao nova -> concluido
-    $resNovo = [pscustomobject]@{ status = 'sucesso'; codigo_restic = 0; snapshot = ('b'*64)
-                                  inicio_utc = '2026-11-17T14:00:02Z'; fim_utc = '2026-11-17T14:01:00Z' }
-    $infoFim = New-InfoFalsa -Ultima '2026-11-17 14:00:00' -Estado 1 -Codigo 0
-    eq (Update-PedidoDisparo -Pedido $ped -InfoTarefa $infoFim -Res $resNovo -AgoraUtc $agora) 'concluido' `
-        'pedido: resultado vinculado a nova execucao -> concluido'
+    # 3) resultado VINCULADO a execucao nova -> concluido e pedido encerra
+    $infoFim = New-InfoFalsa -Ultima (Hora-Local $t1) -Estado 1 -Codigo 0
+    $t = Get-TelaExecucao -InfoTarefa $infoFim -Res $resNovo -Pedido $ped
+    eq $t.Classe 'concluido' 'tela: resultado vinculado a nova execucao -> concluido'
+    ok $t.Encerrou 'tela: pedido encerrou em estado terminal'
+    eq $t.Texto $t.Mensagem 'tela: estado terminal coerente nas duas linhas'
 
-    # 4) resultado ANTIGO com a execucao nova ja vista -> sem_resultado
-    #    (jamais "concluido")
-    $ped2 = New-PedidoDisparo -InfoTarefa $infoAnt
+    # 4) execucao nova terminou e o JSON ainda e o ANTIGO -> acompanha
+    #    pela carencia e termina sem_resultado (JAMAIS concluido)
+    $ped2 = New-PedidoDisparo -InfoTarefa $infoAnt -Res $resAntigo
     [void](Update-PedidoDisparo -Pedido $ped2 -InfoTarefa $infoRun -Res $resAntigo -AgoraUtc $agora)
-    eq (Update-PedidoDisparo -Pedido $ped2 -InfoTarefa $infoFim -Res $resAntigo -AgoraUtc $agora) 'sem_resultado' `
-        'pedido: execucao nova terminou e resultado ainda e o ANTIGO -> sem_resultado'
+    eq (Update-PedidoDisparo -Pedido $ped2 -InfoTarefa $infoFim -Res $resAntigo -AgoraUtc $agora) 'em_execucao' `
+        'pedido: run nova encerrada, JSON antigo -> acompanha (carencia)'
+    eq (Update-PedidoDisparo -Pedido $ped2 -InfoTarefa $infoFim -Res $resAntigo -AgoraUtc ($agora.AddSeconds(31))) 'sem_resultado' `
+        'pedido: carencia vencida com JSON antigo -> sem_resultado'
 
     # 5) execucao RAPIDA entre duas atualizacoes (comecou e terminou
     #    sem a tela ver rodando) -> concluido direto
-    $ped3 = New-PedidoDisparo -InfoTarefa $infoAnt
+    $ped3 = New-PedidoDisparo -InfoTarefa $infoAnt -Res $resAntigo
     eq (Update-PedidoDisparo -Pedido $ped3 -InfoTarefa $infoFim -Res $resNovo -AgoraUtc $agora) 'concluido' `
         'pedido: execucao rapida entre ticks -> concluido'
 
-    # 6) falha de inicio: execucao nova vista, codigo do Agendador != 0,
-    #    sem resultado -> falhou
-    $ped4 = New-PedidoDisparo -InfoTarefa $infoAnt
-    [void](Update-PedidoDisparo -Pedido $ped4 -InfoTarefa $infoRun -Res $null -AgoraUtc $agora)
-    eq (Update-PedidoDisparo -Pedido $ped4 -InfoTarefa (New-InfoFalsa -Ultima '2026-11-17 14:00:00' -Codigo 1) -Res $null -AgoraUtc $agora) 'falhou' `
-        'pedido: falha de inicializacao da nova execucao -> falhou'
+    # 6) novo LastRunTime com CODIGO ANTIGO de falha: o codigo nao
+    #    identifica a execucao -- NAO encerra o pedido como falha;
+    #    acompanhando ate resultado ou fim da carencia -> sem_resultado
+    $ped4 = New-PedidoDisparo -InfoTarefa $infoAnt -Res $resAntigo
+    $infoCodAntigo = New-InfoFalsa -Ultima (Hora-Local $t1) -Estado 1 -Codigo 1
+    eq (Update-PedidoDisparo -Pedido $ped4 -InfoTarefa $infoCodAntigo -Res $resAntigo -AgoraUtc $agora) 'em_execucao' `
+        'pedido: novo LastRunTime + codigo antigo de falha -> NAO falha (acompanha)'
+    eq (Update-PedidoDisparo -Pedido $ped4 -InfoTarefa $infoCodAntigo -Res $resAntigo -AgoraUtc ($agora.AddSeconds(31))) 'sem_resultado' `
+        'pedido: codigo antigo nunca encerra como falha -> sem_resultado'
 
-    # 7) consulta inconclusiva: aguardando dentro do prazo, depois
+    # 7) falha nova CONFIRMADA pelo JSON vinculado -> falhou
+    $pedF = New-PedidoDisparo -InfoTarefa $infoAnt -Res $resAntigo
+    eq (Update-PedidoDisparo -Pedido $pedF -InfoTarefa $infoFim -Res $resFalha -AgoraUtc $agora) 'falhou' `
+        'pedido: JSON de falha da nova execucao -> falhou'
+
+    # 8) resultado ANTERIOR dentro da tolerancia de horario: JSON que ja
+    #    existia no clique (inicio_utc == ResInicioRef) nunca conta,
+    #    mesmo a 1s do novo LastRunTime
+    #    existia no clique (inicio_utc == ResInicioRef) nunca conta.
+    #    t2 no FUTURO: passa nos limites de horario, falha so na regra
+    #    'ini > ResInicioRef' -- e a identidade, nao a tolerancia.
+    $t2 = [DateTimeOffset]::Now.AddMinutes(1)
+    $resTol = [pscustomobject]@{ status = 'sucesso'; codigo_restic = 0; snapshot = $snapOk
+                                 inicio_utc = (Iso-Utc $t2) }
+    $infoTol = New-InfoFalsa -Ultima (Hora-Local $t2)
+    $pedT = New-PedidoDisparo -InfoTarefa (New-InfoFalsa -Ultima (Hora-Local $t2.AddMinutes(-1))) -Res $resTol
+    eq (Update-PedidoDisparo -Pedido $pedT -InfoTarefa $infoTol -Res $resTol -AgoraUtc $agora) 'em_execucao' `
+        'pedido: JSON pre-existente dentro da tolerancia -> nao conclui (acompanha)'
+
+    # 9) consulta inconclusiva: aguardando dentro do prazo, depois
     #    nao_confirmado
-    $ped5 = New-PedidoDisparo -InfoTarefa $infoAnt -PrazoSegundos 60
+    $ped5 = New-PedidoDisparo -InfoTarefa $infoAnt -Res $resAntigo -PrazoSegundos 60
     eq (Update-PedidoDisparo -Pedido $ped5 -InfoTarefa $null -Res $null -AgoraUtc $agora) 'aguardando' `
         'pedido: consulta falhou dentro do prazo -> aguardando'
     eq (Update-PedidoDisparo -Pedido $ped5 -InfoTarefa $null -Res $null -AgoraUtc ($agora.AddSeconds(121))) 'nao_confirmado' `
         'pedido: consulta segue falhando alem do prazo -> nao_confirmado'
 
-    # 8) prazo vencido sem execucao nova -> nao_confirmado
-    $ped6 = New-PedidoDisparo -InfoTarefa $infoAnt -PrazoSegundos 60
+    # 10) prazo vencido sem execucao nova -> nao_confirmado
+    $ped6 = New-PedidoDisparo -InfoTarefa $infoAnt -Res $resAntigo -PrazoSegundos 60
     eq (Update-PedidoDisparo -Pedido $ped6 -InfoTarefa $infoAnt -Res $resAntigo -AgoraUtc ($agora.AddSeconds(121))) 'nao_confirmado' `
         'pedido: sem execucao nova no prazo -> nao_confirmado'
 
-    # 9) evidencia por GUID de instancia: LastRunTime ainda antigo, mas
-    #    uma instancia com GUID novo -> em_execucao
-    $ped7 = New-PedidoDisparo -InfoTarefa $infoAnt
-    eq (Update-PedidoDisparo -Pedido $ped7 -InfoTarefa (New-InfoFalsa -Ultima '2026-11-16 13:26:00' -Estado 4 -Insts @('{guid-novo}')) -Res $null -AgoraUtc $agora) 'em_execucao' `
+    # 11) evidencia por GUID de instancia: LastRunTime ainda antigo, mas
+    #     uma instancia com GUID novo -> em_execucao
+    $ped7 = New-PedidoDisparo -InfoTarefa $infoAnt -Res $resAntigo
+    eq (Update-PedidoDisparo -Pedido $ped7 -InfoTarefa (New-InfoFalsa -Ultima (Hora-Local $t0) -Estado 4 -Insts @('{guid-novo}')) -Res $null -AgoraUtc $agora) 'em_execucao' `
         'pedido: instancia com GUID novo -> em_execucao (LastRunTime ainda antigo)'
 
-    # 10) instancia cuja GUID JA existia no clique nao e evidencia nova
-    $ped8 = New-PedidoDisparo -InfoTarefa (New-InfoFalsa -Ultima '2026-11-16 13:26:00' -Insts @('{guid-velho}'))
-    eq (Update-PedidoDisparo -Pedido $ped8 -InfoTarefa (New-InfoFalsa -Ultima '2026-11-16 13:26:00' -Estado 4 -Insts @('{guid-velho}')) -Res $resAntigo -AgoraUtc $agora) 'aguardando' `
+    # 12) instancia cuja GUID JA existia no clique nao e evidencia nova
+    $ped8 = New-PedidoDisparo -InfoTarefa (New-InfoFalsa -Ultima (Hora-Local $t0) -Insts @('{guid-velho}')) -Res $resAntigo
+    eq (Update-PedidoDisparo -Pedido $ped8 -InfoTarefa (New-InfoFalsa -Ultima (Hora-Local $t0) -Estado 4 -Insts @('{guid-velho}')) -Res $resAntigo -AgoraUtc $agora) 'aguardando' `
         'pedido: instancia pre-existente no clique -> aguardando'
+
+    # 13) RESOLUCAO persistida: pedido encerrado 'nao_confirmado' segue
+    #     apresentado na linha principal (nao volta a anunciar o sucesso
+    #     antigo) ate um disparo MAIS NOVO aparecer
+    $resolucao = [pscustomobject]@{ Classe = 'nao_confirmado'; UltimaObservada = (Hora-Local $t0)
+                                    Mensagem = $script:RotulosPedido.nao_confirmado }
+    $t = Get-TelaExecucao -InfoTarefa $infoAnt -Res $resAntigo -Resolucao $resolucao
+    eq $t.Classe 'nao_confirmado' 'resolucao: persiste na linha principal (nao volta ao sucesso antigo)'
+    eq $t.Origem 'resolucao' 'resolucao: origem marcada'
+    # disparo MAIS NOVO -> resolucao expira, classificacao generica volta
+    $t3 = [DateTimeOffset]::Now
+    $infoNovoDisparo = New-InfoFalsa -Ultima (Hora-Local $t3) -Estado 1
+    $resNovoDia = [pscustomobject]@{ status = 'sucesso'; codigo_restic = 0; snapshot = ('d'*64)
+                                     inicio_utc = (Iso-Utc $t3.AddSeconds(3)) }
+    $t = Get-TelaExecucao -InfoTarefa $infoNovoDisparo -Res $resNovoDia -Resolucao $resolucao
+    ok $t.ResolucaoExpirada 'resolucao: disparo mais novo expira a resolucao'
+    eq $t.Classe 'concluido' 'resolucao expirada: classificacao generica descreve o novo disparo'
+    eq $t.Origem 'generica' 'resolucao expirada: origem generica'
 
     # contrato estatico do pedido
     ok ($guiSrc.Contains('New-PedidoDisparo') -and $guiSrc.Contains('Update-PedidoDisparo')) 'pedido: helpers separados e testaveis'
-    ok ($guiSrc.Contains('UltimaRef') -and $guiSrc.Contains('InstRef')) 'pedido: referencia capturada antes do Run'
-    ok ($guiSrc.Contains('nao_confirmado') -and $guiSrc.Contains('Aguardando inicio')) 'pedido: estados aguardando/nao_confirmado presentes'
+    ok ($guiSrc.Contains('UltimaRef') -and $guiSrc.Contains('InstRef') -and $guiSrc.Contains('ResInicioRef')) 'pedido: referencia completa antes do Run'
+    ok ($guiSrc.Contains('nao_confirmado') -and $guiSrc.Contains('aguardando inicio')) 'pedido: estados aguardando/nao_confirmado presentes'
     ok ($guiSrc.Contains('if ($script:Disparo) { return }')) 'pedido: clique repetido bloqueado enquanto ha pedido aberto'
     ok (-not $guiSrc.Contains("-like 'Disparo*'")) 'pedido: classificacao generica nao dirige mais a linha do pedido'
+    ok ($guiSrc.Contains('Get-TelaExecucao') -and $guiSrc.Contains('UltimaResolucao')) 'pedido: modelo unico + resolucao persistida'
 
     # ---- OpenSSH: arquitetura (Sysnative -> canonico) e status ----
     $sel = Select-SshCandidato -Candidatos @([pscustomobject]@{

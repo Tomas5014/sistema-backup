@@ -126,15 +126,25 @@ faz **pela interface**, sem terminal, JSON ou Agendador.
    (o aviso de disparo solicitado cede lugar ao estado real). IDs,
    conta, SID e versões ficam em **Detalhes**. O botão *Executar agora*
    abre um **pedido com estado próprio**: antes de solicitar, a tela
-   registra o último `LastRunTime` e as instâncias em execução — só o
-   que vier **depois** conta como execução do pedido. Enquanto o
-   Agendador não registra execução nova aparece **Aguardando início**;
-   Em andamento/Concluído/Falhou só com evidência da nova tentativa
-   (resultado vinculado à nova execução — um sucesso anterior **nunca**
-   é anunciado como resultado do disparo); prazo estourado ou consulta
-   que falha termina em **Não foi possível confirmar a execução**, com
-   orientação. Cliques repetidos ficam bloqueados enquanto houver
-   pedido aberto.
+   registra o último `LastRunTime`, as instâncias em execução e o
+   `inicio_utc` do resultado que já existia — só o que vier **depois**
+   conta como execução do pedido. Enquanto o pedido está aberto, a
+   **mesma decisão** alimenta a linha "Execução atual", a cor, a ação
+   necessária, a mensagem sob os botões e a disponibilidade do botão —
+   nunca `Aguardando início` embaixo com `Backup concluído` em cima
+   (ex.: "Execução atual: aguardando início" + "Último backup
+   confirmado: 16/11 às 13:26"). Um `LastRunTime` novo antes do JSON
+   continua acompanhando — `LastTaskResult` **nunca** identifica a
+   tentativa: um código de falha antigo não encerra o pedido como falha
+   e um JSON que já existia no clique não encerra como sucesso, mesmo
+   dentro da tolerância de horário (`inicio_utc` tem de ser posterior
+   à referência do clique **e** ao novo `LastRunTime`). Concluído,
+   Falhou e Incompleto só com evidência da nova tentativa; prazo
+   estourado ou consulta que falha termina em **Não foi possível
+   confirmar a execução**, com orientação — e essa resolução segue na
+   linha principal até um disparo mais novo aparecer, sem voltar a
+   anunciar o sucesso anterior. Cliques repetidos ficam bloqueados
+   enquanto houver pedido aberto.
 5. Prova sem sessão: encerrar a sessão antes do horário, religar e
    conferir *BACKUP CONCLUIDO* (resultado vinculado ao disparo) ou a
    ação indicada.

@@ -549,43 +549,56 @@ $script:AcaoStatus = @{
 # e anunciado como resultado do disparo recem-feito.
 
 function New-PedidoDisparo {
-    # Referencia capturada ANTES do Run(): LastRunTime atual e GUIDs das
-    # instancias em execucao. E a linha de corte: "execucao nova" = um
-    # LastRunTime mais novo que a referencia OU uma instancia cujo GUID
-    # nao existia no clique.
-    param($InfoTarefa, [int]$PrazoSegundos = 120)
+    # Referencia capturada ANTES do Run(): LastRunTime atual, GUIDs das
+    # instancias em execucao e a IDENTIDADE do resultado ja gravado
+    # (inicio_utc). E a linha de corte: "execucao nova" = um LastRunTime
+    # mais novo que a referencia OU uma instancia cujo GUID nao existia
+    # no clique; "resultado da execucao nova" = um JSON que NAO existia
+    # no clique e com inicio vinculado a ela.
+    param($InfoTarefa, $Res, [int]$PrazoSegundos = 120)
     $inst = @{}
     if ($InfoTarefa) {
         foreach ($g in @($InfoTarefa.Instancias)) { if ($g) { $inst[[string]$g] = $true } }
     }
     return [pscustomobject]@{
-        UltimaRef   = $(if ($InfoTarefa) { [string]$InfoTarefa.Ultima } else { $null })
-        InstRef     = $inst
-        PedidoUtc   = [DateTimeOffset]::UtcNow
-        PrazoFimUtc = [DateTimeOffset]::UtcNow.AddSeconds($PrazoSegundos)
-        Iniciado    = $false
-        NovaUltima  = $null
+        UltimaRef    = $(if ($InfoTarefa) { [string]$InfoTarefa.Ultima } else { $null })
+        InstRef      = $inst
+        ResInicioRef = $(if ($Res -and $Res.inicio_utc) { ConvertTo-DataObj -Valor $Res.inicio_utc } else { $null })
+        PedidoUtc    = [DateTimeOffset]::UtcNow
+        PrazoFimUtc  = [DateTimeOffset]::UtcNow.AddSeconds($PrazoSegundos)
+        Iniciado     = $false
+        NovaUltima   = $null
+        FimUtc       = $null
     }
 }
 
 function Update-PedidoDisparo {
     # Estado do PEDIDO (nao da execucao generica): aguardando /
     # em_execucao / concluido / falhou / incompleto / sem_resultado /
-    # nao_confirmado. 'concluido' exige resultado VINCULADO a execucao
-    # nova (inicio_utc >= a nova LastRunTime); 'falhou'/'sem_resultado'
-    # exigem a execucao nova observada. Sem evidencia de execucao nova
-    # dentro do prazo -> nao_confirmado, nunca o sucesso antigo.
-    param($Pedido, $InfoTarefa, $Res, $AgoraUtc)
+    # nao_confirmado. Regras duras:
+    #  - 'concluido'/'falhou'/'incompleto' SOMENTE com o JSON de
+    #    resultado VINCULADO a execucao nova: inicio_utc posterior ao
+    #    resultado que ja existia no clique E ao novo LastRunTime
+    #    (tolerancia de 1s de granularidade).
+    #  - LastTaskResult NAO identifica a execucao: um codigo antigo de
+    #    falha nao encerra o pedido como 'falhou'; a falha da tentativa
+    #    nova vem do JSON dela (ou da ausencia dele -> 'sem_resultado').
+    #  - execucao nova observada mas terminada sem resultado ainda:
+    #    segue acompanhando pela carencia (o JSON pode sair depois do
+    #    LastRunTime); expirada -> 'sem_resultado'.
+    #  - sem evidencia de execucao nova dentro do prazo, ou consulta
+    #    que segue falhando -> 'nao_confirmado'.
+    param($Pedido, $InfoTarefa, $Res, $AgoraUtc, [int]$CarenciaFimSegundos = 30)
     if ($null -eq $Pedido) { return $null }
     if ($null -eq $AgoraUtc) { $AgoraUtc = [DateTimeOffset]::UtcNow }
     if ($InfoTarefa) {
         # Ultima mais nova que a REFERENCIA do clique atualiza a marca da
         # execucao nova em toda consulta -- se o disparo foi detectado so
         # pelo GUID da instancia, a Ultima chega atrasada e corrige o
-        # limite de vinculo.
-        $u = ConvertTo-DataObj -Valor $InfoTarefa.Ultima
+        # limite de vinculo. LastRunTime e LOCAL (COM), nao universal.
+        $u = ConvertTo-DataLocal -Valor $InfoTarefa.Ultima
         if ($u -and $u.Year -gt 2000) {
-            $ref = ConvertTo-DataObj -Valor $Pedido.UltimaRef
+            $ref = ConvertTo-DataLocal -Valor $Pedido.UltimaRef
             if (($null -eq $ref -or $u -gt $ref.AddSeconds(1)) -and
                 ($null -eq $Pedido.NovaUltima -or $u -gt $Pedido.NovaUltima)) {
                 $Pedido.NovaUltima = $u
@@ -607,16 +620,26 @@ function Update-PedidoDisparo {
         if ($AgoraUtc -gt $Pedido.PrazoFimUtc) { return 'nao_confirmado' }
         return 'aguardando'
     }
-    if ($InfoTarefa -and [int]$InfoTarefa.Estado -eq 4) { return 'em_execucao' }
+    if ($InfoTarefa -and [int]$InfoTarefa.Estado -eq 4) {
+        $Pedido.FimUtc = $null
+        return 'em_execucao'
+    }
+    if ($null -eq $InfoTarefa) {
+        if ($AgoraUtc -gt $Pedido.PrazoFimUtc) { return 'nao_confirmado' }
+        return 'em_execucao'   # ja iniciada; consulta falhou: segue aguardando o fim
+    }
     # a execucao nova comecou (ou ja terminou entre duas atualizacoes):
-    # o resultado conta somente se vinculado a ELA. Sem nova Ultima
-    # registrada ainda, o limite e o instante do clique -- rigoroso:
-    # nenhum resultado anterior ao pedido pode se vincular.
+    # o resultado conta somente se vinculado a ELA -- um JSON que JA
+    # EXISTIA no clique nunca vale, mesmo dentro da tolerancia.
     $limite = $(if ($Pedido.NovaUltima) { $Pedido.NovaUltima } else { $Pedido.PedidoUtc })
     $deste = $false
     if ($Res -and $Res.inicio_utc) {
         $ini = ConvertTo-DataObj -Valor $Res.inicio_utc
-        if ($ini -and $limite) { $deste = ($ini -ge $limite.AddSeconds(-1)) }
+        if ($ini) {
+            $deste = ($ini -ge $limite.AddSeconds(-1)) -and
+                     ($ini -ge $Pedido.PedidoUtc.AddSeconds(-1)) -and
+                     (($null -eq $Pedido.ResInicioRef) -or ($ini -gt $Pedido.ResInicioRef))
+        }
     }
     if ($deste) {
         if ([string]$Res.status -eq 'em_execucao') { return 'em_execucao' }
@@ -624,24 +647,96 @@ function Update-PedidoDisparo {
         if ($null -ne $Res.codigo_restic -and [int]$Res.codigo_restic -eq 3) { return 'incompleto' }
         return 'falhou'
     }
-    if ($null -eq $InfoTarefa) {
-        if ($AgoraUtc -gt $Pedido.PrazoFimUtc) { return 'nao_confirmado' }
-        return 'em_execucao'   # ja iniciada; consulta falhou: segue aguardando o fim
-    }
-    # execucao nova observada, sem resultado dela: o codigo do Agendador
-    # so prova falha de INICIALIZACAO quando diferente de zero.
-    if ([int]$InfoTarefa.Codigo -ne 0) { return 'falhou' }
+    # nova execucao encerrada, resultado dela ainda nao gravado:
+    # continua acompanhando pela carencia (o JSON pode sair depois do
+    # LastRunTime); depois dela e que vira 'sem_resultado'.
+    if (-not $Pedido.FimUtc) { $Pedido.FimUtc = $AgoraUtc }
+    if ($AgoraUtc -le $Pedido.FimUtc.AddSeconds($CarenciaFimSegundos)) { return 'em_execucao' }
     return 'sem_resultado'
 }
 
 $script:RotulosPedido = @{
-    aguardando     = 'Aguardando inicio - o Agendador ainda nao registrou uma execucao nova.'
+    aguardando     = 'aguardando inicio - o Agendador ainda nao registrou uma execucao nova.'
     em_execucao    = 'Disparo em execucao agora.'
     concluido      = 'Disparo concluido - resultado confirmado DESTA execucao.'
     falhou         = 'Disparo terminou com falha - veja a acao indicada e os Detalhes.'
     incompleto     = 'Disparo terminou incompleto - veja a acao indicada e os Detalhes.'
     sem_resultado  = 'Disparo tentou e nada foi gravado - veja a acao indicada e os Detalhes.'
     nao_confirmado = 'Nao foi possivel confirmar a execucao - consulte o Agendador de Tarefas ou chame a MAC IP.'
+}
+
+$script:AcaoPedido = @{
+    aguardando     = 'Aguarde - a tela acompanha sozinha enquanto o Agendador registra o disparo.'
+    em_execucao    = 'Aguarde o termino do backup em execucao.'
+    concluido      = 'Nenhuma acao pendente.'
+    falhou         = 'Acao necessaria: veja o resultado na pasta de estado e confira o destino na aba 1.'
+    incompleto     = 'Acao necessaria: confira o que ficou de fora (arquivos em uso/abertos).'
+    sem_resultado  = 'Acao necessaria: verifique destino, conta da tarefa e permissao de execucao sem sessao.'
+    nao_confirmado = 'Acao necessaria: consulte o Agendador de Tarefas ou chame a MAC IP.'
+}
+
+function Get-CorEstadoPedido {
+    param([string]$Classe)
+    switch ($Classe) {
+        'concluido'     { return 'DarkGreen' }
+        'aguardando'    { return 'DarkBlue' } 'em_execucao' { return 'DarkBlue' }
+        'incompleto'    { return 'DarkOrange' } 'sem_resultado' { return 'DarkOrange' }
+        default         { return 'DarkRed' }
+    }
+}
+
+function Get-TelaExecucao {
+    # MODELO de renderizacao da aba Situacao -- a MESMA decisao alimenta
+    # a linha principal, a cor, a mensagem de orientacao e o botao, para
+    # que nunca se contradigam. Um pedido aberto dita tudo; depois de
+    # encerrado, sua RESOLUCAO segue sendo a situacao apresentada ate um
+    # disparo MAIS NOVO aparecer -- a tela nao volta a anunciar o
+    # resultado anterior como se fosse o do pedido recem-encerrado.
+    param($InfoTarefa, $Res, $Pedido, $Resolucao, $AgoraUtc)
+    if ($null -eq $AgoraUtc) { $AgoraUtc = [DateTimeOffset]::UtcNow }
+    if ($Pedido) {
+        $st = Update-PedidoDisparo -Pedido $Pedido -InfoTarefa $InfoTarefa -Res $Res -AgoraUtc $AgoraUtc
+        return [pscustomobject]@{
+            Origem = 'pedido'; Classe = $st; Texto = $script:RotulosPedido[$st]
+            Cor = (Get-CorEstadoPedido $st); Acao = $script:AcaoPedido[$st]
+            Mensagem = $script:RotulosPedido[$st]
+            Encerrou = ($st -in 'concluido','falhou','incompleto','sem_resultado','nao_confirmado')
+            ResolucaoExpirada = $false
+        }
+    }
+    if ($Resolucao) {
+        # a resolucao vale ate um disparo MAIS NOVO que o observado na
+        # resolucao aparecer (rodando agora ou LastRunTime posterior).
+        $novo = $false
+        if ($InfoTarefa) {
+            if ([int]$InfoTarefa.Estado -eq 4) { $novo = $true }
+            $u = ConvertTo-DataLocal -Valor $InfoTarefa.Ultima
+            if ($u -and $u.Year -gt 2000) {
+                $marca = ConvertTo-DataLocal -Valor $Resolucao.UltimaObservada
+                if (($null -eq $marca) -or ($u -gt $marca.AddSeconds(1))) { $novo = $true }
+            }
+        }
+        if (-not $novo) {
+            return [pscustomobject]@{
+                Origem = 'resolucao'; Classe = $Resolucao.Classe
+                Texto = $script:RotulosPedido[$Resolucao.Classe]
+                Cor = (Get-CorEstadoPedido $Resolucao.Classe); Acao = $script:AcaoPedido[$Resolucao.Classe]
+                Mensagem = $Resolucao.Mensagem; Encerrou = $false; ResolucaoExpirada = $false
+            }
+        }
+        # disparo mais novo observado: a resolucao expira e a
+        # classificacao generica volta a descrever a execucao atual.
+    }
+    $cls = Classify-Resultado -Res $Res -InfoTarefa $InfoTarefa
+    return [pscustomobject]@{
+        Origem = 'generica'; Classe = $cls; Texto = $script:RotulosStatus[$cls]
+        Cor = $(switch ($cls) {
+            'concluido' { 'DarkGreen' } 'em_execucao' { 'DarkBlue' }
+            'incompleto' { 'DarkOrange' } 'ainda_nao' { 'DarkBlue' }
+            'sem_resultado' { 'DarkOrange' } default { 'DarkRed' } })
+        Acao = $script:AcaoStatus[$cls]; Mensagem = $null
+        Encerrou = $false; ResolucaoExpirada = ($null -ne $Resolucao)
+    }
 }
 
 # ---------- restauracao ----------
@@ -1292,6 +1387,20 @@ function ConvertTo-DataObj {
     return $null
 }
 
+function ConvertTo-DataLocal {
+    # Horario do Agendador (LastRunTime/NextRunTime do COM) e sempre
+    # LOCAL: interpreta a string como hora local desta maquina -- nunca
+    # como universal (UTC). Usar AssumeUniversal aqui quebraria o vinculo
+    # com inicio_utc (UTC de verdade) em qualquer fuso diferente de +00:00.
+    param($Valor)
+    if ($null -eq $Valor) { return $null }
+    if ($Valor -is [DateTime]) { return ([DateTimeOffset]$Valor) }
+    if ($Valor -is [DateTimeOffset]) { return $Valor }
+    [DateTimeOffset]$d = [DateTimeOffset]::MinValue
+    if ([DateTimeOffset]::TryParse([string]$Valor, [ref]$d)) { return $d }
+    return $null
+}
+
 function Format-DataBR {
     # Data/hora deste computador em formato brasileiro (dd/MM/yyyy HH:mm)
     # para a tela. Invalido/ausente/ano de sentinelas COM -> '-'.
@@ -1719,6 +1828,7 @@ function Show-Gui {
             $cred = $null
             $script:perfilAtual = $null; $script:ativacaoToken = $null
             $script:Disparo = $null    # pedido aberto pertencia a config anterior
+            $script:UltimaResolucao = $null
             $built = $null
             $lblCfg.ForeColor = 'DarkGreen'
             $lblCfg.Text = ("Salvo. Agendamento SOLICITADO para $horario na conta $conta - " +
@@ -1769,6 +1879,7 @@ function Show-Gui {
 
     $script:Atualizando = $false
     $script:Disparo = $null            # pedido de "Executar agora" aberto (estado proprio)
+    $script:UltimaResolucao = $null    # resolucao do ultimo pedido ate um disparo mais novo
     $script:AtualizarTela = {
         if ($script:Atualizando) { return }
         $script:Atualizando = $true
@@ -1798,24 +1909,43 @@ function Show-Gui {
             $lblUlt.Text = 'Ultimo backup confirmado: ' + $(if ($conf) {
                 ('{0} (snapshot {1})' -f (Format-DataBR $conf.fim_utc), ([string]$conf.snapshot).Substring(0,12))
             } else { 'nenhum ainda' })
-            # Pedido de "Executar agora": o estado vem da EVIDENCIA de
-            # execucao nova (LastRunTime/instancia posterior a referencia
-            # do clique) -- nunca da classificacao generica, que ainda
-            # veria o sucesso anterior como "concluido". Roda mesmo com
-            # consulta inconclusiva (aguardando -> nao_confirmado).
-            if ($script:Disparo) {
-                $stPed = Update-PedidoDisparo -Pedido $script:Disparo -InfoTarefa $info -Res $res
-                $corPed = switch ($stPed) {
-                    'concluido'     { 'DarkGreen' }
-                    'aguardando'    { 'DarkBlue' } 'em_execucao' { 'DarkBlue' }
-                    'incompleto'    { 'DarkOrange' } 'sem_resultado' { 'DarkOrange' }
-                    default         { 'DarkRed' }
+            # MODELO unico de renderizacao: um pedido de "Executar agora"
+            # aberto dita a linha principal, a cor, a orientacao e o
+            # botao -- a classificacao generica (que ainda veria o
+            # sucesso anterior como "concluido") so vale sem pedido nem
+            # resolucao recente. A resolucao do pedido encerrado segue
+            # apresentada ate um disparo MAIS NOVO aparecer.
+            $tela = Get-TelaExecucao -InfoTarefa $info -Res $res -Pedido $script:Disparo -Resolucao $script:UltimaResolucao
+            if ($script:Disparo -and $tela.Encerrou) {
+                $script:UltimaResolucao = [pscustomobject]@{
+                    Classe = $tela.Classe
+                    UltimaObservada = $(if ($script:Disparo.NovaUltima) { $script:Disparo.NovaUltima } else { $script:Disparo.UltimaRef })
+                    Mensagem = $tela.Mensagem
                 }
-                $lblOp.ForeColor = $corPed
-                $lblOp.Text = $script:RotulosPedido[$stPed]
-                if ($stPed -in 'concluido','falhou','incompleto','sem_resultado','nao_confirmado') {
-                    $script:Disparo = $null    # pedido encerrado: botao religa na proxima linha
+                $script:Disparo = $null
+            }
+            if ($tela.ResolucaoExpirada) { $script:UltimaResolucao = $null }
+            if ($tela.Origem -ne 'generica') {
+                # MODO PEDIDO/RESOLUCAO: todas as linhas no mesmo estado.
+                $lblStatus.ForeColor = $tela.Cor
+                $lblStatus.Text = 'Execucao atual: ' + $tela.Texto
+                $lblAcao.Text = $tela.Acao
+                $lblOp.ForeColor = $tela.Cor
+                $lblOp.Text = $tela.Mensagem
+                if ($info) {
+                    $lblProx.Text = 'Proxima execucao: ' + $(if ($info.Habilitada) {
+                        ((Format-DataBR $info.Proxima) + ' (horario deste computador)') } else { 'PAUSADO - so Retomar religa' })
+                    $tbDetalhes.Text = Get-DetalhesSuporte -Info $info -Res $res -Conf $conf -Estado $estado -ConfigPath $cfgPath
+                    $btPausa.Enabled = $info.Habilitada
+                    $btRetomar.Enabled = -not $info.Habilitada
+                    $btAgora.Enabled = ($info.Estado -ne 4) -and (-not $script:Disparo)
+                    $btAgora.Text = $(if (Test-ResConfirmado -Res $res) { 'Executar agora' } else { 'Executar primeiro backup' })
+                } else {
+                    $lblProx.Text = 'Proxima execucao: (inconclusiva)'
+                    $tbDetalhes.Text = Get-DetalhesSuporte -Info $null -Res $res -Conf $conf -Estado $estado -ConfigPath $cfgPath
+                    $btAgora.Enabled = $false; $btPausa.Enabled = $false; $btRetomar.Enabled = $false
                 }
+                return
             }
             if (-not $info) {
                 # consulta inconclusiva NAO e "sem tarefa" -- exibe o erro.
@@ -1839,19 +1969,13 @@ function Show-Gui {
                 $tbDetalhes.Text = Get-DetalhesSuporte -Info $info -Res $res -Conf $conf -Estado $estado -ConfigPath $cfgPath
                 return
             }
-            $cls = Classify-Resultado -Res $res -InfoTarefa $info
-            $cor = switch ($cls) {
-                'concluido' { 'DarkGreen' } 'em_execucao' { 'DarkBlue' }
-                'incompleto' { 'DarkOrange' } 'ainda_nao' { 'DarkBlue' }
-                'sem_resultado' { 'DarkOrange' } default { 'DarkRed' }
-            }
-            $lblStatus.ForeColor = $cor
-            $lblStatus.Text = 'Execucao atual: ' + $script:RotulosStatus[$cls]
+            $lblStatus.ForeColor = $tela.Cor
+            $lblStatus.Text = 'Execucao atual: ' + $tela.Texto
             $lblProx.Text = 'Proxima execucao: ' + $(if ($info.Habilitada) {
                 ((Format-DataBR $info.Proxima) + ' (horario deste computador)') } else { 'PAUSADO - so Retomar religa' })
-            $lblAcao.Text = $(if (-not $info.Habilitada -and $cls -ne 'em_execucao') {
+            $lblAcao.Text = $(if (-not $info.Habilitada -and $tela.Classe -ne 'em_execucao') {
                 'Acao necessaria: a tarefa esta PAUSADA - so "Retomar" religa o agendamento.'
-            } else { $script:AcaoStatus[$cls] })
+            } else { $tela.Acao })
             $tbDetalhes.Text = Get-DetalhesSuporte -Info $info -Res $res -Conf $conf -Estado $estado -ConfigPath $cfgPath
             $btPausa.Enabled = $info.Habilitada
             $btRetomar.Enabled = -not $info.Habilitada
@@ -1866,13 +1990,16 @@ function Show-Gui {
     $btAgora.Add_Click({
         if ($script:Disparo) { return }      # ja ha pedido aberto: clique repetido ignorado
         try {
-            # Referencia ANTES de solicitar: ultimo LastRunTime e GUIDs
-            # de instancia. So o que vier DEPOIS conta como execucao
-            # deste pedido -- o sucesso anterior nunca e anunciado como
-            # resultado do disparo recem-feito.
+            # Referencia ANTES de solicitar: ultimo LastRunTime, GUIDs
+            # de instancia e a identidade do resultado ja gravado. So o
+            # que vier DEPOIS conta como execucao deste pedido -- o
+            # sucesso anterior nunca e anunciado como resultado do
+            # disparo recem-feito.
             $ref = Get-InfoTarefa
+            $estadoRef = Get-EstadoAtual
+            $resRef = $(if ($estadoRef) { Read-UltimoResultado -Estado $estadoRef } else { $null })
             Start-TarefaAgora
-            $script:Disparo = New-PedidoDisparo -InfoTarefa $ref
+            $script:Disparo = New-PedidoDisparo -InfoTarefa $ref -Res $resRef
             $btAgora.Enabled = $false
             $lblOp.ForeColor = 'DarkBlue'
             $lblOp.Text = $script:RotulosPedido.aguardando

@@ -1970,3 +1970,70 @@ Agendador devolvendo dados antigos) e 4b.13 (reinstalacao de teste:
 dados preservados, tarefa desabilitada -> Retomar). Ensaio de disparo
 apos reinicio mantido para 17/11 13:26 — VM e repositorio SFTP de
 laboratorio nao tocados. Homologacao segue PENDENTE.
+
+## Revisao 14 (branch feature/windows-backup-gui-pilot)
+
+**Linha principal do Situacao podia contradizer o pedido, e evidencias
+antigas podiam encerrar o pedido cedo demais.**
+
+Revisao de codigo achou dois furos da Revisao 13:
+
+- `AtualizarTela` usava `Update-PedidoDisparo` so na mensagem abaixo dos
+  botoes, mas seguia calculando "Execucao atual" com `Classify-Resultado`
+  — com sucesso anterior e Agendador devolvendo dados antigos, a tela
+  mostrava "Aguardando inicio" embaixo e "BACKUP CONCLUIDO" em cima.
+- `Update-PedidoDisparo` podia tratar o novo `LastRunTime` como prova de
+  que `LastTaskResult`/JSON ja eram da tentativa nova: um codigo antigo
+  de falha encerrava o pedido como falha, e um JSON que JA existia no
+  clique encerrava como sucesso mesmo dentro da tolerancia de horario.
+
+Correcoes:
+
+- **Modelo unico de renderizacao** (`Get-TelaExecucao`): uma decisao
+  alimenta linha principal, cor, acao necessaria, mensagem sob os botoes
+  e disponibilidade do botao. Pedido aberto -> origem 'pedido'; pedido
+  encerrado -> sua RESOLUCAO persiste na linha principal ate um disparo
+  MAIS NOVO aparecer (`UltimaObservada` marca a fronteira); so entao a
+  classificacao generica volta. Nunca mais "Aguardando" embaixo com
+  "Concluido" em cima.
+- **Vinculo causal endurecido** (`Update-PedidoDisparo`): o resultado so
+  conta se `inicio_utc` for posterior ao `inicio_utc` do JSON que ja
+  existia no clique (`ResInicioRef`, novo campo do pedido) E ao novo
+  `LastRunTime` E ao instante do clique — identidade, nao tolerancia.
+  `LastTaskResult` nao decide nada: falha da tentativa nova vem do JSON
+  dela (ou da carencia -> `sem_resultado`). `LastRunTime` novo antes do
+  JSON -> segue `em_execucao` dentro da carencia de 30 s.
+- **Fuso horario corrigido:** `LastRunTime`/`NextRunTime` do COM sao
+  HORA LOCAL; o novo `ConvertTo-DataLocal` os interpreta como locais
+  (nunca `AssumeUniversal`) — sem ele, a comparacao com `inicio_utc`
+  (UTC de verdade) quebraria em qualquer fuso diferente de +00:00,
+  inclusive no horario de Brasilia.
+- Rotulo do pedido em minusculas ("aguardando inicio - ...") para
+  combinar na linha "Execucao atual: aguardando inicio".
+
+Regressao obrigatoria (simulada, pwsh 7.4.6) — modelada sobre o MESMO
+modelo que a tela usa (`Get-TelaExecucao`), nao so a classificacao:
+sucesso anterior -> clique -> dados antigos -> `aguardando` (linha,
+mensagem, cor e botao no mesmo estado; nunca `concluido`) -> nova
+execucao -> `em_execucao` -> JSON novo -> `concluido`; novo LastRunTime
+com codigo de falha antigo -> `em_execucao` (JSON pre-existente nao
+vale); JSON com inicio identico ao do clique (`ResInicioRef`) dentro da
+tolerancia -> `em_execucao`; JSON de falha da execucao nova -> `falhou`;
+execucao rapida entre ticks -> `concluido`; carencia -> `sem_resultado`;
+prazo vencido -> `nao_confirmado`; resolucao persistida ate disparo mais
+novo; clique duplicado bloqueado; Ultimo backup confirmado independente.
+Fixtures de tempo independentes de fuso (Ultima em hora local,
+inicio_utc em UTC — o mesmo instante nas duas representacoes).
+
+Verificacao: GUI **260 ok, 0 falha** (1 pulado: COM real fora do
+Windows); agente **150 ok, 0 falha** (1 pulado: MACIP_RESTIC_REAL
+indefinido); `python3 -m unittest discover -s tests` **155 testes, OK**
+(18 pulados por ambiente — incluindo os bridges que rodaram as suites
+reais); `git diff --check` limpo; linhas novas em ASCII.
+
+Separacao de prova: TUDO SIMULADO — COM real, GUIDs, relogio do
+Agendador e PS 5.1 sem prova real; instalador NAO recompilado (sem
+makensis/payload). Validacao na VM segue PENDENTE: roteiro 4b.4 cobre o
+pedido com Agendador devolvendo dados antigos e a consistencia linha/
+orientacao/cor/botao. Ensaio pos-reinicio mantido para 17/11 13:26 —
+VM, tarefa do laboratorio e repositorio SFTP nao tocados.

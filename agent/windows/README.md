@@ -232,13 +232,18 @@ repositório e o `Preparar` (DPAPI na conta) são os mesmos do agente.
   a tarefa; execução em andamento bloqueia novo disparo. O clique abre
   um **pedido com estado próprio** (`New-PedidoDisparo`/
   `Update-PedidoDisparo`): antes de solicitar, a tela registra o
-  `LastRunTime` e os GUIDs das instâncias — só o que vier **depois** é
-  execução do pedido. `Aguardando início` até evidência nova;
-  `Concluído`/`Falhou` só com resultado vinculado à nova execução — o
-  sucesso anterior **nunca** é anunciado como resultado do disparo;
-  consulta inconclusiva ou prazo estourado → `Não foi possível
-  confirmar a execução` com orientação. Cliques repetidos ficam
-  bloqueados enquanto houver pedido aberto.
+  `LastRunTime`, os GUIDs das instâncias e o `inicio_utc` do resultado
+  já gravado — só o que vier **depois** é execução do pedido. Um único
+  modelo (`Get-TelaExecucao`) alimenta linha principal, cor, ação,
+  mensagem e botão, para nunca se contradizerem. `Aguardando início`
+  até evidência nova; `Concluído`/`Falhou`/`Incompleto` só com
+  resultado vinculado à nova execução — `inicio_utc` posterior à
+  referência do clique **e** ao novo `LastRunTime` (identidade, não
+  tolerância: o sucesso anterior e um código de falha antigo **nunca**
+  encerram o pedido); consulta inconclusiva ou prazo estourado →
+  `Não foi possível confirmar a execução` com orientação — resolução
+  que segue na linha principal até um disparo mais novo aparecer.
+  Cliques repetidos ficam bloqueados enquanto houver pedido aberto.
 - **Restaurar:** fluxo em três passos na mesma aba — *Data do backup →
   Arquivo → Pasta de destino*. Pontos via `restic snapshots`; arquivos
   via `restic ls --json` filtrados a **arquivos regulares** — a escolha
