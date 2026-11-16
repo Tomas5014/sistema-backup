@@ -176,11 +176,16 @@ faz **pela interface**, sem terminal, JSON ou Agendador.
      original — o **segundo** arquivo selecionado também deve conferir.
    - **Restaurar toda a pasta protegida** — a etapa 2 dispensa seleção
      e mostra a **raiz registrada no ponto** (metadados confirmados
-     pelo catálogo do ID completo). O destino precisa ser um caminho
-     **NOVO** fora da pasta protegida; a restauração materializa a
-     árvore do ponto em temporário no mesmo volume e só publica por
-     renomeação após sucesso e verificação — nunca sobrescreve e nunca
-     anuncia parcial como completo.
+     pelo catálogo do ID completo). O destino se compõe de **Onde
+     salvar** (pasta existente, escolhida pelo seletor) + **Nome da
+     nova pasta** (um único componente, validado para Windows) — a
+     revisão mostra o caminho final antes do início e ele **não pode
+     existir**. O restic restaura **somente a raiz** (`<id>:<raiz>`)
+     com `--verify`, em temporário no mesmo volume; o conjunto de
+     caminhos/tipos do catálogo é conferido e a publicação é atômica
+     (`[IO.Directory]::Move`) — destino que aparece durante a cópia é
+     **preservado intacto** e o conflito informado; nunca sobrescreve
+     e nunca anuncia parcial como completo.
 6a. **Aceite da restauração completa (dois pontos, dados fictícios):**
     antes do ponto **A**, gravar na origem um **manifesto** (caminho
     relativo + SHA-256 de cada arquivo) incluindo uma **subpasta**, um
@@ -189,16 +194,22 @@ faz **pela interface**, sem terminal, JSON ou Agendador.
     Depois **alterar um arquivo** e **remover outro** da origem e
     deixar o ponto **B** rodar. Na aba Restaurar: escolher o **ponto
     A** no modo *Restaurar toda a pasta protegida*, conferir que a raiz
-    mostrada é a origem registrada, apontar destino **novo** e
-    restaurar. **Aprovado se:** todo caminho relativo do manifesto
-    existe no destino com SHA-256 igual; o arquivo removido **volta**;
-    o alterado volta com o **conteúdo do ponto A**; o arquivo excluído
-    **continua ausente** (foi salvo sem ele — as exclusões não filtram
-    a restauração, ela traz o que o ponto gravou); a origem **não foi
+    mostrada é a origem registrada, escolher **Onde salvar** pelo
+    seletor (pasta existente), digitar o **Nome da nova pasta** e
+    conferir o caminho final na revisão antes de restaurar.
+    **Aprovado se:** todo caminho relativo do manifesto existe no
+    destino com SHA-256 igual; o arquivo removido **volta**; o alterado
+    volta com o **conteúdo do ponto A**; o arquivo excluído **continua
+    ausente** (foi salvo sem ele — as exclusões não filtram a
+    restauração, ela traz o que o ponto gravou); a origem **não foi
     tocada**. Repetir no mesmo passe: modo arquivo com o **segundo
-    arquivo** do ponto B (SHA-256 confere); destino **já existente**
-    recusado com o conteúdo intacto; erro durante a cópia (SFTP fora)
-    **não publica** a pasta e não anuncia sucesso.
+    arquivo** do ponto B (SHA-256 confere); nome de pasta inválido
+    (`a\b`, `..`, `CON`) recusado pela interface; **sentinela** —
+    criar no destino final um arquivo/pasta por outro processo entre o
+    início e a publicação → a restauração **recusa**, a sentinela fica
+    **intacta** e nada é copiado para dentro dela; destino **já
+    existente** recusado com o conteúdo intacto; erro durante a cópia
+    (SFTP fora) **não publica** a pasta e não anuncia sucesso.
 7. **Sucesso → falha com a janela fechada:** com a GUI fechada, forçar
    um disparo que falhe (ex.: pausar o SFTP ou cortar a rede no
    horário) depois de um sucesso confirmado. Ao reabrir, a tela deve

@@ -284,23 +284,31 @@ repositório e o `Preparar` (DPAPI na conta) são os mesmos do agente.
     de arquivo e mostra a **raiz registrada naquele ponto**. A raiz vem
     dos **metadados do snapshot** (`paths`), confirmada pelo
     **catálogo** (`restic ls --json` do **ID completo** escolhido —
-    nunca `latest`, nunca árvore alheia): metadados sem raiz única ou
-    catálogo que não confirma a raiz **param com o motivo**. Se a
-    origem mudou desde o backup, vale a raiz do ponto — não a atual.
-    `restic restore <id> --target <tmp>` materializa a árvore inteira
-    do ponto — **sem `--include`/`--exclude`**: volta o que foi
+    nunca `latest`, nunca árvore alheia): metadados sem raiz única,
+    catálogo com raiz diferente ou itens fora dela, links/junctions no
+    ponto ou `..` em caminho **param com o motivo**. Se a origem mudou
+    desde o backup, vale a raiz do ponto — não a atual.
+    `restic restore "<id>:<raiz>" --target <tmp> --verify` materializa
+    **somente a raiz escolhida** (sintaxe `id:subpasta` — nunca o ponto
+    inteiro), **sem `--include`/`--exclude`**: volta o que foi
     efetivamente salvo naquela data (arquivos hoje excluídos ou já
     removidos da origem voltam se existiam no ponto), preservando nomes,
-    subpastas, espaços e acentos. O destino precisa ser **NOVO** —
-    caminho que já existe é recusado antes de qualquer chamada — e
-    fora da raiz do ponto **e** da origem atual, inclusive por
-    link/junction resolvido em todos os componentes. A árvore
-    materializa em **temporário irmão do destino** (mesmo volume), é
-    conferida (`Get-PastaSubarvore` — a raiz absoluta do ponto vira
-    subpastas do temporário) e só então é **publicada por renomeação
-    atômica** — erro, cancelamento ou timeout matam o processo, limpam
-    **apenas** o temporário da própria tentativa e nunca anunciam
-    sucesso nem publicam pasta parcial.
+    subpastas, espaços e acentos; `--verify` faz o próprio restic
+    conferir o conteúdo restaurado contra o repositório. O destino é
+    **pasta pai existente (seletor) + nome da pasta nova** — validado
+    como um único componente Windows (sem separador, `..`, ponto final,
+    espaço nas pontas nem nome reservado) e mostrado na revisão antes do
+    início; o caminho final **não pode existir** e não é criado antes.
+    Resolvido em todos os componentes (link/junction recusado) e fora da
+    raiz do ponto **e** da origem atual. A árvore materializa em
+    **temporário irmão** (mesmo volume), o conjunto `rel→tipo` do
+    catálogo é conferido — falta, item extra, tipo errado ou reparse
+    point restaurado **abortam sem publicar** (código 0 com pasta
+    parcial não é sucesso) — e a publicação usa
+    **`[IO.Directory]::Move`**, que **falha se o destino apareceu durante
+    a cópia**: o que outro processo criou lá fica intacto, o conflito é
+    informado e só o temporário da tentativa é limpo. Erro ou timeout:
+    Kill + mesma limpeza — nunca sucesso parcial.
 - **Acabamento visual:** fonte do Windows (Segoe UI), superfícies
   neutras e **um acento** para a ação principal de cada aba; cor de
   estado sempre acompanhada de texto. As telas usam

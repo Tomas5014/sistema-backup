@@ -755,7 +755,11 @@ exit 0
     ok ($guiSrc.Contains('Escopo:') -and $guiSrc.Contains('Ponto:')) 'restaurar: revisao ao vivo mostra ponto+escopo+destino antes de iniciar'
     ok ($guiSrc.Contains('O destino precisa ser NOVO') -or $guiSrc.Contains('precisa ser NOVO')) 'restaurar pasta: colisao de destino recusada na regra'
     ok (-not ($guiSrc -match "restore\s+'latest'|restore\s+latest")) 'restaurar pasta: nunca usa latest'
-    ok ($guiSrc -match "restore `"\{3\}`" --target") 'restaurar pasta: comando restic restore com ID do ponto + target'
+    ok ($guiSrc -match "restore `"\{3\}:\{4\}`" --target `"\{5\}`" --verify") 'restaurar pasta: restore "<id>:<raiz>" --target <tmp> --verify (so a raiz, conteudo conferido)'
+    ok ($guiSrc.Contains('[IO.Directory]::Move')) -and -not ($guiSrc -match 'Move-Item -LiteralPath \$sub') 'restaurar pasta: publicacao atomica que falha se o destino existir'
+    ok ($guiSrc.Contains('Test-NomePastaDestino')) 'restaurar pasta: nome da pasta nova validado como um componente'
+    ok ($guiSrc.Contains('Onde salvar') -and $guiSrc.Contains('Nome da nova pasta')) 'restaurar pasta: seletor do pai + campo do nome (destino ainda nao existe)'
+    ok ($guiSrc.Contains('Join-Path $tbPaiRest.Text $tbNomePasta.Text')) 'restaurar pasta: caminho final = pai escolhido + nome informado'
     $bytes = [IO.File]::ReadAllBytes($gui)
     ok ($bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) 'codificacao: UTF-8 com BOM (PS 5.1 le os acentos)'
 
@@ -1060,13 +1064,18 @@ exit 0
 {"id":"$snapAnt","short_id":"aaaaaaaa","time":"2026-11-16T16:26:00Z","paths":["$origem"]}
 {"id":"$snapNov","short_id":"bbbbbbbb","time":"2026-11-17T16:26:00Z","paths":["$origem"]}
 "@ | Set-Content -LiteralPath (Join-Path $stubDir 'snaps.jsonl') -Encoding Ascii
+    # catalogo do ponto A: raiz + subpasta + os arquivos salvos (o conjunto
+    # rel->tipo que a arvore restaurada TEM de reproduzir). UTF-8 para o
+    # nome acentuado nao virar mojibake no ConvertFrom-Json.
     @"
 {"type":"snapshot","paths":["$origem"],"id":"$snapAnt"}
 {"name":".","type":"dir","path":"$origem"}
 {"name":"alterado.txt","type":"file","path":"$origem/alterado.txt"}
 {"name":"removido.txt","type":"file","path":"$origem/removido.txt"}
+{"name":"sub","type":"dir","path":"$origem/sub"}
 {"name":"interno.txt","type":"file","path":"$origem/sub/interno.txt"}
-"@ | Set-Content -LiteralPath (Join-Path $stubDir 'ls.jsonl') -Encoding Ascii
+{"name":"nome com espaços e ação.txt","type":"file","path":"$origem/nome com espaços e ação.txt"}
+"@ | Set-Content -LiteralPath (Join-Path $stubDir 'ls.jsonl') -Encoding UTF8
     # arvore que o ponto ANTIGO tinha (fixture que o stub materializa)
     $arvore = Join-Path $stubDir 'restaurar'; New-Item -ItemType Directory $arvore -Force | Out-Null
     New-Item -ItemType Directory (Join-Path $arvore 'sub') -Force | Out-Null
@@ -1074,7 +1083,6 @@ exit 0
     'REMOVIDO-DEPOIS' | Set-Content (Join-Path $arvore 'removido.txt') -Encoding Ascii -NoNewline
     'INTERNO' | Set-Content (Join-Path $arvore 'sub\interno.txt') -Encoding Ascii -NoNewline
     'ACENTOS' | Set-Content (Join-Path $arvore 'nome com espaços e ação.txt') -Encoding Ascii -NoNewline
-    [IO.File]::WriteAllText((Join-Path $stubDir 'restore.root'), $origem)
     # manifesto gravado "antes daquele backup": caminho relativo -> sha256
     $manifesto = @{}
     Get-ChildItem -LiteralPath $arvore -Recurse -File | ForEach-Object {
@@ -1107,8 +1115,38 @@ exit 0
     $argsLog = Get-Content -LiteralPath (Join-Path $stubDir 'args.log') -Raw
     $linhaRestore = (($argsLog -split '---') | Where-Object { $_ -match '\brestore\b' } | Select-Object -Last 1)
     ok ($linhaRestore -match 'restore' -and $linhaRestore -notmatch '--exclude' -and $linhaRestore -notmatch '--include') 'pasta: restore da arvore inteira, sem filtros'
-    ok ($linhaRestore -match [regex]::Escape($snapAnt)) 'pasta: ID COMPLETO do ponto usado'
+    ok ($linhaRestore -match [regex]::Escape($snapAnt + ':')) 'pasta: ID COMPLETO do ponto com escopo id:raiz (so a raiz escolhida)'
+    ok ($linhaRestore -match [regex]::Escape($origem)) 'pasta: subpasta restaurada e a raiz do ponto (nao a origem de hoje por suposicao)'
+    ok ($linhaRestore -match '--verify') 'pasta: --verify confere o conteudo no proprio restic'
     ok ($linhaRestore -notmatch 'latest') 'pasta: nunca latest'
+
+    # nome da pasta nova: UM componente de caminho valido p/ Windows
+    eq (Test-NomePastaDestino 'restaurado-16-11') $null 'pasta: nome simples aceito'
+    ok ($null -ne (Test-NomePastaDestino '')) 'pasta: nome vazio recusado'
+    ok ($null -ne (Test-NomePastaDestino 'a\b')) 'pasta: nome com separador recusado'
+    ok ($null -ne (Test-NomePastaDestino '..')) 'pasta: .. recusado'
+    ok ($null -ne (Test-NomePastaDestino 'fim.')) 'pasta: ponto final recusado'
+    ok ($null -ne (Test-NomePastaDestino ' espaco')) 'pasta: espaco no inicio recusado'
+    ok ($null -ne (Test-NomePastaDestino 'CON')) 'pasta: nome reservado recusado'
+
+    # SENTINELA: outro processo cria o DESTINO durante a copia -> recusa,
+    # sentinela intacta, nada copiado para dentro do destino alheio.
+    $destDisputa = Join-Path $tmp 'restaurado-disputa'
+    [IO.File]::WriteAllText((Join-Path $stubDir 'restore-mkdir'), $destDisputa)
+    throws { Restore-PastaCompleta -Estado $estado -Config $b1.Config -Snapshot $snapAnt -PathsMeta @($origem) -Destino $destDisputa -Origem $origem } 'pasta: colisao na publicacao -> recusada'
+    eq (Get-Content -LiteralPath (Join-Path $destDisputa 'sentinela.txt') -Raw) 'INTACTO' 'pasta: sentinela do destino alheio intacta'
+    eq (@(Get-ChildItem -LiteralPath $destDisputa -Force)).Count 1 'pasta: nada copiado para dentro do destino alheio'
+    eq (@(Get-ChildItem -LiteralPath $tmp -Directory -Filter '.macip-rest-*' -Force)).Count 0 'pasta: colisao -- temporario limpo'
+    Remove-Item -LiteralPath (Join-Path $stubDir 'restore-mkdir') -Force
+    Remove-Item -LiteralPath $destDisputa -Recurse -Force
+
+    # codigo 0 com conteudo PARCIAL -> NAO e sucesso: nada publicado
+    'x' | Set-Content -LiteralPath (Join-Path $stubDir 'restore-partial') -Encoding Ascii -NoNewline
+    $destParcial = Join-Path $tmp 'restaurado-parcial'
+    throws { Restore-PastaCompleta -Estado $estado -Config $b1.Config -Snapshot $snapAnt -PathsMeta @($origem) -Destino $destParcial -Origem $origem } 'pasta: codigo 0 parcial -> recusado'
+    ok (-not (Test-Path -LiteralPath $destParcial)) 'pasta: codigo 0 parcial -- destino NAO publicado'
+    eq (@(Get-ChildItem -LiteralPath $tmp -Directory -Filter '.macip-rest-*' -Force)).Count 0 'pasta: parcial -- temporario limpo'
+    Remove-Item -LiteralPath (Join-Path $stubDir 'restore-partial') -Force
 
     # destino JA EXISTENTE -> recusa antes de qualquer chamada ao restic
     $destExist = Join-Path $tmp 'dest-existe'; New-Item -ItemType Directory $destExist | Out-Null
@@ -1133,11 +1171,21 @@ exit 0
 {"name":".","type":"dir","path":"/o"}
 "@ | Set-Content -LiteralPath (Join-Path $stubDir 'ls.jsonl') -Encoding Ascii
     throws { Restore-PastaCompleta -Estado $estado -Config $b1.Config -Snapshot $snapAnt -PathsMeta @('/x/alheia') -Destino (Join-Path $tmp 'd3') -Origem $origem } 'pasta: catalogo nao confirma a raiz -> recusado'
-    # devolve o catalogo coerente
+    # catalogo com LINK sob a raiz -> recusa (nunca publica junction)
+    @"
+{"type":"snapshot","paths":["$origem"],"id":"$snapAnt"}
+{"name":".","type":"dir","path":"$origem"}
+{"name":"atalho","type":"symlink","path":"$origem/atalho","link_target":"/fora"}
+"@ | Set-Content -LiteralPath (Join-Path $stubDir 'ls.jsonl') -Encoding Ascii
+    throws { Restore-PastaCompleta -Estado $estado -Config $b1.Config -Snapshot $snapAnt -PathsMeta @($origem) -Destino (Join-Path $tmp 'd4') -Origem $origem } 'pasta: catalogo com link recusado (isolamento)'
+    # catalogo minimo + arvore cheia -> item INESPERADO -> nada publicado
     @"
 {"type":"snapshot","paths":["$origem"],"id":"$snapAnt"}
 {"name":".","type":"dir","path":"$origem"}
 "@ | Set-Content -LiteralPath (Join-Path $stubDir 'ls.jsonl') -Encoding Ascii
+    $destExtra = Join-Path $tmp 'restaurado-extra'
+    throws { Restore-PastaCompleta -Estado $estado -Config $b1.Config -Snapshot $snapAnt -PathsMeta @($origem) -Destino $destExtra -Origem $origem } 'pasta: item inesperado na arvore -> recusado'
+    ok (-not (Test-Path -LiteralPath $destExtra)) 'pasta: item inesperado -- destino NAO publicado'
 
     # erro DURANTE a copia: nada publicado, temporario limpo, origem intacta
     '1' | Set-Content -LiteralPath (Join-Path $stubDir 'restore-code') -Encoding Ascii -NoNewline

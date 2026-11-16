@@ -2227,3 +2227,73 @@ manifesto, removido/alterado/excluido, destino existente, erro na copia
 e preservacao da origem, junto do aceite visual aberto (4b.11).
 Instalador NAO recompilado (sem makensis/payload). VM, tarefa do
 laboratorio e repositorio SFTP nao tocados.
+
+## Revisao 18 — correcoes na restauracao completa antes do instalador
+
+Pedido: tres correcoes na restauracao da pasta inteira (modo arquivo
+mantido): escolha do destino sem digitar caminho inteiro, publicacao
+que nunca sobrescreve colisao tardia, e escopo real da raiz com
+verificacao.
+
+Correcoes (`agent/windows/gui/MacipBackup-Gui.ps1`):
+
+- Destino em duas partes (modo pasta): 'Onde salvar' escolhe a pasta
+  EXISTENTE pelo seletor nativo; 'Nome da nova pasta' recebe UM
+  componente validado por `Test-NomePastaDestino` (sem separador,
+  '..', ponto final, espaco nas pontas, nomes reservados — conjunto
+  Windows explicito, nao depende do SO que roda). O caminho final
+  composto aparece na linha de revisao antes de iniciar; a pasta final
+  NAO e criada antes nem escolhida existente. Modo arquivo inalterado.
+- Publicacao atomica SEM sobrescrever: `[IO.Directory]::Move($sub,
+  $dest)` falha se o caminho final apareceu durante a copia — o que
+  outro processo criou la fica INTACTO (arquivo ou pasta, sentinela
+  preservada), o conflito e informado e so o temporario da tentativa e
+  limpo. Checagem previa sozinha nao bastava: `Move-Item` moveria a
+  subarvore para DENTRO de um diretorio surgido depois. Protecoes de
+  destino fora da raiz/origem e link/junction mantidas.
+- Escopo real + verificacao: `restic restore "<id>:<raiz>" --target
+  <tmp> --verify` — somente a raiz gravada no ponto (sintaxe
+  id:subpasta), nunca o ponto inteiro, nunca 'latest', nunca a origem
+  de hoje; --verify faz o restic conferir conteudo contra o
+  repositorio. `Get-RaizSnapshot` agora devolve raiz + conjunto
+  rel->tipo do catalogo: antes de publicar a arvore restaurada tem de
+  reproduzi-lo — falta, extra, tipo errado ou reparse point -> aborta
+  (codigo 0 parcial NAO e sucesso). Catalogo ambiguo (raiz diferente
+  declarada, itens fora dela), links/junctions no ponto e '..' em
+  caminho catalogado sao recusados com o motivo.
+- Bug encontrado pela propria suite: `@($no.paths).Count` e sempre >=1
+  (`@($null)`), o que fazia todo no do catalogo cair na checagem de
+  raiz — corrigido avaliando o conteudo filtrado.
+
+Testes novos (`run-gui-tests.ps1` + `restic-stub.ps1`):
+
+- Stub: `restore "<id>:<raiz>"` — a subarvore vem do arg, nao de
+  suposicao; gatilhos `restore-mkdir` (outro processo cria o destino
+  com sentinela durante a copia), `restore-partial` (codigo 0 com
+  conteudo incompleto), `restore-nothing`, `restore-code`,
+  `restore-sleep`.
+- Sentinela: colisao na publicacao -> recusa + sentinela intacta +
+  nada copiado para dentro do destino alheio + temporario limpo.
+- Codigo 0 parcial -> recusado, nada publicado, temporario limpo.
+- Escopo: args.log mostra `<id64>:<raiz>` + `--verify`, sem
+  --exclude/--include, nunca 'latest'.
+- Nome da pasta: aceito simples; recusados vazio, 'a\b', '..', 'fim.',
+  espaco no inicio, 'CON'.
+- Catalogo: com link recusado; minimo + arvore cheia -> 'item
+  inesperado' recusado; raiz multipla/ausente/divergente recusadas.
+- Regressoes do aceite anteriores mantidas (manifesto SHA-256,
+  removido volta, alterado volta antigo, excluido ausente, origem
+  intacta, segundo arquivo, destino existente, erro na copia, timeout).
+
+Verificacao: GUI **344 ok, 0 falha** (1 pulado: COM real); agente
+**150 ok, 0 falha**; `unittest test_windows_agent_ps1` **5/5** (suites
+reais); `git diff --check` limpo; BOM `EF BB BF`; parse Tokenize 0
+erros; detector Impeccable manual `[]`.
+
+Separacao de prova: simulado — a prova com `restic restore` REAL
+(manifesto de caminhos+SHA-256 do ponto antigo, removido volta,
+alterado volta, excluido ausente, origem intacta) e o aceite visual
+seguem pendentes na VM com SFTP de teste (roteiro 4b.6a atualizado com
+Onde salvar+nome e a sentinela de colisao). Instalador NAO recompilado
+(sem makensis/payload). VM, tarefa e repositorio do laboratorio nao
+tocados.

@@ -41,13 +41,17 @@ elseif ($args -contains 'ls') {
     if (Test-Path (Join-Path $d 'ls.jsonl')) { Get-Content (Join-Path $d 'ls.jsonl') }
 }
 elseif ($args -contains 'restore') {
-    # Simula 'restic restore <id> --target <dir>': materializa a arvore
-    # fixture de <stub>/restaurar/ em <target>/<raiz achatada>.
-    #   restore.root   raiz gravada no ponto (ex.: 'C:\Dados' ou '/o')
-    #   restaurar/     arvore a publicar (nomes com espacos/acentos ok)
-    #   restore-sleep  segundos de espera (timeout)
-    #   restore-code   codigo de saida != 0 (falha apos materializar)
-    #   restore-nothing: falha sem materializar nada
+    # Simula 'restic restore "<id>:<raiz>" --target <dir> --verify':
+    # materializa a arvore fixture de <stub>/restaurar/ em
+    # <target>/<raiz achatada> — a raiz vem do arg id:SUBPASTA (a parte
+    # depois dos dois-pontos), nao de suposicao.
+    #   restaurar/         arvore a publicar (espacos/acentos ok)
+    #   restore-sleep      segundos de espera (timeout)
+    #   restore-code       codigo de saida != 0 (falha apos materializar)
+    #   restore-nothing    falha sem materializar nada
+    #   restore-mkdir      caminho a criar com sentinela DURANTE a copia
+    #                      (simula outro processo disputando o destino)
+    #   restore-partial    materializa so o primeiro arquivo (codigo 0!)
     if (Test-Path (Join-Path $d 'restore-sleep')) {
         Start-Sleep -Seconds ([int](Get-Content (Join-Path $d 'restore-sleep') -Raw))
     }
@@ -57,13 +61,33 @@ elseif ($args -contains 'restore') {
     } else {
         $ti = [array]::IndexOf([string[]]$args, '--target')
         $target = $(if ($ti -ge 0 -and $ti + 1 -lt $args.Count) { [string]$args[$ti + 1] } else { Join-Path $d 'target-fallback' })
-        $root = if (Test-Path (Join-Path $d 'restore.root')) { (Get-Content (Join-Path $d 'restore.root') -Raw).Trim() } else { 'raiz' }
+        $ri = [array]::IndexOf([string[]]$args, 'restore')
+        $spec = $(if ($ri -ge 0 -and $ri + 1 -lt $args.Count) { [string]$args[$ri + 1] } else { '' })
+        $sep = $spec.IndexOf(':')
+        $root = if ($sep -ge 0) { $spec.Substring($sep + 1) }
+                elseif (Test-Path (Join-Path $d 'restore.root')) { (Get-Content (Join-Path $d 'restore.root') -Raw).Trim() }
+                else { 'raiz' }
+        # raiz do arg pode vir 'C:\Dados' — o primeiro ':' e o separador
+        # id:raiz; um segundo ':' faz parte da raiz Windows. Achata igual.
         $segs = @($root -split '[\\/]+' | Where-Object { $_ -ne '' } | ForEach-Object { $_.TrimEnd(':') })
         $sub = Join-Path $target ($segs -join [IO.Path]::DirectorySeparatorChar)
         New-Item -ItemType Directory -Path $sub -Force | Out-Null
         if (Test-Path (Join-Path $d 'restaurar')) {
-            Get-ChildItem -LiteralPath (Join-Path $d 'restaurar') -Force |
-                Copy-Item -Destination $sub -Recurse -Force
+            if (Test-Path (Join-Path $d 'restore-partial')) {
+                # codigo 0 com conteudo PARCIAL: so o primeiro arquivo
+                $um = @(Get-ChildItem -LiteralPath (Join-Path $d 'restaurar') -File -Force | Select-Object -First 1)
+                foreach ($f in $um) { Copy-Item -LiteralPath $f.FullName -Destination $sub -Force }
+            } else {
+                Get-ChildItem -LiteralPath (Join-Path $d 'restaurar') -Force |
+                    Copy-Item -Destination $sub -Recurse -Force
+            }
+        }
+        # outro processo cria o DESTINO durante a copia: pasta com
+        # sentinela dentro — o publicador nao pode sobrescreve-la.
+        if (Test-Path (Join-Path $d 'restore-mkdir')) {
+            $alvo = (Get-Content (Join-Path $d 'restore-mkdir') -Raw).Trim()
+            New-Item -ItemType Directory -Path $alvo -Force | Out-Null
+            [IO.File]::WriteAllText((Join-Path $alvo 'sentinela.txt'), 'INTACTO')
         }
         $global:LASTEXITCODE = 0
         if (Test-Path (Join-Path $d 'restore-code')) {

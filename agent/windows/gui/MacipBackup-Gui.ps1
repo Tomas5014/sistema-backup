@@ -1092,11 +1092,36 @@ function Restore-Arquivo {
 
 # ---------- restauracao da pasta protegida inteira ----------
 
+function Test-NomePastaDestino {
+    # Nome da pasta nova do destino: UM unico componente de caminho
+    # valido para Windows — sem separador, sem '..', sem reservados.
+    param([string]$Nome)
+    if (-not $Nome -or -not $Nome.Trim()) { return 'Informe o nome da nova pasta.' }
+    $n = $Nome.Trim()
+    if ($n -ne $Nome) { return 'O nome nao pode comecar nem terminar com espaco.' }
+    if ($n.EndsWith('.')) { return 'O nome nao pode terminar com ponto.' }
+    if ($n -in @('.', '..')) { return "O nome '$n' nao e uma pasta valida." }
+    # conjunto WINDOWS explicito (o alvo e sempre Windows): no Linux,
+    # GetInvalidFileNameChars nao inclui '\' nem ':' e deixaria passar
+    if ($n.IndexOfAny([char[]]'\/:*?"<>|') -ge 0) {
+        return 'O nome tem caractere invalido para pasta do Windows (\ / : * ? " < > |).'
+    }
+    $base = ($n -split '\.')[0]
+    if ($base -match '^(?i)(con|prn|aux|nul|com[1-9]|lpt[1-9])$') {
+        return "O nome '$base' e reservado pelo Windows."
+    }
+    return $null
+}
+
 function Get-RaizSnapshot {
     # Raiz protegida registrada NO PONTO — metadados (paths do snapshot)
     # confirmados pelo catalogo (restic ls). A origem atual pode ter
     # mudado depois do backup: vale o que o ponto gravou. Sempre o ID
     # COMPLETO escolhido — nunca 'latest' nem arvore alheia.
+    # Retorna Raiz + Esperados: o conjunto rel->tipo do catalogo sob a
+    # raiz, que a arvore restaurada TEM de reproduzir antes de publicar.
+    # Catalogo ambiguo (raiz diferente, nos fora dela sem explicacao,
+    # links, '..' escapando) -> para com o motivo.
     param([pscustomobject]$Cfg, [string]$Estado, [string]$Snapshot, [object]$PathsMeta)
     $paths = @($PathsMeta | Where-Object { $_ })
     if ($paths.Count -ne 1) {
@@ -1108,22 +1133,45 @@ function Get-RaizSnapshot {
     $r = Invoke-ResticConsulta -Cfg $Cfg -Estado $Estado -Comando @('ls', '--json', $Snapshot) -PrazoMs ([int]$script:ConsultaTimeoutMs)
     if ($r.Codigo -ne 0) { throw "Falha ao ler o catalogo do ponto (restic $($r.Codigo)): $(($r.Linhas | Select-Object -First 3) -join ' ')" }
     $confirma = $false
+    $esperados = @{}
     foreach ($linha in $r.Linhas) {
         try { $no = $linha | ConvertFrom-Json } catch { continue }
-        # no "snapshot" do catalogo repete os paths gravados
-        foreach ($pth in @($no.paths)) {
-            if ([string]$pth -ieq $raiz) { $confirma = $true }
+        # no "snapshot" do catalogo repete os paths gravados no ponto
+        # (@($null).Count == 1 -- confere o CONTEUDO, nao a propriedade)
+        $decl = @($no.paths | Where-Object { $_ })
+        if ($decl.Count -gt 0) {
+            if ($decl.Count -ne 1 -or [string]$decl[0] -ine $raiz) {
+                throw ("O catalogo do ponto registra raizes diferentes da escolhida " +
+                    "(catalogo: '$($decl -join '|')' / ponto: '$raiz') — ambiguo, restauracao recusada.")
+            }
+            $confirma = $true
+            continue
         }
-        # ou um no da arvore bate com a raiz / vive sob ela
-        if ($no.path) {
-            $np = ([string]$no.path).TrimEnd('\','/')
-            if ($np -ieq $raizNorm -or $np.StartsWith($raizNorm + '/') -or $np.StartsWith($raizNorm + '\')) { $confirma = $true }
+        if (-not $no.path) { continue }
+        $np = ([string]$no.path).TrimEnd('\','/')
+        if (-not ($np -ieq $raizNorm -or $np.StartsWith($raizNorm + '/') -or $np.StartsWith($raizNorm + '\'))) {
+            throw ('O catalogo tem itens fora da raiz registrada sem outra raiz ' +
+                'declarada — catalogo ambiguo, restauracao recusada.')
         }
+        $confirma = $true
+        $tipo = [string]$no.type
+        if ($tipo -ne 'file' -and $tipo -ne 'dir') {
+            throw ("O ponto contem '$tipo' ($($no.path)) — links e junctions nao sao " +
+                'restaurados para nao comprometer o isolamento; restaure por arquivo.')
+        }
+        # caminho relativo seguro: nada de '..' nem absoluto escondido
+        $rel = $np.Substring($raizNorm.Length).TrimStart('\','/')
+        $segs = @($rel -split '[\\/]+' | Where-Object { $_ -ne '' })
+        if (($segs | Where-Object { $_ -eq '..' }).Count -gt 0 -or
+            ($rel -match '^[a-zA-Z]:')) {
+            throw "Caminho inseguro no catalogo ('$($no.path)') — restauracao recusada."
+        }
+        $esperados[($segs -join '/')] = $tipo
     }
     if (-not $confirma) {
         throw 'O catalogo do ponto nao confirma a raiz registrada — recusado (nunca restaurar uma arvore alheia).'
     }
-    return $raiz
+    return [pscustomobject]@{ Raiz = $raiz; Esperados = $esperados }
 }
 
 function Get-PastaSubarvore {
@@ -1138,12 +1186,15 @@ function Get-PastaSubarvore {
 }
 
 function Invoke-ResticRestore {
-    # 'restic restore <id> --target <tmp>' materializa a arvore do ponto no
-    # temporario — ID completo, sem --include/--exclude (restaura o que foi
-    # efetivamente salvo naquela data; as exclusoes ATUAIS nao se aplicam).
+    # 'restic restore "<id>:<raiz>" --target <tmp> --verify' materializa
+    # SOMENTE a raiz escolhida do ponto (sintaxe id:subpasta do restic —
+    # nunca o ponto inteiro, nunca 'latest', nunca a origem de hoje).
+    # Sem --include/--exclude: restaura o que foi efetivamente salvo
+    # naquela data (as exclusoes ATUAIS nao se aplicam). --verify faz o
+    # proprio restic conferir o conteudo restaurado contra o repositorio.
     # Mesma disciplina do dump: stdout+stderr drenados em paralelo, UM
     # prazo monotonico cobre processo e leitura, no estouro Kill.
-    param([pscustomobject]$Cfg, [string]$Estado, [string]$Snapshot, [string]$AlvoTmp)
+    param([pscustomobject]$Cfg, [string]$Estado, [string]$Snapshot, [string]$Raiz, [string]$AlvoTmp)
     $exe = Join-Path $Estado $script:ResticExeNome
     $senha = Read-ResticPassword -Caminho (Join-Path $Estado 'restic.dpapi')
     $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($senha)
@@ -1151,8 +1202,8 @@ function Invoke-ResticRestore {
     try {
         $psi = [Diagnostics.ProcessStartInfo]::new()
         $sftpCmd = 'sftp.command={0} -F {1} -s {2} sftp' -f $Cfg.ssh_exe, $Cfg.ssh_config, $Cfg.sftp_host
-        $resticArgs = '--repo "{0}" --cache-dir "{1}" -o "{2}" restore "{3}" --target "{4}"' -f `
-            $Cfg.repositorio, (Join-Path $Estado 'cache'), $sftpCmd, $Snapshot, $AlvoTmp
+        $resticArgs = '--repo "{0}" --cache-dir "{1}" -o "{2}" restore "{3}:{4}" --target "{5}" --verify' -f `
+            $Cfg.repositorio, (Join-Path $Estado 'cache'), $sftpCmd, $Snapshot, $Raiz, $AlvoTmp
         if (Test-IsWindows) {
             $psi.FileName = $exe; $psi.Arguments = $resticArgs
         } else {
@@ -1216,7 +1267,8 @@ function Restore-PastaCompleta {
     [void](Confirm-DestinoOperacional -Cfg $cfg -Estado $Estado)
     # raiz gravada NO PONTO (metadados + catalogo) — se a origem mudou
     # desde o backup, vale a raiz do ponto; origem atual tambem protegida.
-    $raiz = Get-RaizSnapshot -Cfg $cfg -Estado $Estado -Snapshot $Snapshot -PathsMeta $PathsMeta
+    $info = Get-RaizSnapshot -Cfg $cfg -Estado $Estado -Snapshot $Snapshot -PathsMeta $PathsMeta
+    $raiz = $info.Raiz
     foreach ($o in @($raiz, $cfg.origem, $Origem)) {
         if (-not $o) { continue }
         $oRes = Resolve-PathSeguro -Caminho $o
@@ -1230,16 +1282,46 @@ function Restore-PastaCompleta {
     $tmp = Join-Path $pai ('.macip-rest-' + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $tmp | Out-Null
     try {
-        [void](Invoke-ResticRestore -Cfg $cfg -Estado $Estado -Snapshot $Snapshot -AlvoTmp $tmp)
+        [void](Invoke-ResticRestore -Cfg $cfg -Estado $Estado -Snapshot $Snapshot -Raiz $raiz -AlvoTmp $tmp)
         $sub = Get-PastaSubarvore -Tmp $tmp -Raiz $raiz
         if (-not (Test-Path -LiteralPath $sub -PathType Container)) {
             throw 'Restic terminou sem erro, mas a arvore esperada nao apareceu — nada foi publicado.'
         }
-        # Publica por renomeacao atomica no mesmo volume — o destino nao
-        # existia quando conferido; se apareceu no meio, Move-Item falha e
-        # NADA e sobrescrito.
-        try { Move-Item -LiteralPath $sub -Destination $destResolvido -ErrorAction Stop }
-        catch { throw "Nao foi possivel publicar a pasta restaurada: $($_.Exception.Message)" }
+        # Codigo 0 com pasta parcial NAO e sucesso: a arvore restaurada
+        # tem de reproduzir o conjunto rel->tipo do catalogo — falta,
+        # item extra ou tipo errado -> nada publicado.
+        $vistos = @{}
+        foreach ($item in (Get-ChildItem -LiteralPath $sub -Recurse -Force)) {
+            if ($item.LinkType -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                throw ("Link/junction restaurado ('$($item.FullName)') — publicacao " +
+                    'abortada para nao comprometer o isolamento.')
+            }
+            $relItem = $item.FullName.Substring($sub.Length).TrimStart('\','/')
+            $vistos[($relItem -replace '\\','/')] = $(if ($item.PSIsContainer) { 'dir' } else { 'file' })
+        }
+        foreach ($relE in $info.Esperados.Keys) {
+            if ($relE -eq '') { continue }   # a raiz em si: $sub ja conferida
+            if (-not $vistos.Contains($relE) -or $vistos[$relE] -cne $info.Esperados[$relE]) {
+                throw "Restauracao incompleta — '$relE' esperado no ponto nao apareceu como $($info.Esperados[$relE]). Nada publicado."
+            }
+        }
+        foreach ($relV in $vistos.Keys) {
+            if (-not $info.Esperados.Contains($relV)) {
+                throw "Item inesperado na arvore restaurada ('$relV') — nada publicado."
+            }
+        }
+        # Publica com operacao que FALHA se o caminho final existir
+        # ([IO.Directory]::Move) — uma checagem previa nao basta: se outro
+        # processo criou arquivo ou pasta no destino durante a copia, ele
+        # fica INTACTO, o conflito e informado e so o temporario e limpo.
+        try { [IO.Directory]::Move($sub, $destResolvido) }
+        catch {
+            if (Test-Path -LiteralPath $destResolvido) {
+                throw ('Conflito: o destino apareceu durante a restauracao — ' +
+                    'preservado intacto, nada foi sobrescrito. Escolha outro nome.')
+            }
+            throw "Nao foi possivel publicar a pasta restaurada: $($_.Exception.Message)"
+        }
         if (-not (Test-Path -LiteralPath $destResolvido -PathType Container)) {
             throw 'Publicacao falhou: destino esperado ausente apos a restauracao.'
         }
@@ -2332,11 +2414,29 @@ function Show-Gui {
     $lblRaizPonto = New-Rotulo '-' $true
     $pnlRaiz.Controls.Add($lblRaizPonto)
     Add-Linha $t4 $pnlRaiz 2 | Out-Null
-    $lblEtapa3 = New-Rotulo '3. Pasta de destino (separada e vazia — o original nunca é sobrescrito):'
-    Add-Linha $t4 $lblEtapa3 -1 | Out-Null
+    # destino no modo ARQUIVO: pasta separada e vazia (inalterado)
+    $pnlDestArq = New-Object 'System.Windows.Forms.TableLayoutPanel'
+    $pnlDestArq.AutoSize = $true; $pnlDestArq.ColumnCount = 1; $pnlDestArq.Dock = 'Top'
+    $pnlDestArq.Controls.Add((New-Rotulo '3. Pasta de destino (separada e vazia — o original nunca é sobrescrito):'))
     $tbDest = New-Caixa 'Caminho da pasta de destino da restauração'
     $btDest = New-Botao 'Pasta de destino...' 150
-    Add-Linha $t4 (New-LinhaCampo $tbDest $btDest) 3 | Out-Null
+    $pnlDestArq.Controls.Add((New-LinhaCampo $tbDest $btDest))
+    Add-Linha $t4 $pnlDestArq 3 | Out-Null
+    # destino no modo PASTA: 'Onde salvar' (pasta existente, pelo
+    # seletor) + 'Nome da nova pasta' (um componente) — o destino final
+    # nao existe ainda e NAO pode ser criado antes; a revisao mostra o
+    # caminho final composto.
+    $pnlDestPasta = New-Object 'System.Windows.Forms.TableLayoutPanel'
+    $pnlDestPasta.AutoSize = $true; $pnlDestPasta.ColumnCount = 1
+    $pnlDestPasta.Dock = 'Top'; $pnlDestPasta.Visible = $false
+    $pnlDestPasta.Controls.Add((New-Rotulo '3. Onde salvar (pasta existente — escolha pelo seletor):'))
+    $tbPaiRest = New-Caixa 'Pasta onde a restauração será salva'
+    $btPaiRest = New-Botao 'Onde salvar...' 140
+    $pnlDestPasta.Controls.Add((New-LinhaCampo $tbPaiRest $btPaiRest))
+    $pnlDestPasta.Controls.Add((New-Rotulo '4. Nome da nova pasta (será criada — não pode existir):'))
+    $tbNomePasta = New-Caixa 'Nome da nova pasta de restauração'
+    $pnlDestPasta.Controls.Add($tbNomePasta)
+    Add-Linha $t4 $pnlDestPasta 4 | Out-Null
     # revisao ao vivo: ponto + escopo + caminho final ANTES de iniciar
     $lblRevisao = New-Rotulo ''
     Add-Linha $t4 $lblRevisao -1 | Out-Null
@@ -2372,17 +2472,18 @@ function Show-Gui {
         } else {
             $(if ($cbArq.SelectedItem) { 'arquivo ' + [string]$cbArq.SelectedItem } else { 'arquivo (não escolhido)' })
         })
-        $dest = $(if ($tbDest.Text) { $tbDest.Text } else { '(não escolhido)' })
+        $dest = $(if ($rbPasta.Checked) {
+            if ($tbPaiRest.Text -and $tbNomePasta.Text) {
+                Join-Path $tbPaiRest.Text $tbNomePasta.Text
+            } else { '(escolha onde salvar e informe o nome da nova pasta)' }
+        } elseif ($tbDest.Text) { $tbDest.Text } else { '(não escolhido)' })
         $lblRevisao.Text = "Ponto: $ponto — Escopo: $escopo → Destino: $dest"
     }
     $script:AplicaModo = {
         $pnlArq.Visible = $rbArquivo.Checked
         $pnlRaiz.Visible = $rbPasta.Checked
-        $lblEtapa3.Text = $(if ($rbPasta.Checked) {
-            '3. Pasta de destino (NOVA — será criada; a restauração nunca sobrescreve):'
-        } else {
-            '3. Pasta de destino (separada e vazia — o original nunca é sobrescrito):'
-        })
+        $pnlDestArq.Visible = $rbArquivo.Checked
+        $pnlDestPasta.Visible = $rbPasta.Checked
         $btRest.Text = $(if ($rbPasta.Checked) { 'Restaurar pasta inteira' } else { 'Restaurar arquivo' })
         # no modo pasta, a lista de arquivos nao e consultada — a raiz vem
         # dos metadados do ponto (o catalogo confirma na hora de restaurar)
@@ -2450,15 +2551,21 @@ function Show-Gui {
         & $script:AtualizaRevisaoRest
     })
     $tbDest.Add_TextChanged({ & $script:AtualizaRevisaoRest })
+    $tbPaiRest.Add_TextChanged({ & $script:AtualizaRevisaoRest })
+    $tbNomePasta.Add_TextChanged({ & $script:AtualizaRevisaoRest })
     $btDest.Add_Click({
         $dlg = New-Object "$W.FolderBrowserDialog"
-        $dlg.Description = $(if ($rbPasta.Checked) {
-            'Pasta de destino NOVA (o caminho escolhido ainda não pode existir)'
-        } else {
-            'Pasta SEPARADA e vazia para receber o arquivo restaurado'
-        })
+        $dlg.Description = 'Pasta SEPARADA e vazia para receber o arquivo restaurado'
         $dlg.ShowNewFolderButton = $true
         if ($dlg.ShowDialog() -eq 'OK') { $tbDest.Text = $dlg.SelectedPath }
+    })
+    $btPaiRest.Add_Click({
+        # 'Onde salvar': pasta EXISTENTE escolhida pelo seletor nativo —
+        # a pasta final e o NOME digitado, criado so na restauracao.
+        $dlg = New-Object "$W.FolderBrowserDialog"
+        $dlg.Description = 'Pasta EXISTENTE onde a pasta restaurada será criada'
+        $dlg.ShowNewFolderButton = $true
+        if ($dlg.ShowDialog() -eq 'OK') { $tbPaiRest.Text = $dlg.SelectedPath }
     })
     $btRest.Add_Click({
         $btRest.Enabled = $false; $lblRes.ForeColor = 'DarkBlue'; $lblRes.Text = 'Restaurando…'
@@ -2469,10 +2576,15 @@ function Show-Gui {
             $cfg = Read-AgenteConfig -Caminho $cfgPath
             if ($rbPasta.Checked) {
                 # RESTAURACAO COMPLETA: ID completo do ponto, raiz dos
-                # metadados confirmada pelo catalogo, destino NOVO.
+                # metadados confirmada pelo catalogo, destino = pasta pai
+                # existente (seletor) + NOME da pasta nova (1 componente).
+                $erroNome = Test-NomePastaDestino $tbNomePasta.Text
+                if ($erroNome) { throw $erroNome }
+                if (-not $tbPaiRest.Text) { throw 'Escolha onde salvar pelo seletor (etapa 3).' }
+                $destinoFinal = Join-Path $tbPaiRest.Text $tbNomePasta.Text
                 $res2 = Invoke-Assincrono -Funcao 'Restore-PastaCompleta' -Form $form -PrazoMs ([int]$script:DumpTimeoutMs + 60000) -Params @{
                     Estado = $estado; Config = $cfgPath; Snapshot = $snap.id
-                    PathsMeta = $snap.paths; Destino = $tbDest.Text; Origem = $cfg.origem }
+                    PathsMeta = $snap.paths; Destino = $destinoFinal; Origem = $cfg.origem }
                 $script:ultimoRestaurado = $res2.Destino
                 $lblRes.ForeColor = 'DarkGreen'
                 $lblRes.Text = "Pasta restaurada com sucesso: $($res2.Destino) — o original NÃO foi sobrescrito."
