@@ -1809,3 +1809,90 @@ restic aprovado, desinstalar a versao anterior por Aplicativos
 instalados (ProgramData e repositorio sao preservados) e instalar o
 novo — o tecnico nao repete nenhuma configuracao. A homologacao do
 backup segue separada (piloto 4b).
+
+## Revisao 12 (branch feature/windows-backup-gui-pilot)
+
+**Rodada de usabilidade da interface (observacoes da VM do piloto):**
+backup manual funcionou, backup automatico de 16/11 13:26 confirmado,
+`01-amostra.txt` restaurado com SHA-256 igual ao original — mas o campo
+de horario aparecia como uma linha sem edicao (exigiu copia temporaria
+da GUI), o instalador avisou OpenSSH ausente com `ssh.exe` disponivel
+no PATH, a tela manteve "Disparo solicitado" apos resultado verde e a
+confirmacao de restauracao ficou cortada. Reboot segue pendente.
+
+Correcoes implementadas (escopo: aplicativo Windows SFTP; agente
+reutilizado; identidade do repositorio, credenciais, propriedade e
+pausa da tarefa e instalacoes existentes preservados):
+
+- **Horario e layout:** TextBox substituida por `DateTimePicker`
+  `HH:mm` + `ShowUpDown` (mouse e teclado), mantendo `HH:mm` na
+  configuracao. Previa "Todos os dias as HH:mm, no horario deste
+  computador" antes de salvar; apos gravar, a aba mostra a proxima
+  execucao informada pelo Agendador em `dd/MM/yyyy HH:mm` local.
+  `AutoScaleMode = Dpi` + paineis rolaveis para caminhos e mensagens
+  longas — prova real em 100/125/150% fica no aceite da VM (4b.11).
+- **Situacao do backup:** com configuracao valida a janela abre direto
+  na aba Situacao. Execucao atual, ultimo backup confirmado (data +
+  snapshot) e proxima execucao aparecem em linhas separadas,
+  atualizadas por `Timer` de 15 s (pausa durante operacao de rede) — a
+  mensagem de disparo solicitado cede lugar ao estado real; Concluido
+  so com resultado valido vinculado ao disparo; falha ou ausencia de
+  resultado novo aparece clara e preserva o ultimo confirmado. IDs,
+  conta, SID e versoes em Detalhes (`Get-DetalhesSuporte`, sem
+  segredos); consulta inconclusiva do Agendador mostra o erro de
+  consulta em vez de "SEM TAREFA".
+- **OpenSSH:** `Get-SshExe` agora resolve o executavel que o
+  `sftp.command` realmente usa — canonico `$WINDIR\System32\OpenSSH\
+  ssh.exe` primeiro, depois `ssh.exe` do PATH (`Select-SshCandidato` +
+  `Test-OpenSshExe`: existe, caminho sem espacos — limite do
+  sftp.command — e responde `ssh -V` como OpenSSH; cada recusa registra
+  motivo). Instalador NSIS com o mesmo criterio (`IfFileExists` no
+  canonico ou `SearchPath` no PATH) — o aviso falso da VM se resolvia
+  porque so o caminho canonico era checado.
+- **Lancamento:** excecao na abertura mostra mensagem com a causa e
+  grava `diagnostico-macip.txt` (erro + versoes + pre-requisitos; sem
+  senhas nem chave) para envio a MAC IP.
+- **Primeira configuracao:** aba 2 reorganizada em Escolher pasta e
+  horario -> Revisar e salvar — resumo (pasta, horario, destino novo ou
+  reuso, conta) exibido antes do clique; exclusoes recolhidas em Opcoes
+  avancadas (abrem sozinhas quando a config ativa tem itens). Janela
+  nativa de credencial mantida; cancelamento ou falha preserva
+  configuracao e tarefa anteriores (transacao em duas fases inalterada).
+- **Restauracao:** aba 4 em tres passos — Data do backup -> Arquivo ->
+  Pasta de destino; nome completo do arquivo na tela; sucesso confirmado
+  oferece Abrir pasta restaurada (Explorador); snapshot e SHA-256 em
+  Detalhes; destino separado/vazio e protecao contra sobrescrita
+  mantidos.
+- **Defeito encontrado na propria rodada:** `[DateTimeOffset]::TryParse`
+  falhava com `[ref]` sobre `$null` (sem tipo para resolver o overload
+  "out DateTimeOffset") — variavel agora tipada; e a verificacao OpenSSH
+  abortava com `ErrorActionPreference=Stop` porque stderr do `ssh -V`
+  vira ErrorRecord — preferencia localizada a Continue dentro da
+  verificacao. Ambos pegos pela suite, nao por Windows real.
+
+Verificacao: GUI **222 ok, 0 falha** (1 pulado: COM real fora do
+Windows); agente **150 ok, 0 falha** (1 pulado: MACIP_RESTIC_REAL
+indefinido); `unittest` **5/5** — desta vez com pwsh no PATH, os dois
+testes-ponte executaram as suites PowerShell reais (53 s);
+`git diff --check` limpo; linhas novas em ASCII.
+
+Separacao de prova: TUDO SIMULADO em pwsh 7.4.6/Linux — WinForms,
+COM do Agendador, DPAPI, OpenSSH real do Windows, escalas de DPI,
+atalho do Menu Iniciar e NSIS seguem sem prova real. Instalador NAO
+recompilado: sem makensis nem installer\payload\restic.exe aprovado
+neste ambiente.
+
+ACEITE PENDENTE NA VM (docs/piloto-windows-sftp.md 4b e secao 9):
+instalador novo compilado a partir deste commit -> pessoa sem
+conhecimento previo abre pelo Menu Iniciar na conta dedicada -> valida
+perfil -> escolhe pasta e horario no seletor -> salva na credencial
+nativa -> acompanha backup na Situacao (mensagem de disparo cede ao
+estado real) -> restaura o SEGUNDO arquivo de um ponto -> SHA-256 igual
+ao original. Cobrir: abertura direta na Situacao, OpenSSH
+presente/ausente (4b.10), DPI 100/125/150% e remoto (4b.11),
+cancelamento na credencial preservando config+tarefa, sucesso -> falha
+com janela fechada (4b.7), SFTP mudo na configuracao (4b.8),
+ultimo-confirmado bloqueado (4b.9) e a execucao apos reinicio — a
+homologacao segue PENDENTE ate essa prova; dados reais exigem
+autorizacao registrada e restauracao comprovada pela copia protegida no
+armazenamento definitivo da MAC IP.

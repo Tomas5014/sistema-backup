@@ -107,20 +107,36 @@ faz **pela interface**, sem terminal, JSON ou Agendador.
    *Senha Restic* → um clique só. Avança **somente** quando a identidade
    do servidor e o ID do repositório conferem; mudar perfil, chave ou
    senha depois exige nova validação.
-3. **Aba 2 — Salvar e agendar:** só pasta, horário e exclusões. A senha
-   Windows é pedida na janela nativa; salvar com a tarefa **pausada
-   preserva a pausa** (só *Retomar* religa).
-4. **Aba 3 — Operar:** mostra a **situação deste disparo** (o sucesso de
-   outro disparo nunca conta como novo), o **último backup confirmado**
-   com data/hora, a **próxima execução** e a **ação necessária**. O botão
-   *Executar primeiro backup* dispara a mesma tarefa — "Disparo
-   SOLICITADO" e a conclusão só aparece com resultado do disparo.
+3. **Aba 2 — Escolher pasta e horário → Revisar e salvar:** o horário é
+   um **seletor `HH:mm` com setas** (mouse e teclado), com a prévia
+   *"Todos os dias às HH:mm, no horário deste computador"* visível antes
+   de salvar — a TextBox de uma linha que não aceitava edição na VM foi
+   substituída. Exclusões ficam recolhidas em **Opções avançadas**. A
+   caixa de resumo mostra pasta, horário, destino e conta **antes** do
+   clique; a senha Windows é pedida na janela nativa; depois de gravado,
+   a tela mostra a **próxima execução informada pelo Agendador** em
+   data/hora local brasileira. Salvar com a tarefa **pausada preserva a
+   pausa** (só *Retomar* religa); cancelar a credencial ou uma falha
+   preserva a configuração e a tarefa anteriores.
+4. **Aba 3 — Situação:** com configuração válida a janela **abre direto
+   nesta aba**. Mostra em linhas separadas a **execução atual** (o
+   sucesso de outro disparo nunca conta como novo), o **último backup
+   confirmado** com data/hora e a **próxima execução**, com **ação
+   necessária** — atualizadas sozinhas a cada 15 s, sem o técnico clicar
+   (o aviso de disparo solicitado cede lugar ao estado real). IDs,
+   conta, SID e versões ficam em **Detalhes**. O botão *Executar primeiro
+   backup* dispara a mesma tarefa — a conclusão só aparece com resultado
+   vinculado ao disparo.
 5. Prova sem sessão: encerrar a sessão antes do horário, religar e
    conferir *BACKUP CONCLUIDO* (resultado vinculado ao disparo) ou a
    ação indicada.
-6. **Aba 4 — Restaurar:** ponto, arquivo (seleção literal), pasta
-   separada e vazia — o original nunca é sobrescrito; vínculos
-   SSH/destino são reconferidos antes de qualquer acesso.
+6. **Aba 4 — Restaurar:** três passos — *Data do backup → Arquivo →
+   Pasta de destino*. O nome **completo** do arquivo aparece na tela;
+   destino separado e vazio (o original nunca é sobrescrito); vínculos
+   SSH/destino reconferidos antes de qualquer acesso. Após sucesso
+   confirmado: **Abrir pasta restaurada** e conferir snapshot + SHA-256
+   em **Detalhes** — comparar o SHA-256 do arquivo restaurado com o
+   original.
 7. **Sucesso → falha com a janela fechada:** com a GUI fechada, forçar
    um disparo que falhe (ex.: pausar o SFTP ou cortar a rede no
    horário) depois de um sucesso confirmado. Ao reabrir, a tela deve
@@ -139,6 +155,22 @@ faz **pela interface**, sem terminal, JSON ou Agendador.
    conferir: `ultimo-confirmado.json` **idêntico** ao anterior
    (SHA-256), `ultimo-resultado.json` mostra o novo snapshot +
    `confirmado_erro`, e nenhum `*.tmp` fica para trás no estado.
+10. **OpenSSH presente e ausente:** com `ssh.exe` acessível no PATH
+    (mesmo fora de `System32\OpenSSH`), o instalador **não** deve
+    mostrar aviso e a aba Ativar deve listar o pré-requisito como
+    encontrado. Simular a ausência (renomear o `ssh.exe` do PATH ou
+    testar em conta/PATH sem ele) → o aviso correto aparece, com o
+    caminho esperado — o executável é conferido de verdade (`ssh -V`
+    precisa responder OpenSSH; caminho com espaços é recusado).
+11. **Escalas de tela:** repetir a abertura da janela com DPI em
+    **100 %, 125 % e 150 %** (e por acesso remoto, se for o caso) —
+    campos, botões, caminhos e mensagens longas não podem cortar nem se
+    sobrepor, e o seletor de horário continua operável por mouse e
+    teclado.
+12. **Atalho falho → diagnóstico:** se a janela não abrir pelo Menu
+    Iniciar, a mensagem de erro informa a causa e o arquivo
+    `diagnostico-macip.txt` (sem senhas nem conteúdo de chave) fica
+    disponível para enviar à MAC IP.
 
 ### 4c. Pelo script (diagnóstico)
 
@@ -334,6 +366,18 @@ Ficha de acompanhamento (uma linha por disparo):
 Aprovação exige, registrado na ficha:
 
 - Autorização do cliente registrada **antes** da instalação.
+- **Fluxo pela interface, sem conhecimento prévio:** uma pessoa nova
+  recebe o instalador + o perfil de laboratório, abre pelo Menu
+  Iniciar, valida, escolhe pasta e horário **no seletor**, salva na
+  janela nativa de credencial, acompanha um backup na aba Situação (a
+  mensagem de disparo cede lugar ao estado real) e restaura o **segundo
+  arquivo** de um ponto — tudo só pela interface. Na validação
+  técnica, comparar o SHA-256 do restaurado com o original. Cobrir
+  também: abertura direta na Situação com config válida, OpenSSH
+  presente/ausente (item 4b.10), escalas 100/125/150 % (4b.11) e
+  cancelamento na credencial preservando config+tarefa.
+- **Execução após reinício:** backup agendado confirmado depois de
+  reboot/logoff, sem sessão — **pendente**, não aprovar sem isso.
 - Evidência dos **7 disparos** (tabela completa, sem execução ausente
   ou com explicação aceita).
 - Prova da **cópia protegida** aprovada (seção 6) e evidência dos

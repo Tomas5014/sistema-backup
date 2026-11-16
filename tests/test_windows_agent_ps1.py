@@ -61,6 +61,11 @@ class TestWindowsAgentPs1(unittest.TestCase):
         # o agente jamais cria repositório
         self.assertNotIn("'init'", fonte)
         self.assertNotIn('"init"', fonte)
+        # OpenSSH: resolve o executavel que o sftp.command realmente usa
+        # (canonico -> PATH, com verificacao 'ssh -V' de OpenSSH)
+        self.assertIn("Select-SshCandidato", fonte)
+        self.assertIn("Test-OpenSshExe", fonte)
+        self.assertIn("Get-Command ssh.exe", fonte)
 
     def test_contrato_gui(self):
         """Contrato estático da interface e do perfil de exemplo."""
@@ -95,6 +100,27 @@ class TestWindowsAgentPs1(unittest.TestCase):
         # prova de validacao vinculada a perfil+chave+senha capturados
         self.assertIn("Get-TokenAtivacao", fonte)
         self.assertIn("Test-AtivacaoVigente", fonte)
+        # horario: seletor DateTimePicker HH:mm (bug da linha na VM),
+        # sem TextBox livre para o horario
+        self.assertIn("DateTimePicker", fonte)
+        self.assertIn("ShowUpDown = $true", fonte)
+        self.assertIn("CustomFormat = 'HH:mm'", fonte)
+        self.assertNotIn("$tbHora", fonte)
+        # previa do agendamento antes de salvar
+        self.assertIn("Format-PreviaHorario", fonte)
+        # situacao: auto-atualizacao + detalhes de suporte + abertura direta
+        self.assertIn("System.Windows.Forms.Timer", fonte)
+        self.assertIn("Get-DetalhesSuporte", fonte)
+        self.assertIn("Test-ConfiguracaoPronta", fonte)
+        # exclusoes em Opcoes avancadas; janela de credencial nativa mantida
+        self.assertIn("Opcoes avancadas", fonte)
+        # restauracao: abrir pasta restaurada apos sucesso
+        self.assertIn("Abrir pasta restaurada", fonte)
+        # lancamento falho -> diagnostico sem segredos
+        self.assertIn("Write-Diagnostico", fonte)
+        self.assertIn("diagnostico-macip.txt", fonte)
+        # layout que acompanha a escala de DPI
+        self.assertIn("AutoScaleMode", fonte)
 
     def test_contrato_instalador(self):
         """Contrato estatico do instalador NSIS."""
@@ -130,6 +156,11 @@ class TestWindowsAgentPs1(unittest.TestCase):
         # espaco): sem elas, "C:\Program" seria executado como programa
         self.assertIn('\'"$INSTDIR\\desinstalar.exe"\'', nsi)
         self.assertIn('DeleteRegKey HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\MACIP-Backup"', nsi)
+        # OpenSSH: o mesmo criterio do agente -- canonico OU ssh.exe no
+        # PATH (na VM o ssh estava disponivel fora do caminho canonico)
+        self.assertIn('$WINDIR\\System32\\OpenSSH\\ssh.exe', nsi)
+        self.assertIn('SearchPath', nsi)
+        self.assertIn('"ssh.exe"', nsi)
         # o script estruturado verifica marca + acao + instancias via COM
         desinst = (AGENT_DIR / "installer" / "Desinstalar-Tarefa.ps1").read_text(
             encoding="utf-8")

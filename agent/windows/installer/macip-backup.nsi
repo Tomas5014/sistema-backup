@@ -46,10 +46,17 @@ Section "Instalar"
   SetShellVarContext all             ; $APPDATA = %ProgramData%, $SMPROGRAMS = todos os usuarios
   SetOutPath "$INSTDIR"
 
-  ; Pre-requisito: Cliente OpenSSH do Windows (recurso opcional do SO).
+  ; Pre-requisito: Cliente OpenSSH do Windows -- o MESMO criterio do
+  ; agente em tempo de execucao: primeiro o caminho canonico do recurso
+  ; opcional, depois o ssh.exe que o PATH resolver (na VM do piloto o
+  ; ssh estava disponivel fora do caminho canonico e este aviso era
+  ; incorreto). A interface revalida o executavel na ativacao.
   IfFileExists "$WINDIR\System32\OpenSSH\ssh.exe" ssh_ok
+  SearchPath $0 "ssh.exe"
+  StrCmp $0 "" ssh_falta ssh_ok
+  ssh_falta:
     MessageBox MB_ICONEXCLAMATION|MB_OK \
-      "Cliente OpenSSH nao encontrado em $WINDIR\System32\OpenSSH.$\n$\nAtive em: Configuracoes > Aplicativos > Recursos opcionais > Adicionar recurso > Cliente OpenSSH.$\nA instalacao continua, mas o backup so funcionara depois disso."
+      "Cliente OpenSSH nao encontrado em $WINDIR\System32\OpenSSH nem no PATH.$\n$\nAtive em: Configuracoes > Aplicativos > Recursos opcionais > Adicionar recurso > Cliente OpenSSH.$\nA instalacao continua, mas o backup so funcionara depois disso."
   ssh_ok:
 
   File "..\Backup-MacipCliente.ps1"

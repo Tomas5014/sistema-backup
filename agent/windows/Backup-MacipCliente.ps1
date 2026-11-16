@@ -161,15 +161,58 @@ function Read-AgenteConfig {
     return [pscustomobject]$r
 }
 
+function Test-OpenSshExe {
+    # Confirma que o executavel e de fato um cliente OpenSSH ('ssh -V'
+    # responde instantaneamente com a versao -- um ssh.exe que nao fala
+    # OpenSSH nao serve para o sftp.command).
+    param([string]$Caminho)
+    try {
+        $v = (& {
+            # stderr do ssh.exe vira ErrorRecord no pipe: sem localizar a
+            # preferencia, EAP=Stop abortaria antes de conferir o texto.
+            $ErrorActionPreference = 'Continue'
+            & $Caminho -V 2>&1 | Out-String
+        })
+        return ($v -match 'OpenSSH')
+    } catch { return $false }
+}
+
+function Select-SshCandidato {
+    # Escolhe o PRIMEIRO candidato utilizavel: existe, nao tem espacos no
+    # caminho (o sftp.command do Restic nao cita o executavel) e responde
+    # como OpenSSH. Devolve o caminho resolvido e os motivos de cada
+    # rejeicao -- o diagnostico precisa dizer O QUE foi encontrado e
+    # descartado, nao so "nao achou".
+    param([string[]]$Candidatos)
+    $rejeitados = @(); $vistos = @{}
+    foreach ($c in $Candidatos) {
+        if (-not $c) { continue }
+        if ($vistos.ContainsKey($c)) { continue }; $vistos[$c] = $true
+        if ($c -match '\s') { $rejeitados += "$c (espacos no caminho)"; continue }
+        if (-not (Test-Path -LiteralPath $c -PathType Leaf)) { continue }
+        if (-not (Test-OpenSshExe -Caminho $c)) { $rejeitados += "$c (nao respondeu como OpenSSH)"; continue }
+        return [pscustomobject]@{ Caminho = $c.Replace('\', '/'); Rejeitados = $rejeitados }
+    }
+    return [pscustomobject]@{ Caminho = $null; Rejeitados = $rejeitados }
+}
+
 function Get-SshExe {
     if ($script:SshExe) { return $script:SshExe }
     if (Test-IsWindows) {
-        $p = Join-Path $env:WINDIR 'System32\OpenSSH\ssh.exe'
-        if (-not (Test-Path -LiteralPath $p -PathType Leaf)) {
-            throw "OpenSSH nao encontrado: $p (instale o recurso opcional 'Cliente OpenSSH')"
+        # O MESMO executavel que o sftp.command recebe: primeiro o
+        # recurso opcional do Windows (caminho canonico), depois o ssh.exe
+        # que o PATH resolver -- na VM do piloto o ssh estava disponivel
+        # fora do caminho canonico e a checagem antiga acusava ausencia.
+        $cands = @( (Join-Path $env:WINDIR 'System32\OpenSSH\ssh.exe') )
+        $cmd = Get-Command ssh.exe -ErrorAction SilentlyContinue
+        if ($cmd) { $cands += $cmd.Source }
+        $sel = Select-SshCandidato -Candidatos $cands
+        if (-not $sel.Caminho) {
+            $rejeicao = if ($sel.Rejeitados.Count -gt 0) { ' Encontrado mas inutilizavel: ' + ($sel.Rejeitados -join '; ') + '.' } else { '' }
+            throw ("Cliente OpenSSH nao encontrado (procurados: $($cands -join '; ')).$rejeicao " +
+                "Ative o recurso opcional 'Cliente OpenSSH' ou deixe ssh.exe num caminho sem espacos no PATH.")
         }
-        if ($p -match '\s') { throw "Caminho do OpenSSH com espacos nao suportado: $p" }
-        return $p.Replace('\', '/')
+        return $sel.Caminho
     }
     $ssh = Get-Command ssh -ErrorAction SilentlyContinue
     if (-not $ssh) { throw 'OpenSSH nao encontrado no PATH' }

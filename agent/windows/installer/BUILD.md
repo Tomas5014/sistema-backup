@@ -28,8 +28,14 @@ a senha Restic (chave e senha por canal seguro, nunca junto ao pacote).
 
 ## O que o instalador faz
 
-- Verifica o Cliente OpenSSH do Windows e avisa se faltar (instalação
-  continua; backup só funciona depois de ativado).
+- Verifica o Cliente OpenSSH do Windows pelo **mesmo critério do
+  agente**: aceito se existir `%WINDIR%\System32\OpenSSH\ssh.exe`
+  (canônico) **ou** um `ssh.exe` resolvível pelo `PATH` (`SearchPath`).
+  Aviso só aparece quando **nenhum** dos dois resolve — na VM do piloto
+  o `ssh.exe` estava no PATH fora do caminho canônico e o aviso antigo
+  era falso. A checagem do executável efetivo (responde `ssh -V` como
+  OpenSSH, caminho sem espaços) fica no agente/GUI. Instalação continua
+  com o aviso; backup só funciona depois do OpenSSH ativado.
 - Instala **sempre** em `%ProgramFiles%\MACIP-Backup` (pasta protegida
   por ACL do Windows contra usuários comuns): sem página de diretório,
   e `.onInit` aborta se `/D=` ou outro caminho for forçado — no piloto

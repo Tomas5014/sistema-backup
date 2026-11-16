@@ -601,6 +601,102 @@ try {
     ok ($null -eq (Read-Confirmado -Estado $estado -RepositorioId $idValido)) 'confirmado corrompido: nao apresentado'
     Remove-Item -LiteralPath (Join-Path $estado 'ultimo-confirmado.json') -Force
 
+    # ---- resolucao do OpenSSH (o exe que o agente realmente usa) ----
+    # Bug da VM: instalador/GUI checavam so o caminho canonico; o ssh.exe
+    # disponivel no PATH passava despercebido -> falso "OpenSSH ausente".
+    $sshDir = Join-Path $tmp 'ssh-fakes'; New-Item -ItemType Directory $sshDir | Out-Null
+    if (Test-IsWindows) {
+        # no Windows o "executavel" falso e um .cmd (executavel por &)
+        '@echo OpenSSH_for_Windows_9.5p2' | Set-Content -LiteralPath (Join-Path $sshDir 'ssh-openssh.cmd') -Encoding Ascii
+        '@echo lixo qualquer' | Set-Content -LiteralPath (Join-Path $sshDir 'ssh-estranho.cmd') -Encoding Ascii
+        $sshBom = Join-Path $sshDir 'ssh-openssh.cmd'; $sshRuim = Join-Path $sshDir 'ssh-estranho.cmd'
+    } else {
+        @'
+#!/bin/sh
+echo 'OpenSSH_for_Windows_9.5p2' >&2
+exit 0
+'@ | Set-Content -LiteralPath (Join-Path $sshDir 'ssh-openssh') -Encoding Ascii
+        @'
+#!/bin/sh
+echo 'lixo qualquer' >&2
+exit 0
+'@ | Set-Content -LiteralPath (Join-Path $sshDir 'ssh-estranho') -Encoding Ascii
+        $sshBom = Join-Path $sshDir 'ssh-openssh'; $sshRuim = Join-Path $sshDir 'ssh-estranho'
+        & chmod +x $sshBom $sshRuim | Out-Null
+    }
+    $dirEspaco = Join-Path $tmp 'dir com espaco'; New-Item -ItemType Directory $dirEspaco | Out-Null
+    Copy-Item -LiteralPath $sshBom -Destination (Join-Path $dirEspaco 'ssh-com-espaco')
+    $sel = Select-SshCandidato -Candidatos @($sshBom)
+    eq $sel.Caminho $sshBom.Replace('\','/') 'OpenSSH valido no caminho: resolvido'
+    $sel2 = Select-SshCandidato -Candidatos @($sshRuim, $sshBom)
+    eq $sel2.Caminho $sshBom.Replace('\','/') 'nao-OpenSSH ignorado, OpenSSH seguinte escolhido'
+    ok ((@($sel2.Rejeitados) -join ';') -like '*nao respondeu como OpenSSH*') 'rejeitado: motivo "nao respondeu como OpenSSH" registrado'
+    $sel3 = Select-SshCandidato -Candidatos @((Join-Path $dirEspaco 'ssh-com-espaco'), $sshBom)
+    eq $sel3.Caminho $sshBom.Replace('\','/') 'caminho com espacos descartado (limite sftp.command)'
+    ok ((@($sel3.Rejeitados) -join ';') -like '*espacos no caminho*') 'rejeitado: motivo "espacos no caminho" registrado'
+    $sel4 = Select-SshCandidato -Candidatos @((Join-Path $tmp 'ausente-ssh'))
+    ok ($null -eq $sel4.Caminho) 'nenhum candidato: resolucao vazia (erro claro no Get-SshExe)'
+    $sshReal = try { Get-SshExe } catch { $null }
+    if ($sshReal) { ok ($sshReal.Length -gt 0) 'Get-SshExe: executavel resolvido no ambiente' }
+    else { pula 'Get-SshExe: ambiente sem OpenSSH utilizavel' }
+
+    # ---- apresentacao: formato brasileiro / previa / resumo ----
+    eq (Format-DataBR ([DateTime]'2030-01-01 13:26:00')) '01/01/2030 13:26' 'data BR: DateTime local -> dd/MM/yyyy HH:mm'
+    eq (Format-DataBR 'amanha') '-' 'data BR: texto invalido -> -'
+    eq (Format-DataBR $null) '-' 'data BR: nulo -> -'
+    $iso = '2030-01-01T14:00:00Z'
+    $esperadoIso = ([DateTimeOffset]::Parse($iso, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal)).LocalDateTime.ToString('dd/MM/yyyy HH:mm')
+    eq (Format-DataBR $iso) $esperadoIso 'data BR: ISO UTC convertido p/ horario local'
+    eq (Format-DataBR ([DateTime]'0001-01-01')) '-' 'data BR: sentinela COM -> -'
+    eq (Format-PreviaHorario '13:26') 'Todos os dias as 13:26, no horario deste computador.' 'previa do agendamento diario'
+    eq (Format-PreviaHorario '25:00') 'Horario invalido (use HH:mm).' 'previa: horario invalido'
+    $resumo = Get-ResumoConfiguracao -Origem 'D:\Dados' -HHmm '13:26' -Destino 'sftp:u@h:/dados/x' -Conta 'LAB\operador'
+    ok ($resumo -match 'Pasta protegida: D:\\Dados' -and $resumo -match 'todos os dias as 13:26' -and $resumo -match 'LAB\\operador') 'resumo: pasta+horario+conta presentes'
+    ok ((Get-ResumoConfiguracao -Origem '' -HHmm '13:26' -Destino '' -Conta 'c') -match 'reusa o destino atual') 'resumo: sem perfil novo -> reusa destino atual'
+
+    # ---- abertura direta na Situacao (config valida) ----
+    $script:Backend = New-BackendFalso
+    $script:Backend.defData = @{ descricao='MACIP Backup - agente de backup do piloto'; userId=$contaPrep; logon=1
+                                 enabled=$true
+                                 args=(Get-TaskActionArgs -Agente $script:AgentePath -Config $b1.Config -Estado $b1.Estado); trigger='' }
+    ok (Test-ConfiguracaoPronta) 'config valida: interface abre direto na aba Situacao'
+    $metaReal2 = $script:GuiMeta
+    $script:GuiMeta = Join-Path $tmp 'gui-meta-vazio.json'
+    $script:Backend = New-BackendFalso      # sem tarefa e sem meta
+    ok (-not (Test-ConfiguracaoPronta)) 'sem config: interface abre pela Ativacao'
+    $script:GuiMeta = $metaReal2
+
+    # ---- detalhes de suporte: IDs e dados, SEM segredos ----
+    $det = Get-DetalhesSuporte -Info ([pscustomobject]@{ Conta='LAB\operador'; Codigo=0; Ultima='2030-01-01T13:26:00Z' }) `
+        -Res ([pscustomobject]@{ status='sucesso'; codigo_restic=0; inicio_utc='2030-01-01T13:26:00Z'; fim_utc='2030-01-01T13:30:00Z'; snapshot=$snapOk }) `
+        -Conf ([pscustomobject]@{ fim_utc='2030-01-01T13:30:00Z'; snapshot=$snapOk }) `
+        -Estado 'E' -ConfigPath 'C'
+    ok ($det -match 'conta da tarefa: LAB\\operador') 'detalhes: conta presente'
+    ok ($det -match "snapshot: $snapOk") 'detalhes: ID do snapshot completo'
+    ok ($det -match 'powershell:') 'detalhes: versao do powershell presente'
+    ok ($det -notmatch [regex]::Escape($script:senhaTeste)) 'detalhes: SEM a senha'
+
+    # ---- diagnostico de abertura: arquivo sem segredos ----
+    $diag = Write-Diagnostico -Erro ([Exception]::new('falha simulada'))
+    ok ($diag -and (Test-Path -LiteralPath $diag -PathType Leaf)) 'diagnostico: arquivo gravado'
+    $diagTxt = Get-Content -LiteralPath $diag -Raw
+    ok ($diagTxt -match 'falha simulada' -and $diagTxt -match 'powershell:' -and $diagTxt -match 'ssh') 'diagnostico: erro+versoes+ssh presentes'
+    ok ($diagTxt -notmatch [regex]::Escape($script:senhaTeste) -and $diagTxt -notmatch '(?i)private') 'diagnostico: SEM senha/chave'
+
+    # ---- abrir pasta restaurada: fora do Windows -> aviso, nunca quebra ----
+    eq (Open-PastaRestaurada -Alvo (Join-Path $tmp 'qualquer.txt')) $false 'abrir pasta: fora do Windows -> $false (aviso na tela)'
+
+    # ---- contrato da nova tela (estatico) ----
+    ok ($guiSrc.Contains('DateTimePicker') -and $guiSrc.Contains('ShowUpDown = $true') -and $guiSrc.Contains("CustomFormat = 'HH:mm'")) 'seletor de horario: DateTimePicker HH:mm com ShowUpDown'
+    ok (-not $guiSrc.Contains('$tbHora')) 'seletor de horario: TextBox livre removida (bug da linha na VM)'
+    ok ($guiSrc.Contains('System.Windows.Forms.Timer')) 'auto-atualizacao: Timer da Situacao presente'
+    ok ($guiSrc.Contains('Opcoes avancadas')) 'exclusoes em Opcoes avancadas (colapsavel)'
+    ok ($guiSrc.Contains('Abrir pasta restaurada')) 'restaurar: botao Abrir pasta restaurada'
+    ok ($guiSrc.Contains('Write-Diagnostico') -and $guiSrc.Contains('diagnostico-macip.txt')) 'lancamento: diagnostico sem segredos'
+    ok ($guiSrc.Contains('Test-ConfiguracaoPronta')) 'abertura direta na Situacao: decisao isolada'
+    ok ($guiSrc.Contains('Get-DetalhesSuporte')) 'detalhes de suporte: bloco isolado'
+    ok ($guiSrc -match "AutoScaleMode = .Dpi.") 'layout: escala de DPI (100/125/150%)'
+
     # Restore-Arquivo: destino = origem / dentro da origem / junction
     throws { Restore-Arquivo -Estado $estado -Config $b1.Config -Snapshot ('c'*64) -Arquivo '/o/amostra.txt' -Destino $origem -Origem $origem } 'restaurar: destino = origem recusado'
     throws { Restore-Arquivo -Estado $estado -Config $b1.Config -Snapshot ('c'*64) -Arquivo '/o/amostra.txt' -Destino (Join-Path $origem 'sub') -Origem $origem } 'restaurar: destino dentro da origem recusado'

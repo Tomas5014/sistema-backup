@@ -165,8 +165,18 @@ repositório e o `Preparar` (DPAPI na conta) são os mesmos do agente.
   gravar estado — **só avança se os dois conferirem**, e mudar perfil,
   chave ou senha depois invalida a prova (o Salvar confere de novo).
   A consulta roda fora da thread da janela, com prazo.
-- **Configurar:** seletor de pasta do Windows, exclusões opcionais e
-  horário diário. Salvar é **transacional em duas fases**: primeiro um
+- **Configurar:** fluxo em três passos na mesma aba — *Escolher pasta e
+  horário* → *Revisar e salvar*. O seletor de pasta é o diálogo nativo
+  do Windows; o horário é um **DateTimePicker `HH:mm` com setas**
+  (mouse e teclado) — não há texto livre, e a linha abaixo mostra a
+  prévia *"Todos os dias às HH:mm, no horário deste computador"* antes
+  de salvar. Exclusões ficam recolhidas em **Opções avançadas** (abrem
+  sozinhas quando a config ativa já tem itens). O resumo **Revisar e
+  salvar** lista pasta, horário, destino (novo perfil ou reuso do
+  atual) e conta da tarefa antes do clique. Depois de gravado, a tela
+  mostra a **próxima execução informada pelo Agendador** (não a
+  digitada), em data/hora local brasileira. Salvar é **transacional em
+  duas fases**: primeiro um
   conjunto novo (`config-N`, identidade e `backup.json`; `estado-N` novo
   só quando o perfil muda — DPAPI do estado anterior é reaproveitado se
   o destino é o mesmo, e nesse reuso o SID da sessão precisa ser o SID
@@ -187,9 +197,15 @@ repositório e o `Preparar` (DPAPI na conta) são os mesmos do agente.
   divergentes é recusada e a consulta por texto é proibida (só o código
   "tarefa inexistente" do próprio `GetTask` classifica ausência).
   Salvar duas vezes atualiza a mesma tarefa, nunca duplica.
-- **Operar:** pasta protegida, situação deste disparo, **último backup
-  confirmado** com data/hora própria, próxima execução e **ação
-  necessária**. Classificação em concluído/falhou/incompleto/em
+- **Operar:** com configuração válida a janela **abre direto** na aba
+  Situação; sem ela, começa pela Ativar. Pasta protegida, situação
+  deste disparo, **último backup confirmado** com data/hora própria,
+  próxima execução e **ação necessária** aparecem em linhas
+  separadas, atualizadas a cada **15 s** por `Timer` do WinForms (o
+  disparo solicitado cede lugar ao estado real sozinho; o timer pausa
+  durante operação de rede). IDs, conta, SID e versões ficam em
+  **Detalhes** (`Get-DetalhesSuporte` — sem segredos). Classificação
+  em concluído/falhou/incompleto/em
   execução/**sem resultado deste disparo**/ainda não executou —
   "concluído" exige resultado válido **vinculado ao disparo**
   (`inicio_utc` ≥ `LastRunTime`) com código `0` e snapshot válido; um
@@ -214,9 +230,14 @@ repositório e o `Preparar` (DPAPI na conta) são os mesmos do agente.
   `preparo.json` do estado que a tarefa usa (mesmo nome em outro
   domínio não equivale; SID ilegível recusa); *Pausar/Retomar* habilita
   a tarefa; execução em andamento bloqueia novo disparo.
-- **Restaurar:** pontos via `restic snapshots`; arquivos via
-  `restic ls --json` filtrados a **arquivos regulares** — a escolha vem
-  da lista, nunca de texto livre. Antes de listar ou restaurar vale a
+- **Restaurar:** fluxo em três passos na mesma aba — *Data do backup →
+  Arquivo → Pasta de destino*. Pontos via `restic snapshots`; arquivos
+  via `restic ls --json` filtrados a **arquivos regulares** — a escolha
+  vem da lista, nunca de texto livre. O nome **completo** do arquivo
+  escolhido aparece na tela; ID do snapshot e SHA-256 do restaurado
+  ficam em **Detalhes**; após sucesso confirmado, **Abrir pasta
+  restaurada** abre o destino no Explorador. Antes de listar ou
+  restaurar vale a
   **mesma verificação do preparo do backup** (`Confirm-PreparoVigente`):
   SID da sessão, repositório + ID, e vínculo efetivo de
   `identidade_ssh`/`known_hosts`/`ssh_config` por caminho **e** SHA-256
@@ -239,6 +260,21 @@ repositório e o `Preparar` (DPAPI na conta) são os mesmos do agente.
   tarefa ficam na mesma identidade; se for aberta elevada em outra
   conta, a conta da tarefa registrada será a da sessão, e o aviso na
   aba 1 mostra qual é.
+- **Pré-requisito OpenSSH:** a checagem resolve o **mesmo executável
+  que o agente usa** no `sftp.command`: primeiro
+  `$WINDIR\System32\OpenSSH\ssh.exe`, depois `ssh.exe` do `PATH`
+  (`Select-SshCandidato`/`Test-OpenSshExe` — o candidato precisa existir,
+  **não ter espaços no caminho** e responder a `ssh -V` como OpenSSH;
+  cada recusa registra o motivo). O instalador aplica o mesmo critério
+  (`IfFileExists` no canônico ou `SearchPath` no `PATH`) — na VM do
+  piloto o ssh estava fora do caminho canônico e o aviso era falso.
+- **Se o atalho falhar:** exceção de lançamento mostra mensagem com a
+  causa e grava `diagnostico-macip.txt` junto à GUI (`Write-Diagnostico`
+  — erro, versões de PowerShell/Windows/Restic/ssh e pré-requisitos,
+  **sem** senhas nem conteúdo de chave) para enviar à MAC IP.
+- **Layout:** `AutoScaleMode = Dpi` e painéis de rolagem acomodam
+  caminhos/mensagens longas nas escalas 100/125/150 %; a prova real em
+  cada escala (inclusive acesso remoto) faz parte do aceite na VM.
 
 Instalador: `installer/macip-backup.nsi` + `installer/BUILD.md`
 (`makensis /DVERSAO=…` gera `MacipBackupSetup-<versao>.exe`; verifica
