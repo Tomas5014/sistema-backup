@@ -42,10 +42,9 @@ elseif ($args -contains 'ls') {
 }
 elseif ($args -contains 'restore') {
     # Simula 'restic restore "<id>:<raiz>" --target <dir> --verify':
-    # materializa a arvore fixture de <stub>/restaurar/ em
-    # <target>/<raiz achatada> — a raiz vem do arg id:SUBPASTA (a parte
-    # depois dos dois-pontos), nao de suposicao.
-    #   restaurar/         arvore a publicar (espacos/acentos ok)
+    # como o restic real, o CONTEUDO da raiz vai direto para a raiz do
+    # <dir> ('target/sub/arq'), sem arvore absoluta aninhada.
+    #   restaurar/         conteudo da raiz (espacos/acentos ok)
     #   restore-sleep      segundos de espera (timeout)
     #   restore-code       codigo de saida != 0 (falha apos materializar)
     #   restore-nothing    falha sem materializar nada
@@ -61,25 +60,14 @@ elseif ($args -contains 'restore') {
     } else {
         $ti = [array]::IndexOf([string[]]$args, '--target')
         $target = $(if ($ti -ge 0 -and $ti + 1 -lt $args.Count) { [string]$args[$ti + 1] } else { Join-Path $d 'target-fallback' })
-        $ri = [array]::IndexOf([string[]]$args, 'restore')
-        $spec = $(if ($ri -ge 0 -and $ri + 1 -lt $args.Count) { [string]$args[$ri + 1] } else { '' })
-        $sep = $spec.IndexOf(':')
-        $root = if ($sep -ge 0) { $spec.Substring($sep + 1) }
-                elseif (Test-Path (Join-Path $d 'restore.root')) { (Get-Content (Join-Path $d 'restore.root') -Raw).Trim() }
-                else { 'raiz' }
-        # raiz do arg pode vir 'C:\Dados' — o primeiro ':' e o separador
-        # id:raiz; um segundo ':' faz parte da raiz Windows. Achata igual.
-        $segs = @($root -split '[\\/]+' | Where-Object { $_ -ne '' } | ForEach-Object { $_.TrimEnd(':') })
-        $sub = Join-Path $target ($segs -join [IO.Path]::DirectorySeparatorChar)
-        New-Item -ItemType Directory -Path $sub -Force | Out-Null
         if (Test-Path (Join-Path $d 'restaurar')) {
             if (Test-Path (Join-Path $d 'restore-partial')) {
                 # codigo 0 com conteudo PARCIAL: so o primeiro arquivo
                 $um = @(Get-ChildItem -LiteralPath (Join-Path $d 'restaurar') -File -Force | Select-Object -First 1)
-                foreach ($f in $um) { Copy-Item -LiteralPath $f.FullName -Destination $sub -Force }
+                foreach ($f in $um) { Copy-Item -LiteralPath $f.FullName -Destination $target -Force }
             } else {
                 Get-ChildItem -LiteralPath (Join-Path $d 'restaurar') -Force |
-                    Copy-Item -Destination $sub -Recurse -Force
+                    Copy-Item -Destination $target -Recurse -Force
             }
         }
         # outro processo cria o DESTINO durante a copia: pasta com

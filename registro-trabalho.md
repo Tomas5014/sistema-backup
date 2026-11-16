@@ -2297,3 +2297,61 @@ seguem pendentes na VM com SFTP de teste (roteiro 4b.6a atualizado com
 Onde salvar+nome e a sentinela de colisao). Instalador NAO recompilado
 (sem makensis/payload). VM, tarefa e repositorio do laboratorio nao
 tocados.
+
+## Revisao 19 — restauracao completa alinhada ao restic 0.18.1 real
+
+Pedido: o commit f67d4f4 passava no simulador, mas o restic real devolve
+catalogo e estrutura restaurada diferentes do esperado. Tres correcoes,
+mantendo os dois modos e as protecoes.
+
+Correcoes (`agent/windows/gui/MacipBackup-Gui.ps1`):
+
+- Leitura do catalogo real: `restic ls --json <id>` emite tambem os
+  ANCESTRAIS da raiz (`/tmp`, `/tmp/rst-real`, `/tmp/rst-real/aninhado`
+  como nos dir). `Get-RaizSnapshot` agora os reconhece como legitimos
+  por prefixo de SEGMENTO COMPLETO (`np + '/'`) e os exclui do conjunto
+  esperado — antes os rejeitava como conteudo alheio. Raiz multipla,
+  itens fora da raiz sem declaracao, links e '..' seguem recusados.
+- Origem registrada vs raiz interna: no Windows os metadados dizem
+  `C:\Users\...` e o no do catalogo `/C/Users/...`. `Get-RaizSnapshot`
+  devolve `Origem` (registrada — tecnico + protecao do destino) e
+  `Raiz` (interna — registrada normalizada barras+unidade e confirmada
+  por correspondencia EXATA num no dir do catalogo). Nada e deduzido
+  do primeiro arquivo nem passado em forma Windows bruta; sem a
+  confirmacao exata, para com o motivo.
+- Validacao no temporario certo: `restore "<id>:<raiz-interna>"
+  --target <tmp> --verify` pousa o CONTEUDO da raiz direto na raiz do
+  temporario (provado: `tmp\sub pasta\interno.txt`) — `Get-PastaSubarvore`
+  e a arvore absoluta aninhada foram removidas. O conjunto rel->tipo do
+  catalogo e conferido a partir da raiz do temporario; a publicacao
+  continua `[IO.Directory]::Move` (sentinela preservada em colisao,
+  limpeza so do temporario da tentativa).
+
+Prova com restic REAL (novo `tests/run-restic-real-tests.ps1`):
+
+- Restic 0.18.1 real, repositorio LOCAL descartavel (transporte SFTP e
+  o unico traco simulado — wrapper traduz `--repo` e descarta `-o`).
+- Origem aninhada com subpasta e nomes com espacos/acentos; arquivo
+  excluido presente na origem. Dois pontos: alterado+removido entre
+  eles. O CATALOGO REAL passa pelo leitor do aplicativo: ancestrais
+  aceitos e fora do esperado; raiz interna confirmada exata.
+- Restauracao do ponto ANTIGO fim a fim (`cat config`, `ls`,
+  `restore id:raiz --verify`, validacao, publicacao atomica): manifesto
+  rel->SHA-256 confere; removido volta; alterado volta na versao
+  antiga; excluido ausente; origem intacta; hierarquia relativa sem
+  prefixos extras; destino existente e raiz alheia recusados.
+- Resultado: **23 ok, 0 falhas**.
+
+Verificacao simulada: GUI **348 ok, 0 falha** (1 pulado COM real) —
+catalogo fixture agora inclui ancestrais; caso `C:\` vs `/C/`; vizinho
+nao-ancestral ambiguo; raiz interna ausente; sentinela/parcial/
+timeout/erro mantidos; segundo arquivo ok. Agente **150 ok, 0 falha**;
+`unittest test_windows_agent_ps1` **5/5**; `git diff --check` limpo;
+BOM `EF BB BF`; Tokenize 0 erros; detector `[]`.
+
+Separacao de prova: o que e REAL — catalogo ls, escopo id:subpasta,
+--verify, layout do restore, publicacao atomica, manifesto SHA-256.
+Segue SIMULADO/pendente de VM — transporte SFTP, conta Windows,
+PS 5.1, Task Scheduler, aceite visual e o mesmo roteiro com SFTP de
+teste (4b.6a/4b.11). Instalador NAO recompilado (sem makensis/payload
+Windows). VM, tarefa e repositorio do laboratorio nao tocados.

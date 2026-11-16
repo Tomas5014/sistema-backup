@@ -210,6 +210,13 @@ faz **pela interface**, sem terminal, JSON ou Agendador.
     **intacta** e nada é copiado para dentro dela; destino **já
     existente** recusado com o conteúdo intacto; erro durante a cópia
     (SFTP fora) **não publica** a pasta e não anuncia sucesso.
+    *Pré-prova local (não substitui a VM):*
+    `agent/windows/tests/run-restic-real-tests.ps1` executa o mesmo
+    roteiro com **restic 0.18.x real** num repositório local
+    descartável — catálogo com ancestrais, `id:subpasta`, `--verify`,
+    publicação sem sobrescrita e manifesto SHA-256 já validados dessa
+    forma; transporte SFTP e conta Windows seguem simulados até o
+    aceite na VM.
 7. **Sucesso → falha com a janela fechada:** com a GUI fechada, forçar
    um disparo que falhe (ex.: pausar o SFTP ou cortar a rede no
    horário) depois de um sucesso confirmado. Ao reabrir, a tela deve

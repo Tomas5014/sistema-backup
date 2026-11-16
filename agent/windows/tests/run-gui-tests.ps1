@@ -1064,12 +1064,16 @@ exit 0
 {"id":"$snapAnt","short_id":"aaaaaaaa","time":"2026-11-16T16:26:00Z","paths":["$origem"]}
 {"id":"$snapNov","short_id":"bbbbbbbb","time":"2026-11-17T16:26:00Z","paths":["$origem"]}
 "@ | Set-Content -LiteralPath (Join-Path $stubDir 'snaps.jsonl') -Encoding Ascii
-    # catalogo do ponto A: raiz + subpasta + os arquivos salvos (o conjunto
-    # rel->tipo que a arvore restaurada TEM de reproduzir). UTF-8 para o
-    # nome acentuado nao virar mojibake no ConvertFrom-Json.
+    # catalogo do ponto A: como o restic REAL emite — no snapshot, os
+    # ANCESTRAIS da raiz (/tmp, /tmp/gui-teste-...) como nos dir, a raiz,
+    # e o conteudo sob ela. O conjunto esperado e so o que esta SOB a
+    # raiz. UTF-8 para o nome acentuado nao virar mojibake.
+    $av1 = Split-Path $origem; $av0 = Split-Path $av1
     @"
 {"type":"snapshot","paths":["$origem"],"id":"$snapAnt"}
-{"name":".","type":"dir","path":"$origem"}
+{"name":"tmp","type":"dir","path":"$av0"}
+{"name":"nivel","type":"dir","path":"$av1"}
+{"name":"origem","type":"dir","path":"$origem"}
 {"name":"alterado.txt","type":"file","path":"$origem/alterado.txt"}
 {"name":"removido.txt","type":"file","path":"$origem/removido.txt"}
 {"name":"sub","type":"dir","path":"$origem/sub"}
@@ -1181,11 +1185,45 @@ exit 0
     # catalogo minimo + arvore cheia -> item INESPERADO -> nada publicado
     @"
 {"type":"snapshot","paths":["$origem"],"id":"$snapAnt"}
-{"name":".","type":"dir","path":"$origem"}
+{"name":"origem","type":"dir","path":"$origem"}
 "@ | Set-Content -LiteralPath (Join-Path $stubDir 'ls.jsonl') -Encoding Ascii
     $destExtra = Join-Path $tmp 'restaurado-extra'
     throws { Restore-PastaCompleta -Estado $estado -Config $b1.Config -Snapshot $snapAnt -PathsMeta @($origem) -Destino $destExtra -Origem $origem } 'pasta: item inesperado na arvore -> recusado'
     ok (-not (Test-Path -LiteralPath $destExtra)) 'pasta: item inesperado -- destino NAO publicado'
+
+    # Windows: registrada 'C:\Dados\Cliente' vs catalogo '/C/Dados/Cliente'
+    # — origem registrada e raiz interna separadas e confirmadas.
+    @'
+{"type":"snapshot","paths":["C:\\Dados\\Cliente"],"id":"x"}
+{"name":"C","type":"dir","path":"/C"}
+{"name":"Dados","type":"dir","path":"/C/Dados"}
+{"name":"Cliente","type":"dir","path":"/C/Dados/Cliente"}
+{"name":"f.txt","type":"file","path":"/C/Dados/Cliente/f.txt"}
+{"name":"sub","type":"dir","path":"/C/Dados/Cliente/sub"}
+'@ | Set-Content -LiteralPath (Join-Path $stubDir 'ls.jsonl') -Encoding Ascii
+    $infoW = Get-RaizSnapshot -Cfg $cfgOp -Estado $estado -Snapshot ('e'*64) -PathsMeta @('C:\Dados\Cliente')
+    eq $infoW.Origem 'C:\Dados\Cliente' 'pasta: origem registrada Windows preservada p/ tecnico/destino'
+    eq $infoW.Raiz '/C/Dados/Cliente' 'pasta: raiz interna /C/... confirmada no catalogo'
+    ok ($infoW.Esperados.Contains('f.txt') -and $infoW.Esperados.Contains('sub')) 'pasta: esperado sob a raiz interna'
+    ok (-not $infoW.Esperados.Contains('') -and @($infoW.Esperados.Keys).Count -eq 2) 'pasta: ancestrais /C e /C/Dados fora do esperado'
+    # catalogo com no fora da raiz que nao e ancestral -> ambiguo
+    @'
+{"type":"snapshot","paths":["C:\\Dados\\Cliente"],"id":"x"}
+{"name":"Cliente","type":"dir","path":"/C/Dados/Cliente"}
+{"name":"alheio","type":"dir","path":"/C/Dados/Alheio"}
+'@ | Set-Content -LiteralPath (Join-Path $stubDir 'ls.jsonl') -Encoding Ascii
+    throws { Get-RaizSnapshot -Cfg $cfgOp -Estado $estado -Snapshot ('e'*64) -PathsMeta @('C:\Dados\Cliente') } 'pasta: vizinho nao-ancestral fora da raiz -> catalogo ambiguo'
+    # raiz registrada nao confirmada no catalogo -> para
+    @'
+{"type":"snapshot","paths":["C:\\Dados\\Cliente"],"id":"x"}
+{"name":"Outra","type":"dir","path":"/C/Dados/Outra"}
+'@ | Set-Content -LiteralPath (Join-Path $stubDir 'ls.jsonl') -Encoding Ascii
+    throws { Get-RaizSnapshot -Cfg $cfgOp -Estado $estado -Snapshot ('e'*64) -PathsMeta @('C:\Dados\Cliente') } 'pasta: raiz interna ausente no catalogo -> recusado'
+    # devolve o catalogo coerente (minimo: raiz confirmada, sem conteudo)
+    @"
+{"type":"snapshot","paths":["$origem"],"id":"$snapAnt"}
+{"name":"origem","type":"dir","path":"$origem"}
+"@ | Set-Content -LiteralPath (Join-Path $stubDir 'ls.jsonl') -Encoding Ascii
 
     # erro DURANTE a copia: nada publicado, temporario limpo, origem intacta
     '1' | Set-Content -LiteralPath (Join-Path $stubDir 'restore-code') -Encoding Ascii -NoNewline
@@ -1206,10 +1244,6 @@ exit 0
     eq (@(Get-ChildItem -LiteralPath $tmp -Directory -Filter '.macip-rest-*' -Force)).Count 0 'pasta: timeout -- temporario limpo'
     $script:DumpTimeoutMs = 600000
     Remove-Item -LiteralPath (Join-Path $stubDir 'restore-sleep') -Force
-
-    # flatten da subarvore: raiz do ponto vira subpastas do temporario
-    eq (Get-PastaSubarvore -Tmp 'T' -Raiz 'C:\Dados\Cliente') (Join-Path 'T' ('C' + [IO.Path]::DirectorySeparatorChar + 'Dados' + [IO.Path]::DirectorySeparatorChar + 'Cliente')) 'pasta: flatten de raiz Windows'
-    eq (Get-PastaSubarvore -Tmp 'T' -Raiz '/srv/dados') (Join-Path 'T' ('srv' + [IO.Path]::DirectorySeparatorChar + 'dados')) 'pasta: flatten de raiz POSIX'
 
     # restauracao individual segue intacta (segundo arquivo, SHA-256)
     [IO.File]::WriteAllBytes((Join-Path $stubDir 'dump.bin'), [Text.Encoding]::UTF8.GetBytes('SEG-DEPOIS'))
