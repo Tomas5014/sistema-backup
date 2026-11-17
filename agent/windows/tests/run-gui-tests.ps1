@@ -772,6 +772,76 @@ exit 0
     ok ($guiSrc -match '\$ck\.Tag = @\{ Painel = \$pnl; Tabela = \$ly; Linha = \$row \}') 'detalhes tecnicos: painel/tabela/linha viajam no Tag do checkbox'
     ok ($guiSrc -match '\$d = \$sender\.Tag' -and $guiSrc -match '\$d\.Painel\.Visible = \$sender\.Checked' -and $guiSrc -match '\$d\.Tabela\.RowStyles\[\$d\.Linha\]') 'detalhes tecnicos: handler le pelo $sender (independente entre secoes)'
 
+    # ---- detalhes recolhidos: evento EXECUTADO de verdade ----
+    # Os asserts acima conferem o texto do codigo; aqui a funcao REAL e
+    # extraida via AST e o CheckedChanged e disparado -- abrir/fechar
+    # uma secao nao pode alterar a outra. WinForms nao existe no Linux:
+    # tipos minimos de teste (mesmos nomes) recebem o codigo real.
+    if (-not ('System.Windows.Forms.CheckBox' -as [type])) {
+        Add-Type -TypeDefinition @'
+namespace System.Windows.Forms {
+    public class Padding { public Padding(int l, int t, int r, int b) {} }
+    public class RowStyle {
+        public string Tipo; public float Valor;
+        public RowStyle(string tipo) { Tipo = tipo; }
+        public RowStyle(string tipo, int valor) { Tipo = tipo; Valor = valor; }
+    }
+    public class RowStyleCollection : System.Collections.Generic.List<RowStyle> {}
+    public class ControlCollection : System.Collections.Generic.List<object> {
+        public void Add(object c, int col, int row) { base.Add(c); }
+    }
+    public class Control {
+        public string Text = "";
+        public bool AutoSize;
+        public string AccessibleName = "";
+        public object Tag;
+        public bool Checked;
+        public string Dock = "";
+        public bool Visible = true;
+        public object MinimumSize;
+        public object Margin;
+        public int TabIndex;
+        public ControlCollection Controls = new ControlCollection();
+    }
+    public class CheckBox : Control {
+        public System.Collections.Generic.List<object> Manipuladores = new System.Collections.Generic.List<object>();
+        public void Add_CheckedChanged(object sb) { Manipuladores.Add(sb); }
+    }
+    public class Panel : Control {}
+    public class TextBox : Control {}
+    public class TableLayoutPanel : Control {
+        public int RowCount;
+        public RowStyleCollection RowStyles = new RowStyleCollection();
+    }
+}
+'@
+    }
+    function New-Rotulo { param($t, [bool]$titulo = $false) [pscustomobject]@{ Text = $t; Dock = '' } }
+    function Add-Linha { param($ly, $c, [int]$tab, [int]$margemTopo = 3)
+        $row = $ly.RowCount; $ly.RowCount += 1
+        $ly.RowStyles.Add((New-Object 'System.Windows.Forms.RowStyle'('AutoSize'))) | Out-Null
+        $c.Dock = 'Top'; if ($tab -ge 0) { $c.TabIndex = $tab }
+        $ly.Controls.Add($c, 0, $row)
+        return $c }
+    $tkG = $null; $erG = $null
+    $astG = [System.Management.Automation.Language.Parser]::ParseFile($gui, [ref]$tkG, [ref]$erG)
+    $fnDet = $astG.Find({ param($a) $a -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $a.Name -eq 'New-DetalhesRecolhidos' }, $true)
+    . ([scriptblock]::Create($fnDet.Extent.Text))
+    $script:W = 'System.Windows.Forms'
+    $lyA = New-Object 'System.Windows.Forms.TableLayoutPanel'
+    $ckA = New-DetalhesRecolhidos $lyA 'Detalhes da situacao:' 1 (New-Object 'System.Windows.Forms.TextBox')
+    $lyB = New-Object 'System.Windows.Forms.TableLayoutPanel'
+    $ckB = New-DetalhesRecolhidos $lyB 'Detalhes da restauracao:' 1 (New-Object 'System.Windows.Forms.TextBox')
+    ok ($ckA.Tag.Painel.Visible -eq $false -and $lyA.RowStyles[$ckA.Tag.Linha].Tipo -eq 'AutoSize') 'detalhes evento: Situacao comeca recolhida'
+    ok ($ckB.Tag.Painel.Visible -eq $false -and $lyB.RowStyles[$ckB.Tag.Linha].Tipo -eq 'AutoSize') 'detalhes evento: Restaurar comeca recolhida'
+    $ckA.Checked = $true; $ckA.Manipuladores[0].Invoke($ckA, $null)
+    ok ($ckA.Tag.Painel.Visible -eq $true -and $lyA.RowStyles[$ckA.Tag.Linha].Tipo -eq 'Percent') 'detalhes evento: abrir expande o painel da propria secao'
+    ok ($ckB.Tag.Painel.Visible -eq $false -and $lyB.RowStyles[$ckB.Tag.Linha].Tipo -eq 'AutoSize') 'detalhes evento: abrir Situacao nao altera Restaurar'
+    $ckA.Checked = $false; $ckA.Manipuladores[0].Invoke($ckA, $null)
+    ok ($ckA.Tag.Painel.Visible -eq $false -and $lyA.RowStyles[$ckA.Tag.Linha].Tipo -eq 'AutoSize') 'detalhes evento: fechar recolhe sem erro'
+    $ckB.Checked = $true; $ckB.Manipuladores[0].Invoke($ckB, $null)
+    ok ($ckB.Tag.Painel.Visible -eq $true -and $lyB.RowStyles[$ckB.Tag.Linha].Tipo -eq 'Percent' -and $ckA.Tag.Painel.Visible -eq $false -and $lyA.RowStyles[$ckA.Tag.Linha].Tipo -eq 'AutoSize') 'detalhes evento: abrir Restaurar nao altera Situacao (independente)'
+
     # ---- falha: mensagem curta + diagnostico recolhido ----
     ok ($guiSrc.Contains('Get-MensagemFalha')) 'falha: classificador de mensagem curta existe'
     ok ($guiSrc.Contains('A conexão com o servidor foi interrompida. Verifique a conexão e tente restaurar novamente.')) 'falha sftp: texto curto exato'

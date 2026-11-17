@@ -1962,6 +1962,7 @@ function Show-Gui {
         # construcao e nada depende de escopo capturado.
         $ck.Tag = @{ Painel = $pnl; Tabela = $ly; Linha = $row }
         $ck.Add_CheckedChanged({
+            param($sender, $eventArgs)
             $d = $sender.Tag
             $d.Painel.Visible = $sender.Checked
             $d.Tabela.RowStyles[$d.Linha] = New-Object 'System.Windows.Forms.RowStyle'(
