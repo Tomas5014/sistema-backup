@@ -54,6 +54,16 @@ Homologação de laboratório **relatada pelo operador** para o agente
 - Origem continha espaço e acento; as exclusões `ignorar.tmp` e
   `cache temporário.log` foram respeitadas (ausentes do snapshot).
 
+**17/11/2026 (VM — evidência operacional da restauração, separada do
+aceite visual da interface nova):** durante a restauração **pela
+interface** do ponto `473f2997`, a conexão SFTP caiu no meio da cópia
+(`connection lost`). As proteções comportamentais se verificaram: a
+pasta de destino final **não foi criada**, o temporário da tentativa
+**foi removido** e a repetição da operação restaurou normalmente. O que
+falhava era a apresentação: a área principal despejava o log inteiro —
+corrigido para a mensagem curta + diagnóstico em *Mostrar detalhes
+técnicos*.
+
 ## 3. Preparação pela MAC IP (antes da visita)
 
 1. Provisionar repositório SFTP **exclusivo** do piloto (não reutilizar
@@ -114,7 +124,12 @@ faz **pela interface**, sem terminal, JSON ou Agendador.
    um **seletor `HH:mm` com setas** (mouse e teclado), com a prévia
    *"Todos os dias às HH:mm, no horário deste computador"* visível antes
    de salvar — a TextBox de uma linha que não aceitava edição na VM foi
-   substituída. Exclusões ficam recolhidas em **Opções avançadas**. A
+   substituída. **Exclusões (opcional)** abre o editor de regras com
+   altura real: **Enter insere uma linha** (nunca dispara *Salvar e
+   agendar*), **Tab sai** do campo, fechar e reabrir a seção preserva o
+   digitado e, depois de salvo e reaberto o app, as regras voltam como
+   foram gravadas — uma quebra visual por largura **nunca** vira uma
+   segunda regra. A
    caixa de resumo mostra pasta, horário local, **frequência diária**,
    destino e conta **antes** do clique; a senha Windows é pedida na
    janela nativa; depois de gravado, a tela mostra o **próximo backup
@@ -133,8 +148,9 @@ faz **pela interface**, sem terminal, JSON ou Agendador.
    sem o técnico clicar (o aviso de disparo solicitado cede lugar ao
    estado real; os Detalhes só regravam quando o conteúdo muda, sem
    apagar a seleção nem roubar o foco). IDs, conta, SID, versões e a
-   pasta protegida ficam em **Detalhes** (rolagem horizontal para
-   caminhos longos). **Executar backup agora** é o botão em destaque;
+   pasta protegida ficam em **Mostrar detalhes técnicos**, seção
+   **recolhida por padrão** (rolagem horizontal para caminhos longos
+   quando expandida). **Executar backup agora** é o botão em destaque;
    **Pausar agenda** ou **Retomar agenda** aparece conforme o estado.
    O botão *Executar backup agora*
    abre um **pedido com estado próprio**: antes de solicitar, a tela
@@ -166,7 +182,13 @@ faz **pela interface**, sem terminal, JSON ou Agendador.
    **ponto + escopo + caminho final** antes de iniciar; vínculos
    SSH/destino reconferidos antes de qualquer acesso; após sucesso,
    **Abrir pasta restaurada**; snapshot, raiz do ponto e SHA-256 ficam
-   em **Detalhes**.
+   em **Mostrar detalhes técnicos** (recolhidos por padrão). Em falha,
+   a área principal mostra **uma mensagem curta** — perda de conexão
+   identificada vira *"A conexão com o servidor foi interrompida.
+   Verifique a conexão e tente restaurar novamente."* — e o diagnóstico
+   completo (sem senhas) vai para os detalhes técnicos; destino
+   inválido, pasta existente, permissão e falhas desconhecidas mantêm
+   seu próprio texto.
    - **Restaurar um arquivo** — três etapas numeradas (*1. Data →
      2. Arquivo → 3. Destino*). O ponto mostra a **data local** primeiro
      e o ID depois; o **nome do arquivo** escolhido aparece em destaque
@@ -247,17 +269,31 @@ faz **pela interface**, sem terminal, JSON ou Agendador.
     três casos (presente, ausente renomeando o `ssh.exe`, e um
     `ssh.exe` falso no PATH) — a mensagem nunca pode anunciar ausência
     numa consulta inconclusiva.
-11. **Aceite visual e de interação:** capturar **antes e depois** das
-    abas Situação, Configuração (Pasta e horário) e Restauração; repetir
-    com DPI em **100 %, 125 % e 150 %** e por **acesso remoto** — as
-    telas usam `TableLayoutPanel`/`FlowLayoutPanel` sem coordenadas
-    fixas, então campos, botões, caminhos longos e mensagens devem
-    fluir sem cortar nem se sobrepor. Percorrer o fluxo **só com
-    teclado** (Tab, setas, Enter — o `AcceptButton` de cada aba executa
-    a ação segura) e conferir o foco visível. Usar **caminhos longos e
-    dados fictícios**; cobrir também **ausência de configuração**,
-    **espera pelo início** e **falha de backup** — avisos e botões
-    precisam continuar legíveis.
+11. **Aceite visual e de interação (PENDENTE de VM — teste estático ou
+    simulado não comprova layout):** capturar **antes e depois** das
+    abas Ativar, Pasta e horário, Situação e Restaurar; repetir com DPI
+    em **100 %, 125 % e 150 %** e por **acesso remoto** — as telas usam
+    `TableLayoutPanel`/`FlowLayoutPanel` sem coordenadas fixas, então
+    campos, botões, caminhos longos e mensagens devem fluir sem cortar
+    nem se sobrepor. Na **janela estreita das evidências (~960 px)** e
+    na largura mínima, incluindo a transição larga→estreita: **nenhuma
+    aba pode apresentar rolagem horizontal** — os rótulos quebram na
+    largura útil (o espaço da barra vertical é descontado quando ela
+    aparece), os campos encolhem, os grupos de botões caem para a linha
+    seguinte e **Carregar pontos**, os seletores de pasta e a ação
+    principal de cada aba ficam **inteiros e acessíveis**; na largura
+    mínima a página pode rolar **verticalmente**. Percorrer o fluxo
+    **só com teclado** (Tab, setas, Enter — o `AcceptButton` de cada aba
+    executa a ação segura) e conferir o foco visível. No editor de
+    **Exclusões (opcional)**: Enter insere linha, Tab sai do campo,
+    fechar/reabrir preserva o digitado e, após salvar e reabrir o app,
+    as regras voltam como gravadas — confirmar com **arquivos
+    fictícios** que as regras valem no backup seguinte. Repetir o
+    **ensaio de queda SFTP** (evidência 17/11): a área principal mostra
+    a mensagem curta e o diagnóstico fica em *Mostrar detalhes
+    técnicos*. Usar **caminhos longos e dados fictícios**; cobrir
+    também **ausência de configuração**, **espera pelo início** e
+    **falha de backup** — avisos e botões precisam continuar legíveis.
 12. **Atalho falho → diagnóstico:** se a janela não abrir pelo Menu
     Iniciar, a mensagem de erro informa a causa e o arquivo
     `diagnostico-macip.txt` (sem senhas nem conteúdo de chave) fica

@@ -119,8 +119,12 @@ class TestWindowsAgentPs1(unittest.TestCase):
         self.assertIn("System.Windows.Forms.Timer", fonte)
         self.assertIn("Get-DetalhesSuporte", fonte)
         self.assertIn("Test-ConfiguracaoPronta", fonte)
-        # exclusoes em Opcoes avancadas; janela de credencial nativa mantida
-        self.assertIn("Opções avançadas", fonte)
+        # exclusoes na secao opcional (rotulo direto); janela de credencial
+        # nativa mantida
+        self.assertIn("Exclusões (opcional)", fonte)
+        # falha SFTP: mensagem curta classificada + detalhes recolhidos
+        self.assertIn("Get-MensagemFalha", fonte)
+        self.assertIn("Mostrar detalhes técnicos", fonte)
         # restauracao: abrir pasta restaurada apos sucesso
         self.assertIn("Abrir pasta restaurada", fonte)
         # lancamento falho -> diagnostico sem segredos

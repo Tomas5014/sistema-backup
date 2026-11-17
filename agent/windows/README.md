@@ -170,9 +170,13 @@ repositório e o `Preparar` (DPAPI na conta) são os mesmos do agente.
   pasta é o diálogo nativo do Windows; o horário é um
   **DateTimePicker `HH:mm` com setas** (mouse e teclado) — não há texto
   livre, e a linha abaixo mostra a prévia *"Todos os dias às HH:mm, no
-  horário deste computador"* antes de salvar. Exclusões ficam
-  recolhidas em **Opções avançadas** (abrem sozinhas quando a config
-  ativa já tem itens). O resumo **Revisar e salvar** lista pasta,
+  horário deste computador"* antes de salvar. **Exclusões (opcional)**
+  abre o editor de regras com altura real (~5 linhas) — **Enter insere
+  linha** (nunca dispara *Salvar e agendar*), **Tab sai** do campo,
+  fechar e reabrir a seção preserva o digitado e `WordWrap=$false`
+  garante que uma quebra visual nunca vire uma segunda regra na gravação
+  (abre sozinha quando a config ativa já tem itens). O resumo **Revisar
+  e salvar** lista pasta,
   horário local, **frequência diária**, destino (novo perfil ou reuso
   do atual) e conta da tarefa antes do clique. Depois de gravado, a
   tela mostra o **próximo backup informado pelo Agendador** (não o
@@ -205,8 +209,9 @@ repositório e o `Preparar` (DPAPI na conta) são os mesmos do agente.
   data/hora própria e **Próximo backup**. **Executar backup agora** é o
   botão em destaque (acento); **Pausar agenda** ou **Retomar agenda**
   aparece conforme o estado — nunca os dois. IDs, conta, SID, versões
-  e a pasta protegida ficam em **Detalhes** (`Get-DetalhesSuporte` —
-  sem segredos, rolagem horizontal para caminhos longos). Atualização a
+  e a pasta protegida ficam em **Mostrar detalhes técnicos** — seção
+  **recolhida por padrão** (`Get-DetalhesSuporte` — sem segredos,
+  rolagem horizontal para caminhos longos quando expandida). Atualização a
   cada **15 s** por `Timer` do WinForms (o disparo solicitado cede
   lugar ao estado real sozinho; o timer pausa durante operação de rede
   e **só regrava os Detalhes quando o conteúdo muda** — não apaga a
@@ -250,12 +255,21 @@ repositório e o `Preparar` (DPAPI na conta) são os mesmos do agente.
   `Não foi possível confirmar a execução` com orientação — resolução
   que segue na linha principal até um disparo mais novo aparecer.
   Cliques repetidos ficam bloqueados enquanto houver pedido aberto.
-- **Restaurar** (aba de mesmo nome): o técnico escolhe a **Data do
+- **Restaurar** (aba *Restaurar backup*): o técnico escolhe a **Data do
   backup** e o **modo** — *Restaurar um arquivo* ou *Restaurar toda a
-  pasta protegida*. Uma linha de **revisão** mostra ponto, escopo e
-  caminho final antes de iniciar; após sucesso, **Abrir pasta
+  pasta protegida*. A **Revisão** separa **Ponto**, **Escopo** e
+  **Destino** em três linhas que quebram na largura útil — caminho longo
+  sempre consultável por inteiro; após sucesso, **Abrir pasta
   restaurada** abre o destino no Explorador; ID do snapshot, raiz do
-  ponto e SHA-256 ficam em **Detalhes**. Antes de listar ou restaurar
+  ponto e SHA-256 ficam em **Mostrar detalhes técnicos** (recolhidos
+  por padrão). Em falha a área principal mostra **uma mensagem curta**:
+  perda de conexão identificada (`connection lost`, `broken pipe`,
+  `i/o timeout`…) vira *"A conexão com o servidor foi interrompida.
+  Verifique a conexão e tente restaurar novamente."* — e o diagnóstico
+  completo (sem senhas) vai para os detalhes técnicos; destino
+  inválido, pasta existente, falta de permissão e falhas desconhecidas
+  **mantêm o texto próprio** (`Get-MensagemFalha` — uma falha
+  desconhecida nunca vira "conexão interrompida"). Antes de listar ou restaurar
   vale a **mesma verificação do preparo do backup**
   (`Confirm-DestinoOperacional`): SID da sessão, repositório + ID, e
   vínculo efetivo de `identidade_ssh`/`known_hosts`/`ssh_config` por
@@ -328,7 +342,14 @@ repositório e o `Preparar` (DPAPI na conta) são os mesmos do agente.
   estado sempre acompanhada de texto. As telas usam
   `TableLayoutPanel`/`FlowLayoutPanel` — **sem coordenadas fixas**:
   redimensionam, acomodam textos longos e rolam; janela com
-  `MinimumSize` e escala de DPI (100/125/150%). Ordem de `Tab`
+  `MinimumSize` e escala de DPI (100/125/150%). Em janela estreita
+  **não há rolagem horizontal**: os rótulos quebram na largura útil
+  (`MaximumSize` recalculado a cada `Layout`/`Resize` — barra vertical
+  descontada quando aparece), os campos encolhem, os grupos de botões
+  caem para a linha seguinte e o conteúdo rola **só na vertical**.
+  Hierarquia única por aba: título da tela, explicação curta, campos
+  agrupados por cabeçalhos e **uma** ação principal em destaque.
+  Ordem de `Tab`
   explícita, `AcceptButton` por aba (Enter aciona a ação segura),
   foco no primeiro dado ao trocar de aba e `AccessibleName` nos
   campos. O arquivo é **UTF-8 com BOM** — o PS 5.1 só lê os acentos

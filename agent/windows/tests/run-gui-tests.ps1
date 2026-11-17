@@ -725,7 +725,7 @@ exit 0
     ok ($guiSrc.Contains('DateTimePicker') -and $guiSrc.Contains('ShowUpDown = $true') -and $guiSrc.Contains("CustomFormat = 'HH:mm'")) 'seletor de horario: DateTimePicker HH:mm com ShowUpDown'
     ok (-not $guiSrc.Contains('$tbHora')) 'seletor de horario: TextBox livre removida (bug da linha na VM)'
     ok ($guiSrc.Contains('System.Windows.Forms.Timer')) 'auto-atualizacao: Timer da Situacao presente'
-    ok ($guiSrc.Contains('Opções avançadas')) 'exclusoes em Opcoes avancadas (colapsavel)'
+    ok ($guiSrc.Contains('Exclusões (opcional)')) 'exclusoes: rotulo direto "Exclusões (opcional)" (secao colapsavel)'
     ok ($guiSrc.Contains('Abrir pasta restaurada')) 'restaurar: botao Abrir pasta restaurada'
     ok ($guiSrc.Contains('Write-Diagnostico') -and $guiSrc.Contains('diagnostico-macip.txt')) 'lancamento: diagnostico sem segredos'
     ok ($guiSrc.Contains('Test-ConfiguracaoPronta')) 'abertura direta na Situacao: decisao isolada'
@@ -752,7 +752,29 @@ exit 0
     ok ($guiSrc.Contains('Restore-PastaCompleta') -and $guiSrc.Contains('Get-RaizSnapshot') -and $guiSrc.Contains('Invoke-ResticRestore')) 'pasta: funcoes da restauracao completa isoladas e testaveis'
     ok ($guiSrc.Contains('Restaurar um arquivo') -and $guiSrc.Contains('Restaurar toda a pasta protegida')) 'restaurar: seletor de modo com os dois caminhos'
     ok ($guiSrc.Contains('Pasta protegida registrada nesse ponto')) 'restaurar pasta: raiz do ponto exibida sem selecao de arquivo'
-    ok ($guiSrc.Contains('Escopo:') -and $guiSrc.Contains('Ponto:')) 'restaurar: revisao ao vivo mostra ponto+escopo+destino antes de iniciar'
+    ok ($guiSrc.Contains("New-Titulo 'Restaurar backup'")) 'restaurar: titulo da tela "Restaurar backup" (arquivo ou pasta inteira)'
+    ok ($guiSrc -match "lblRevPonto\.Text = 'Ponto: ' \+ " -and $guiSrc -match "lblRevEscopo\.Text = 'Escopo: ' \+ " -and $guiSrc -match "lblRevDestino\.Text = 'Destino: ' \+ ") 'restaurar: revisao separa Ponto, Escopo e Destino em linhas que quebram'
+
+    # ---- editor de exclusoes: altura real + teclado + interpretacao ----
+    ok ($guiSrc -match "Digite uma regra por linha, como ``\*\.tmp``\. Deixe em branco") 'exclusoes: exemplo "uma regra por linha, como *.tmp"'
+    ok ($guiSrc -match '\$tbExcl\.Multiline = \$true' -and $guiSrc -match '\$tbExcl\.AcceptsReturn = \$true') 'exclusoes: Enter no editor insere linha (nao dispara Salvar)'
+    ok ($guiSrc -match '\$tbExcl\.AcceptsTab = \$false') 'exclusoes: Tab sai do editor'
+    ok ($guiSrc -match '\$tbExcl\.WordWrap = \$false' -and $guiSrc -match '\$tbExcl\.ScrollBars = ''Both''') 'exclusoes: quebra visual nunca vira segunda regra (sem wrap + barra horizontal)'
+    ok ($guiSrc -match '\$tbExcl\.Dock = ''Top''; \$tbExcl\.Height = 1\d\d') 'exclusoes: editor com altura real (~5 linhas) -- nao colapsa'
+    ok (-not ($guiSrc -match 'Windows\.Forms\.GroupBox')) 'exclusoes: GroupBox+AutoSize+Dock=Fill removido (causa do campo fino na VM)'
+    ok ($guiSrc -match '\$tbExcl\.Lines = \$cfgAtual\.exclusoes' -and $guiSrc -match '\$tbExcl\.Lines \| Where-Object') 'exclusoes: leitura por linha logica -- salva e recarrega igual'
+
+    # ---- janela estreita: rotulos quebram, nada corta ----
+    ok ($guiSrc.Contains('Update-QuebraRotulos') -and $guiSrc.Contains('MaximumSize')) 'layout estreito: rotulos limitados a largura util (sem rolagem horizontal)'
+    ok ($guiSrc.Contains('Add_Layout') -and $guiSrc.Contains('Add_Resize') -and $guiSrc.Contains('Add_Shown')) 'layout estreito: quebra recalculada em layout/resize/abertura (barra vertical inclusa)'
+    ok ($guiSrc -match 'WrapContents = \$true') 'layout estreito: grupos de botoes quebram para a linha seguinte'
+    ok ($guiSrc.Contains('Mostrar detalhes técnicos') -and $guiSrc.Contains('New-DetalhesRecolhidos')) 'detalhes tecnicos: secao recolhida por padrao (Situacao e Restaurar)'
+
+    # ---- falha: mensagem curta + diagnostico recolhido ----
+    ok ($guiSrc.Contains('Get-MensagemFalha')) 'falha: classificador de mensagem curta existe'
+    ok ($guiSrc.Contains('A conexão com o servidor foi interrompida. Verifique a conexão e tente restaurar novamente.')) 'falha sftp: texto curto exato'
+    ok (@([regex]::Matches($guiSrc, 'Get-MensagemFalha -Erro'))).Count -ge 3 'falha: mensagem curta nos 3 caminhos de erro da aba Restaurar'
+    ok (@([regex]::Matches($guiSrc, '\$tbRestDet\.Text = '))).Count -ge 3 'falha: diagnostico vai aos detalhes tecnicos (nao a area principal)'
     ok ($guiSrc.Contains('O destino precisa ser NOVO') -or $guiSrc.Contains('precisa ser NOVO')) 'restaurar pasta: colisao de destino recusada na regra'
     ok (-not ($guiSrc -match "restore\s+'latest'|restore\s+latest")) 'restaurar pasta: nunca usa latest'
     ok ($guiSrc -match "restore `"\{3\}:\{4\}`" --target `"\{5\}`" --verify") 'restaurar pasta: restore "<id>:<raiz>" --target <tmp> --verify (so a raiz, conteudo conferido)'
@@ -1232,6 +1254,50 @@ exit 0
     ok (-not (Test-Path -LiteralPath $destFalha)) 'pasta: erro na copia -- destino NAO publicado'
     eq (@(Get-ChildItem -LiteralPath $tmp -Directory -Filter '.macip-rest-*' -Force)).Count 0 'pasta: erro na copia -- temporario da tentativa limpo'
     Remove-Item -LiteralPath (Join-Path $stubDir 'restore-code') -Force
+
+    # QUEDA SFTP durante a copia (caso 473f2997 na VM): a excecao chega
+    # com o texto real; a tela mostra a mensagem CURTA via Get-MensagemFalha
+    # e o diagnostico completo vai aos detalhes tecnicos. Nada publicado.
+    '1' | Set-Content -LiteralPath (Join-Path $stubDir 'restore-code') -Encoding Ascii -NoNewline
+    'sftp: packet_write_wait: Connection to 10.0.0.2 port 22: connection lost' |
+        Set-Content -LiteralPath (Join-Path $stubDir 'restore-stderr') -Encoding Ascii -NoNewline
+    $destQueda = Join-Path $tmp 'restaurado-queda'
+    $msgQueda = ''
+    try {
+        Restore-PastaCompleta -Estado $estado -Config $b1.Config -Snapshot $snapAnt `
+            -PathsMeta @($origem) -Destino $destQueda -Origem $origem | Out-Null
+    } catch { $msgQueda = $_.Exception.Message }
+    ok ($msgQueda -match 'connection lost') 'sftp: excecao chega ao catch com o diagnostico real (vai aos detalhes)'
+    eq (Get-MensagemFalha -Erro $msgQueda) 'A conexão com o servidor foi interrompida. Verifique a conexão e tente restaurar novamente.' 'sftp: queda -> mensagem curta exata na area principal'
+    ok (-not (Test-Path -LiteralPath $destQueda)) 'sftp: queda -- destino NAO publicado'
+    eq (@(Get-ChildItem -LiteralPath $tmp -Directory -Filter '.macip-rest-*' -Force)).Count 0 'sftp: queda -- temporario limpo'
+    Remove-Item -LiteralPath (Join-Path $stubDir 'restore-code'), (Join-Path $stubDir 'restore-stderr') -Force
+
+    # Get-MensagemFalha: perda de conexao IDENTIFICADA -> curta; todo o
+    # resto mantem o texto proprio (destino invalido, pasta existente,
+    # permissao, timeout do app, falha desconhecida).
+    $curta = 'A conexão com o servidor foi interrompida. Verifique a conexão e tente restaurar novamente.'
+    foreach ($txt in @('connection lost', 'Connection reset by peer', 'broken pipe',
+                      'connection closed by remote host', 'i/o timeout',
+                      'Fatal: unable to open repository: connection timed out',
+                      'session terminated unexpectedly')) {
+        eq (Get-MensagemFalha -Erro $txt) $curta "falha: '$txt' -> mensagem curta"
+    }
+    foreach ($txt in @('O destino precisa ser NOVO', 'Escolha o arquivo a restaurar na lista',
+                      'Acesso negado a pasta de destino',
+                      'Restauracao excedeu o tempo limite de 10 minutos — a pasta parcial foi descartada.',
+                      'falha estranha qualquer xyz')) {
+        eq (Get-MensagemFalha -Erro $txt) $txt "falha: texto proprio preservado ('$($txt.Substring(0,[Math]::Min(30,$txt.Length)))…')"
+    }
+    ok ((Get-MensagemFalha -Erro '') -ne $curta) 'falha: mensagem vazia NAO vira "conexao interrompida"'
+
+    # regras de exclusao: uma por LINHA LOGICA — uma regra longa que
+    # quebraria na tela NUNCA vira duas ao salvar (WordWrap=$false).
+    $regras = @('*.tmp', 'cache local\*.dat', ('regra-longa\' + ('x' * 120) + '\*.log'))
+    $objEx = New-BackupJsonObj -Perfil ([pscustomobject]@{ repositorio = 'sftp:a@b:/c'; repositorio_id = ('d' * 64) }) `
+        -Origem $origem -Exclusoes $regras -Horario '02:30' -IdentidadeSsh 'k' -KnownHostsFile 'h'
+    eq (@($objEx.exclusoes)).Count 3 'exclusoes: 3 linhas logicas -> 3 regras gravadas'
+    eq ([string]$objEx.exclusoes[2]) $regras[2] 'exclusoes: regra longa gravada inteira, sem quebra'
 
     # timeout: Kill + nada publicado + temporario limpo
     '5' | Set-Content -LiteralPath (Join-Path $stubDir 'restore-sleep') -Encoding Ascii -NoNewline

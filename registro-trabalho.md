@@ -2355,3 +2355,52 @@ Segue SIMULADO/pendente de VM — transporte SFTP, conta Windows,
 PS 5.1, Task Scheduler, aceite visual e o mesmo roteiro com SFTP de
 teste (4b.6a/4b.11). Instalador NAO recompilado (sem makensis/payload
 Windows). VM, tarefa e repositorio do laboratorio nao tocados.
+
+## Revisao 20 — interface para primeiro uso e janela estreita
+
+Pedido: quatro correcoes de interface/presentacao de erro, usando o
+codigo atual da branch (referencia de teste na VM = 1d004f8), sem
+aplicar patch anterior.
+
+1) Editor de exclusoes (Pasta e horario): a causa na VM era
+GroupBox+AutoSize com o campo em Dock=Fill — o controle ancorado nao
+contribui ao tamanho preferido e o grupo media so o titulo ("uma linha
+fina"). O editor agora vive num TableLayoutPanel proprio, Dock=Top com
+altura real (~5 linhas): rotulo "Exclusões (opcional)", explicacao
+"Digite uma regra por linha, como `*.tmp`. Deixe em branco para nao
+excluir nada.", Enter insere linha (AcceptsReturn — nao dispara Salvar),
+Tab sai (AcceptsTab=$false), fechar/reabrir preserva e WordWrap=$false
+impede que uma quebra visual vire uma segunda regra na gravacao.
+
+2) Rolagem horizontal das abas: os rotulos AutoSize nao tinham limite de
+largura e esticavam a coluna — eis o Carregar pontos cortado. Agora todo
+rotulo entra em $script:Rotulos e Update-QuebraRotulos fixa
+MaximumSize pela largura util do pai (barra vertical ja descontada pelo
+ClientSize) a cada Layout/Resize/Shown; linha de hora e de modo ganham
+WrapContents. Na estreita (~960 px) rola so na vertical.
+
+3) Hierarquia das quatro abas: titulo de tela (New-Titulo), explicacao
+curta e cabecalhos de grupo (New-Secao): Ativar = Perfil, Chave, Senha,
+Validacao; Pasta e horario = Pasta, Horario, Exclusoes, Revisar e salvar;
+Situacao = Situação do backup + as tres informacoes + detalhes tecnicos
+em secao RECOLHIDA por padrao (New-DetalhesRecolhidos: AutoSize fechada
+<-> Percent 100 aberta); Restaurar = "Restaurar backup" + Revisao em tres
+linhas separadas (Ponto / Escopo / Destino) + detalhes recolhidos.
+
+4) Falha SFTP: a tela despejava Exception.Message inteiro (stderr do
+restic) na area principal — caso real em 17/11/2026: interrupcao na
+restauracao de 473f2997 por "connection lost"; destino final NAO criado,
+temporario removido e nova tentativa OK (evidencia registrada no roteiro,
+separada do aceite visual). Get-MensagemFalha classifica perda de conexao
+-> "A conexão com o servidor foi interrompida. Verifique a conexão e
+tente restaurar novamente."; o diagnostico completo (sem senhas) vai
+para os detalhes; destino invalido, pasta existente, permissao e falha
+desconhecida mantem o texto proprio — desconhecida NUNCA vira "conexao".
+
+Testes: GUI 383 ok, 0 falhas (novos asserts: editor, quebra na largura
+util, detalhes recolhidos, classificador + queda SFTP fim a fim com
+stderr real do stub; agente 150 ok; unittest 5/5 com suites reais;
+diff --check limpo; BOM EF BB BF; Tokenize 0 erros; detector [].
+Pendente de VM: aceite visual/interacao (4b.11) — ~960 px, 100/125/150%,
+so teclado, Remmina, Enter/Tab no editor, exclusoes persistidas e
+aplicadas, Carregar pontos visivel, queda SFTP + nova tentativa.

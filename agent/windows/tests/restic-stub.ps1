@@ -80,7 +80,13 @@ elseif ($args -contains 'restore') {
         $global:LASTEXITCODE = 0
         if (Test-Path (Join-Path $d 'restore-code')) {
             $global:LASTEXITCODE = [int](Get-Content (Join-Path $d 'restore-code') -Raw)
-            [Console]::Error.WriteLine('restore: falha simulada apos materializar')
+            # restore-stderr: texto de erro customizado (ex.: queda SFTP
+            # 'connection lost'); sem ele, a falha generica de sempre.
+            if (Test-Path (Join-Path $d 'restore-stderr')) {
+                [Console]::Error.WriteLine((Get-Content (Join-Path $d 'restore-stderr') -Raw).Trim())
+            } else {
+                [Console]::Error.WriteLine('restore: falha simulada apos materializar')
+            }
         }
     }
 }

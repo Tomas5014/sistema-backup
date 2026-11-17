@@ -1719,6 +1719,20 @@ function Get-DetalhesSuporte {
     return ($linhas -join "`r`n")
 }
 
+function Get-MensagemFalha {
+    # Uma mensagem curta por falha: perda de conexao IDENTIFICADA ganha a
+    # orientacao propria; todo o resto mantem o texto original -- destino
+    # invalido, pasta existente, falta de permissao e falhas desconhecidas
+    # NUNCA viram "conexao interrompida". O diagnostico completo continua
+    # disponivel nos detalhes tecnicos (recolhidos, sem segredos).
+    param([string]$Erro)
+    if (-not $Erro) { return 'A operação falhou. Repita; se o erro continuar, acione a MAC IP.' }
+    if ($Erro -match '(?i)connection (lost|reset|closed|aborted|timed out)|lost connection|connection closed by|broken pipe|unexpected eof|software caused connection abort|i/o timeout|network is unreachable|no route to host|session.{0,20}(terminated|closed)|connection.{0,20}interromp') {
+        return 'A conexão com o servidor foi interrompida. Verifique a conexão e tente restaurar novamente.'
+    }
+    return $Erro
+}
+
 function Test-ConfiguracaoPronta {
     # Abertura direta na aba Situacao: existe uma configuracao que a
     # tarefa usa (arquivo de config) e um estado para ler resultados.
@@ -1862,8 +1876,27 @@ function Show-Gui {
     # Helpers de LAYOUT: cada aba e um TableLayoutPanel em uma coluna --
     # linhas AutoSize empilham os blocos; nenhuma coordenada fixa. Um
     # controle por linha via Add-Linha; rotulos quebram na largura
-    # disponivel (Dock=Top + AutoSize) e campos expandem com a janela.
+    # disponivel (MaximumSize atualizado em cada Layout) e campos
+    # expandem/encolhem com a janela -- nada de rolagem horizontal.
     $script:Aba = @{}   # titulo -> TabPage (SelectedTab aceita a pagina, nao o painel)
+    $script:Rotulos = New-Object 'System.Collections.Generic.List[System.Windows.Forms.Label]'
+    function Update-QuebraRotulos {
+        # Largura util = cliente do pai imediato (a aba ou o painel
+        # interno) menos as margens. Quando a barra vertical aparece, o
+        # ClientSize ja encolheu -> a quebra acompanha na mesma passada
+        # de layout; sem isso o texto continua cortado atras da barra.
+        foreach ($l in $script:Rotulos) {
+            try {
+                $p = $l.Parent
+                if (-not $p) { continue }
+                $disp = $p.ClientSize.Width - $p.Padding.Horizontal - 2
+                if ($disp -lt 120) { continue }
+                if ($l.MaximumSize.Width -ne $disp) {
+                    $l.MaximumSize = New-Object System.Drawing.Size($disp, 0)
+                }
+            } catch { }
+        }
+    }
     function New-Aba([string]$t) {
         $p = New-Object "$W.TabPage"; $p.Text = $t; $p.BackColor = $corNeutra
         $tabs.TabPages.Add($p)
@@ -1871,26 +1904,64 @@ function Show-Gui {
         $ly = New-Object 'System.Windows.Forms.TableLayoutPanel'
         $ly.Dock = 'Fill'; $ly.AutoScroll = $true; $ly.ColumnCount = 1
         $ly.Padding = New-Object "$W.Padding"(18, 16, 18, 16)
+        # Layout dispara em resize, scroll e show: recalcula a quebra dos
+        # rotulos SEMPRE pela largura util atual (janela estreita incluida).
+        $ly.Add_Layout({ Update-QuebraRotulos })
         $p.Controls.Add($ly)
         return $ly
     }
-    function Add-Linha([System.Windows.Forms.TableLayoutPanel]$ly, $c, [int]$tab) {
+    function Add-Linha([System.Windows.Forms.TableLayoutPanel]$ly, $c, [int]$tab, [int]$margemTopo = 3) {
         $row = $ly.RowCount
         $ly.RowCount += 1
         $ly.RowStyles.Add((New-Object 'System.Windows.Forms.RowStyle'('AutoSize')))
         $c.Dock = 'Top'
-        $c.Margin = New-Object "$W.Padding"(0, 3, 0, 3)
+        $c.Margin = New-Object "$W.Padding"(0, $margemTopo, 0, 3)
         if ($tab -ge 0) { $c.TabIndex = $tab }
         $ly.Controls.Add($c, 0, $row)
         return $c
     }
     function New-Rotulo([string]$t, [bool]$titulo = $false) {
-        # AutoSize + Dock=Top: o texto longo QUEBRA na largura da aba,
-        # nunca e cortado -- redimensionar so muda a quebra.
+        # AutoSize + MaximumSize (definido em Update-QuebraRotulos): texto
+        # longo QUEBRA na largura util da aba -- nunca e cortado nem gera
+        # rolagem horizontal; redimensionar so muda a quebra.
         $l = New-Object 'System.Windows.Forms.Label'
         $l.Text = $t; $l.AutoSize = $true
         if ($titulo) { $l.Font = New-Object System.Drawing.Font($form.Font, [Drawing.FontStyle]::Bold) }
+        $script:Rotulos.Add($l) | Out-Null
         return $l
+    }
+    function New-Titulo([string]$t) {
+        # titulo da TELA: um passo acima do corpo (hierarquia unica)
+        $l = New-Rotulo $t
+        try { $l.Font = New-Object System.Drawing.Font('Segoe UI', 10.5, [Drawing.FontStyle]::Bold) } catch { }
+        return $l
+    }
+    function New-Secao([string]$t) { return (New-Rotulo $t $true) }   # cabecalho de grupo
+    function New-DetalhesRecolhidos($ly, [string]$textoCap, [int]$tabIdx, [System.Windows.Forms.TextBox]$tb) {
+        # Secao 'Mostrar detalhes tecnicos': RECOLHIDA por padrao. A linha
+        # fica AutoSize (0 com o painel oculto) e vira Percent 100 so
+        # quando expandida -- ocupa o restante da aba sem empurrar nada.
+        $ck = New-Object 'System.Windows.Forms.CheckBox'
+        $ck.Text = 'Mostrar detalhes técnicos'; $ck.AutoSize = $true
+        $ck.AccessibleName = 'Mostrar detalhes técnicos (IDs, caminhos e diagnóstico, sem senhas)'
+        Add-Linha $ly $ck $tabIdx -margemTopo 10 | Out-Null
+        $pnl = New-Object "$W.Panel"
+        $pnl.Dock = 'Fill'; $pnl.Visible = $false
+        $pnl.MinimumSize = New-Object System.Drawing.Size(0, 140)
+        $cap = New-Rotulo $textoCap; $cap.Dock = 'Top'
+        $tb.Dock = 'Fill'; $tb.Margin = New-Object "$W.Padding"(0, 3, 0, 3)
+        # ultimo Add ancora primeiro: o rotulo toma o topo, o texto preenche o resto
+        $pnl.Controls.Add($tb); $pnl.Controls.Add($cap)
+        $row = $ly.RowCount; $ly.RowCount += 1
+        $ly.RowStyles.Add((New-Object 'System.Windows.Forms.RowStyle'('AutoSize'))) | Out-Null
+        $pnl.Margin = New-Object "$W.Padding"(0, 3, 0, 3)
+        $ly.Controls.Add($pnl, 0, $row)
+        $ck.Add_CheckedChanged({
+            $pnl.Visible = $ck.Checked
+            $ly.RowStyles[$row] = New-Object 'System.Windows.Forms.RowStyle'(
+                $(if ($ck.Checked) { 'Percent' } else { 'AutoSize' }), $(if ($ck.Checked) { 100 } else { 0 }))
+        })
+        return $ck
     }
     function New-CampoRotulo([string]$t) { return (New-Rotulo $t) }
     function New-LinhaCampo($campo, $botao) {
@@ -1942,24 +2013,28 @@ function Show-Gui {
 
     # ----- Tab 1: Ativar (passo 1 de 3 do primeiro uso) -----
     $t1 = New-Aba '1. Ativar'
-    Add-Linha $t1 (New-Rotulo 'Passo 1 de 3 — Ativação' $true) -1 | Out-Null
+    Add-Linha $t1 (New-Titulo 'Passo 1 de 3 — Ativação') -1 -margemTopo 0 | Out-Null
     Add-Linha $t1 (New-Rotulo ("Conta Windows em uso: $conta — é ela quem roda o backup, inclusive sem sessão aberta.")) -1 | Out-Null
     Add-Linha $t1 (New-Rotulo 'A MAC IP fornece o perfil (.json), a chave privada e a senha Restic pelos canais combinados. Importe os três aqui — a senha nunca vai para o perfil nem para o arquivo de configuração.') -1 | Out-Null
-    Add-Linha $t1 (New-Rotulo 'Perfil MAC IP (.json):') -1 | Out-Null
+    Add-Linha $t1 (New-Secao 'Perfil') -1 -margemTopo 12 | Out-Null
+    Add-Linha $t1 (New-Rotulo 'Arquivo de perfil MAC IP (.json) recebido:') -1 | Out-Null
     $tbPerfil = New-Caixa 'Caminho do perfil MAC IP importado'
     $tbPerfil.ReadOnly = $true; $tbPerfil.TabStop = $false
     $script:perfilAtual = $null
     $btPerfil = New-Botao 'Importar perfil...' 140
     Add-Linha $t1 (New-LinhaCampo $tbPerfil $btPerfil) 0 | Out-Null
-    Add-Linha $t1 (New-Rotulo 'Chave privada SSH:') -1 | Out-Null
+    Add-Linha $t1 (New-Secao 'Chave') -1 -margemTopo 12 | Out-Null
+    Add-Linha $t1 (New-Rotulo 'Chave privada SSH fornecida pela MAC IP:') -1 | Out-Null
     $tbChave = New-Caixa 'Caminho da chave privada SSH'
     $tbChave.ReadOnly = $true; $tbChave.TabStop = $false
     $btChave = New-Botao 'Escolher chave...' 140
     Add-Linha $t1 (New-LinhaCampo $tbChave $btChave) 1 | Out-Null
-    Add-Linha $t1 (New-Rotulo 'Senha Restic:') -1 | Out-Null
+    Add-Linha $t1 (New-Secao 'Senha') -1 -margemTopo 12 | Out-Null
+    Add-Linha $t1 (New-Rotulo 'Senha Restic (fica só neste computador, protegida):') -1 | Out-Null
     $tbSenha = New-Caixa 'Senha Restic fornecida pela MAC IP'
     $tbSenha.UseSystemPasswordChar = $true
     Add-Linha $t1 $tbSenha 2 | Out-Null
+    Add-Linha $t1 (New-Secao 'Validação') -1 -margemTopo 12 | Out-Null
     $lblFalta = New-Rotulo 'Ainda falta: perfil, chave privada e senha.'
     Add-Linha $t1 $lblFalta -1 | Out-Null
     $btValidar = New-Botao 'Validar e continuar' 0 $true
@@ -2048,11 +2123,14 @@ function Show-Gui {
 
     # ----- Tab 2: Pasta e horario (passos 2 e 3 do primeiro uso) -----
     $t2 = New-Aba '2. Pasta e horário'
-    Add-Linha $t2 (New-Rotulo 'Passo 2 de 3 — Pasta e horário' $true) -1 | Out-Null
+    Add-Linha $t2 (New-Titulo 'Passo 2 de 3 — Pasta e horário') -1 -margemTopo 0 | Out-Null
+    Add-Linha $t2 (New-Rotulo 'Escolha o que proteger e quando o backup diário roda. Revise antes de salvar — nada é agendado antes.') -1 | Out-Null
+    Add-Linha $t2 (New-Secao 'Pasta') -1 -margemTopo 12 | Out-Null
     Add-Linha $t2 (New-Rotulo 'Pasta a proteger (tudo dentro dela entra no backup):') -1 | Out-Null
     $tbOrigem = New-Caixa 'Caminho da pasta a proteger'
     $btOrigem = New-Botao 'Escolher pasta...' 140
     Add-Linha $t2 (New-LinhaCampo $tbOrigem $btOrigem) 0 | Out-Null
+    Add-Linha $t2 (New-Secao 'Horário') -1 -margemTopo 12 | Out-Null
     Add-Linha $t2 (New-Rotulo 'Horário diário (hora e minuto, no horário deste computador):') -1 | Out-Null
     # Seletor de hora/minuto nativo -- visivel e operavel por mouse e
     # teclado. O valor sai como HH:mm (mesmo formato do backup.json).
@@ -2069,27 +2147,40 @@ function Show-Gui {
     $linhaHora.Controls.Add($dtpHora)
     $lblPrevHora.Margin = New-Object "$W.Padding"(12, 6, 0, 0)
     $linhaHora.Controls.Add($lblPrevHora)
+    $linhaHora.WrapContents = $true    # janela estreita: a previa cai para a linha de baixo
     Add-Linha $t2 $linhaHora 1 | Out-Null
+    # Secao Exclusoes (opcional): o texto digitado vive no editor --
+    # fechar e reabrir a secao NUNCA perde o que ja foi escrito.
     $ckAvanc = New-Object 'System.Windows.Forms.CheckBox'
-    $ckAvanc.Text = 'Opções avançadas (exclusões)'
+    $ckAvanc.Text = 'Exclusões (opcional)'
     $ckAvanc.AutoSize = $true
-    Add-Linha $t2 $ckAvanc 2 | Out-Null
-    $grpAdv = New-Object 'System.Windows.Forms.GroupBox'
-    $grpAdv.Text = 'Exclusões — uma por linha (ex.: *.tmp; vazio protege tudo)'
-    $grpAdv.AutoSize = $true; $grpAdv.Visible = $false
+    $ckAvanc.AccessibleName = 'Mostrar o editor de exclusões (opcional)'
+    $ckAvanc.Font = New-Object System.Drawing.Font($form.Font, [Drawing.FontStyle]::Bold)
+    Add-Linha $t2 $ckAvanc 2 -margemTopo 12 | Out-Null
+    # O editor fica num TableLayoutPanel proprio (Dock=Top, altura fixa de
+    # ~5 linhas): NUNCA GroupBox+AutoSize com Dock=Fill, que media so o
+    # titulo e colapsava o campo numa linha fina (bug visto na VM).
+    $pnlAdv = New-Object 'System.Windows.Forms.TableLayoutPanel'
+    $pnlAdv.AutoSize = $true; $pnlAdv.ColumnCount = 1; $pnlAdv.Dock = 'Top'
+    $pnlAdv.Visible = $false
+    $pnlAdv.Controls.Add((New-Rotulo 'Digite uma regra por linha, como `*.tmp`. Deixe em branco para não excluir nada.'))
     $tbExcl = New-Object "$W.TextBox"
-    $tbExcl.Multiline = $true; $tbExcl.ScrollBars = 'Vertical'
-    $tbExcl.Dock = 'Fill'; $tbExcl.MinimumSize = New-Object System.Drawing.Size(300, 70)
-    $tbExcl.AccessibleName = 'Lista de exclusões, uma por linha'
-    $grpAdv.Controls.Add($tbExcl)
-    Add-Linha $t2 $grpAdv -1 | Out-Null
-    $ckAvanc.Add_CheckedChanged({ $grpAdv.Visible = $ckAvanc.Checked })
-    Add-Linha $t2 (New-Rotulo 'Passo 3 de 3 — Revisar e salvar' $true) -1 | Out-Null
+    $tbExcl.Multiline = $true
+    $tbExcl.ScrollBars = 'Both'
+    $tbExcl.WordWrap = $false        # uma quebra VISUAL nunca vira uma segunda regra
+    $tbExcl.AcceptsReturn = $true    # Enter insere nova linha -- NAO dispara "Salvar e agendar"
+    $tbExcl.AcceptsTab = $false      # Tab sai do editor (nao insere tabulacao)
+    $tbExcl.Dock = 'Top'; $tbExcl.Height = 104
+    $tbExcl.AccessibleName = 'Lista de exclusões, uma regra por linha'
+    $pnlAdv.Controls.Add($tbExcl)
+    Add-Linha $t2 $pnlAdv -1 | Out-Null
+    $ckAvanc.Add_CheckedChanged({ $pnlAdv.Visible = $ckAvanc.Checked })
+    Add-Linha $t2 (New-Titulo 'Passo 3 de 3 — Revisar e salvar') -1 -margemTopo 14 | Out-Null
     Add-Linha $t2 (New-Rotulo 'Confira antes de gravar — pasta, horário local e frequência:') -1 | Out-Null
     $tbResumo = New-Object "$W.TextBox"
     $tbResumo.Multiline = $true; $tbResumo.ReadOnly = $true
     $tbResumo.ScrollBars = 'Vertical'
-    $tbResumo.MinimumSize = New-Object System.Drawing.Size(300, 76)
+    $tbResumo.MinimumSize = New-Object System.Drawing.Size(0, 76)
     $tbResumo.BackColor = [Drawing.Color]::WhiteSmoke
     $tbResumo.AccessibleName = 'Resumo da configuração a salvar'
     $tbResumo.TabStop = $false
@@ -2215,8 +2306,10 @@ function Show-Gui {
         param([string]$txt)
         if ($tbDetalhes.Text -cne $txt) { $tbDetalhes.Text = $txt }
     }
+    Add-Linha $t3 (New-Titulo 'Situação do backup') -1 -margemTopo 0 | Out-Null
+    Add-Linha $t3 (New-Rotulo 'A execução atual, o último backup confirmado e o próximo agendamento — atualizados sozinhos.') -1 | Out-Null
     $lblStatus = New-Rotulo 'Execução atual: -' $true
-    Add-Linha $t3 $lblStatus -1 | Out-Null
+    Add-Linha $t3 $lblStatus -1 -margemTopo 10 | Out-Null
     $lblUlt = New-Rotulo 'Último backup bem-sucedido: -'
     Add-Linha $t3 $lblUlt -1 | Out-Null
     $lblProx = New-Rotulo 'Próximo backup: -'
@@ -2227,23 +2320,17 @@ function Show-Gui {
     $btPausa = New-Botao 'Pausar agenda' 140
     $btRetomar = New-Botao 'Retomar agenda' 140
     $btAtual = New-Botao 'Atualizar' 110
-    Add-Linha $t3 (New-LinhaBotoes @($btAgora, $btPausa, $btRetomar, $btAtual)) 0 | Out-Null
+    Add-Linha $t3 (New-LinhaBotoes @($btAgora, $btPausa, $btRetomar, $btAtual)) 0 -margemTopo 8 | Out-Null
     $lblOp = New-Rotulo ''
     Add-Linha $t3 $lblOp -1 | Out-Null
-    Add-Linha $t3 (New-Rotulo 'Detalhes (suporte técnico — envie à MAC IP quando pedirem):') -1 | Out-Null
     $tbDetalhes = New-Object "$W.TextBox"
     $tbDetalhes.Multiline = $true; $tbDetalhes.ReadOnly = $true
     $tbDetalhes.ScrollBars = 'Both'; $tbDetalhes.WordWrap = $false   # caminhos longos: rolagem horizontal
     $tbDetalhes.Font = New-Object System.Drawing.Font('Consolas', 9)
     $tbDetalhes.BackColor = [Drawing.Color]::White
     $tbDetalhes.AccessibleName = 'Detalhes técnicos da situação do backup'
-    # ultima linha cresce com a janela: os detalhes ocupam o espaco livre
-    $rowDet = $t3.RowCount
-    $t3.RowCount += 1
-    $t3.RowStyles.Add((New-Object 'System.Windows.Forms.RowStyle'('Percent', 100))) | Out-Null
-    $tbDetalhes.Dock = 'Fill'; $tbDetalhes.Margin = New-Object "$W.Padding"(0, 3, 0, 3)
     $tbDetalhes.TabStop = $false
-    $t3.Controls.Add($tbDetalhes, 0, $rowDet)
+    $ckDet3 = New-DetalhesRecolhidos $t3 'Detalhes (suporte técnico — envie à MAC IP quando pedirem):' 1 $tbDetalhes
 
     $script:Atualizando = $false
     $script:Disparo = $null            # pedido de "Executar agora" aberto (estado proprio)
@@ -2382,10 +2469,11 @@ function Show-Gui {
     $btRetomar.Add_Click({ try { Set-TarefaHabilitada $true; $lblOp.ForeColor='DarkBlue'; $lblOp.Text = 'Agenda retomada — o próximo backup segue o horário.' } catch { $lblOp.ForeColor='DarkRed'; $lblOp.Text = $_.Exception.Message }; & $script:AtualizarTela })
     $btAtual.Add_Click({ & $script:AtualizarTela })
 
-    # ----- Tab 4: Restaurar (Data do backup -> Arquivo -> Pasta) -----
+    # ----- Tab 4: Restaurar (Data do backup -> Arquivo/Pasta -> Destino) -----
     $t4 = New-Aba '4. Restaurar'
-    Add-Linha $t4 (New-Rotulo 'Restauração de arquivo — leitura em três etapas' $true) -1 | Out-Null
-    Add-Linha $t4 (New-Rotulo '1. Data do backup (ponto de restauração):') -1 | Out-Null
+    Add-Linha $t4 (New-Titulo 'Restaurar backup') -1 -margemTopo 0 | Out-Null
+    Add-Linha $t4 (New-Rotulo 'Restaure um arquivo ou a pasta protegida inteira de um ponto — o original nunca é sobrescrito.') -1 | Out-Null
+    Add-Linha $t4 (New-Rotulo '1. Data do backup (ponto de restauração):') -1 -margemTopo 8 | Out-Null
     $cbSnap = New-Object "$W.ComboBox"
     $cbSnap.DropDownStyle = 'DropDownList'
     $cbSnap.AccessibleName = 'Data do backup, ponto de restauração'
@@ -2399,7 +2487,7 @@ function Show-Gui {
     $rbPasta.Text = 'Restaurar toda a pasta protegida'; $rbPasta.AutoSize = $true
     $rbPasta.AccessibleName = 'Modo: restaurar toda a pasta protegida'
     $lnModo = New-Object 'System.Windows.Forms.FlowLayoutPanel'
-    $lnModo.AutoSize = $true; $lnModo.FlowDirection = 'LeftToRight'; $lnModo.WrapContents = $false
+    $lnModo.AutoSize = $true; $lnModo.FlowDirection = 'LeftToRight'; $lnModo.WrapContents = $true
     $rbArquivo.Margin = New-Object "$W.Padding"(0, 0, 20, 0)
     $lnModo.Controls.Add($rbArquivo); $lnModo.Controls.Add($rbPasta)
     Add-Linha $t4 $lnModo 1 | Out-Null
@@ -2448,28 +2536,30 @@ function Show-Gui {
     $tbNomePasta = New-Caixa 'Nome da nova pasta de restauração'
     $pnlDestPasta.Controls.Add($tbNomePasta)
     Add-Linha $t4 $pnlDestPasta 4 | Out-Null
-    # revisao ao vivo: ponto + escopo + caminho final ANTES de iniciar
-    $lblRevisao = New-Rotulo ''
-    Add-Linha $t4 $lblRevisao -1 | Out-Null
+    # revisao ao vivo ANTES de iniciar: Ponto, Escopo e Destino em linhas
+    # SEPARADAS que quebram na largura util -- caminho longo sempre
+    # consultavel por inteiro, nunca cortado atras de rolagem horizontal.
+    Add-Linha $t4 (New-Secao 'Revisão') -1 -margemTopo 10 | Out-Null
+    $lblRevPonto = New-Rotulo 'Ponto: -'
+    Add-Linha $t4 $lblRevPonto -1 | Out-Null
+    $lblRevEscopo = New-Rotulo 'Escopo: -'
+    Add-Linha $t4 $lblRevEscopo -1 | Out-Null
+    $lblRevDestino = New-Rotulo 'Destino: -'
+    Add-Linha $t4 $lblRevDestino -1 | Out-Null
     $btRest = New-Botao 'Restaurar arquivo' 160 $true
     $btAbrirDest = New-Botao 'Abrir pasta restaurada' 180
     $btAbrirDest.Visible = $false
-    Add-Linha $t4 (New-LinhaBotoes @($btRest, $btAbrirDest)) 4 | Out-Null
+    Add-Linha $t4 (New-LinhaBotoes @($btRest, $btAbrirDest)) 4 -margemTopo 8 | Out-Null
     $lblRes = New-Rotulo ''
     Add-Linha $t4 $lblRes -1 | Out-Null
-    Add-Linha $t4 (New-Rotulo 'Detalhes (suporte técnico):') -1 | Out-Null
     $tbRestDet = New-Object "$W.TextBox"
     $tbRestDet.Multiline = $true; $tbRestDet.ReadOnly = $true
     $tbRestDet.ScrollBars = 'Both'; $tbRestDet.WordWrap = $false     # snapshot/SHA-256 completos
     $tbRestDet.Font = New-Object System.Drawing.Font('Consolas', 9)
     $tbRestDet.BackColor = [Drawing.Color]::White
-    $tbRestDet.AccessibleName = 'Detalhes da restauração: snapshot e SHA-256'
-    $rowRestDet = $t4.RowCount
-    $t4.RowCount += 1
-    $t4.RowStyles.Add((New-Object 'System.Windows.Forms.RowStyle'('Percent', 100))) | Out-Null
-    $tbRestDet.Dock = 'Fill'; $tbRestDet.Margin = New-Object "$W.Padding"(0, 3, 0, 3)
+    $tbRestDet.AccessibleName = 'Detalhes da restauração: snapshot, SHA-256 e diagnóstico'
     $tbRestDet.TabStop = $false
-    $t4.Controls.Add($tbRestDet, 0, $rowRestDet)
+    $ckDet4 = New-DetalhesRecolhidos $t4 'Detalhes (suporte técnico — ponto, SHA-256 e diagnóstico, sem senhas):' 5 $tbRestDet
     $script:ultimoRestaurado = $null
 
     $script:AtualizaRevisaoRest = {
@@ -2488,7 +2578,9 @@ function Show-Gui {
                 Join-Path $tbPaiRest.Text $tbNomePasta.Text
             } else { '(escolha onde salvar e informe o nome da nova pasta)' }
         } elseif ($tbDest.Text) { $tbDest.Text } else { '(não escolhido)' })
-        $lblRevisao.Text = "Ponto: $ponto — Escopo: $escopo → Destino: $dest"
+        $lblRevPonto.Text = 'Ponto: ' + $ponto
+        $lblRevEscopo.Text = 'Escopo: ' + $escopo
+        $lblRevDestino.Text = 'Destino: ' + $dest
     }
     $script:AplicaModo = {
         $pnlArq.Visible = $rbArquivo.Checked
@@ -2528,7 +2620,8 @@ function Show-Gui {
             } else { "$($cbSnap.Items.Count) ponto(s) de restauração disponível(is)." })
         } catch {
             & $script:LimpaSelecaoRest                       # listagem falhou -> descarta a selecao
-            $lblRes.ForeColor = 'DarkRed'; $lblRes.Text = $_.Exception.Message
+            $lblRes.ForeColor = 'DarkRed'; $lblRes.Text = Get-MensagemFalha -Erro $_.Exception.Message
+            $tbRestDet.Text = ('falha ao carregar pontos — diagnóstico (sem senhas):' + "`r`n" + $_.Exception.Message)
         } finally { $btSnaps.Enabled = $true }
     })
     $cbSnap.Add_SelectedIndexChanged({
@@ -2549,7 +2642,11 @@ function Show-Gui {
             if ($cbArq.Items.Count -gt 0) { $cbArq.SelectedIndex = 0 }
             $lblRes.ForeColor = 'DarkBlue'
             $lblRes.Text = $(if ($cbArq.Items.Count -eq 0) { 'Este ponto não contém arquivos.' } else { '' })
-        } catch { $cbArq.Items.Clear(); $lblRes.ForeColor = 'DarkRed'; $lblRes.Text = $_.Exception.Message }
+        } catch {
+            $cbArq.Items.Clear(); $lblRes.ForeColor = 'DarkRed'
+            $lblRes.Text = Get-MensagemFalha -Erro $_.Exception.Message
+            $tbRestDet.Text = ('falha ao listar arquivos do ponto — diagnóstico (sem senhas):' + "`r`n" + $_.Exception.Message)
+        }
         & $script:AtualizaRevisaoRest
     })
     $cbArq.Add_SelectedIndexChanged({
@@ -2581,6 +2678,7 @@ function Show-Gui {
     $btRest.Add_Click({
         $btRest.Enabled = $false; $lblRes.ForeColor = 'DarkBlue'; $lblRes.Text = 'Restaurando…'
         $btAbrirDest.Visible = $false; $script:ultimoRestaurado = $null
+        $tbRestDet.Text = 'restauração em andamento…'
         try {
             $estado = Get-EstadoAtual; $cfgPath = Get-ConfigAtual
             $snap = $script:snaps[$cbSnap.SelectedIndex]
@@ -2626,8 +2724,15 @@ function Show-Gui {
                 ) -join "`r`n")
                 $btAbrirDest.Visible = $true
             }
-        } catch { $lblRes.ForeColor = 'DarkRed'; $lblRes.Text = $_.Exception.Message }
-        finally { $btRest.Enabled = $true }
+        } catch {
+            # UMA mensagem curta na area principal: perda de conexao
+            # identificada ganha orientacao propria; destino invalido,
+            # pasta existente, permissao e falhas desconhecidas mantem o
+            # texto original. O diagnostico completo (sem segredos) fica
+            # em 'Mostrar detalhes tecnicos' -- nunca despejado aqui.
+            $lblRes.ForeColor = 'DarkRed'; $lblRes.Text = Get-MensagemFalha -Erro $_.Exception.Message
+            $tbRestDet.Text = ('falha na restauração — diagnóstico (sem senhas):' + "`r`n" + $_.Exception.Message)
+        } finally { $btRest.Enabled = $true }
     })
     $btAbrirDest.Add_Click({
         if (-not (Open-PastaRestaurada -Alvo $script:ultimoRestaurado)) {
@@ -2648,6 +2753,12 @@ function Show-Gui {
     })
     $timer.Start()
     $form.Add_FormClosed({ try { $timer.Stop(); $timer.Dispose() } catch { } })
+
+    # Quebra de rotulos na largura util: o Layout de cada aba ja chama
+    # Update-QuebraRotulos; Resize cobre a transicao larga->estreita em
+    # tempo real e Shown fixa a primeira medida (DPI/escala da sessao).
+    $form.Add_Resize({ Update-QuebraRotulos })
+    $form.Add_Shown({ Update-QuebraRotulos })
 
     # Por aba: Enter aciona a acao segura da tela e o foco cai no
     # primeiro dado -- o fluxo inteiro fecha so com teclado.
