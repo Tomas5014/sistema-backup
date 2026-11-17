@@ -1956,10 +1956,16 @@ function Show-Gui {
         $ly.RowStyles.Add((New-Object 'System.Windows.Forms.RowStyle'('AutoSize'))) | Out-Null
         $pnl.Margin = New-Object "$W.Padding"(0, 3, 0, 3)
         $ly.Controls.Add($pnl, 0, $row)
+        # Estado viajando NO CONTROLE, nao em variavel da funcao: cada
+        # checkbox carrega seu proprio painel/tabela/linha no Tag e o
+        # handler le pelo $sender -- as duas secoes sao independentes por
+        # construcao e nada depende de escopo capturado.
+        $ck.Tag = @{ Painel = $pnl; Tabela = $ly; Linha = $row }
         $ck.Add_CheckedChanged({
-            $pnl.Visible = $ck.Checked
-            $ly.RowStyles[$row] = New-Object 'System.Windows.Forms.RowStyle'(
-                $(if ($ck.Checked) { 'Percent' } else { 'AutoSize' }), $(if ($ck.Checked) { 100 } else { 0 }))
+            $d = $sender.Tag
+            $d.Painel.Visible = $sender.Checked
+            $d.Tabela.RowStyles[$d.Linha] = New-Object 'System.Windows.Forms.RowStyle'(
+                $(if ($sender.Checked) { 'Percent' } else { 'AutoSize' }), $(if ($sender.Checked) { 100 } else { 0 }))
         })
         return $ck
     }

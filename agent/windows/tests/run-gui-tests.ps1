@@ -769,6 +769,8 @@ exit 0
     ok ($guiSrc.Contains('Add_Layout') -and $guiSrc.Contains('Add_Resize') -and $guiSrc.Contains('Add_Shown')) 'layout estreito: quebra recalculada em layout/resize/abertura (barra vertical inclusa)'
     ok ($guiSrc -match 'WrapContents = \$true') 'layout estreito: grupos de botoes quebram para a linha seguinte'
     ok ($guiSrc.Contains('Mostrar detalhes técnicos') -and $guiSrc.Contains('New-DetalhesRecolhidos')) 'detalhes tecnicos: secao recolhida por padrao (Situacao e Restaurar)'
+    ok ($guiSrc -match '\$ck\.Tag = @\{ Painel = \$pnl; Tabela = \$ly; Linha = \$row \}') 'detalhes tecnicos: painel/tabela/linha viajam no Tag do checkbox'
+    ok ($guiSrc -match '\$d = \$sender\.Tag' -and $guiSrc -match '\$d\.Painel\.Visible = \$sender\.Checked' -and $guiSrc -match '\$d\.Tabela\.RowStyles\[\$d\.Linha\]') 'detalhes tecnicos: handler le pelo $sender (independente entre secoes)'
 
     # ---- falha: mensagem curta + diagnostico recolhido ----
     ok ($guiSrc.Contains('Get-MensagemFalha')) 'falha: classificador de mensagem curta existe'

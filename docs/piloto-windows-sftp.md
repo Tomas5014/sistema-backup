@@ -291,7 +291,10 @@ faz **pela interface**, sem terminal, JSON ou Agendador.
     fictícios** que as regras valem no backup seguinte. Repetir o
     **ensaio de queda SFTP** (evidência 17/11): a área principal mostra
     a mensagem curta e o diagnóstico fica em *Mostrar detalhes
-    técnicos*. Usar **caminhos longos e dados fictícios**; cobrir
+    técnicos*. Nas abas **Situação** e **Restaurar**: *Mostrar detalhes
+    técnicos* começa **recolhido**, abre e fecha sem erro e as duas
+    seções funcionam de forma **independente** (abrir uma não mexe na
+    outra). Usar **caminhos longos e dados fictícios**; cobrir
     também **ausência de configuração**, **espera pelo início** e
     **falha de backup** — avisos e botões precisam continuar legíveis.
 12. **Atalho falho → diagnóstico:** se a janela não abrir pelo Menu
