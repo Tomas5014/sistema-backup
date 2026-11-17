@@ -26,6 +26,8 @@ Linux não exige FastAPI, PostgreSQL nem nada daqui.
 |---|---|---|
 | `MACIP_API_DATABASE_URL` | sim | `postgresql://user:senha@host/db` |
 | `MACIP_API_ADMIN_TOKEN` | sim | Bearer administrativo — **sem default** |
+| `MACIP_API_PROVISIONER_TOKEN` | para preparar A | Bearer exclusivo do executor primário |
+| `MACIP_API_LAB_PROFILE_EXPORT` | não | `1` libera perfil somente na rota autenticada de laboratório |
 | `MACIP_API_MAX_BODY_BYTES` | não | limite de corpo (default 1 MiB) |
 
 Sem senhas no Git/argumentos/exemplos. Gere valores fortes por ambiente:
@@ -38,12 +40,30 @@ python3 -m venv .venv-api && . .venv-api/bin/activate
 pip install -e api/
 export MACIP_API_DATABASE_URL='postgresql://<user>:<senha>@localhost/<db>'
 export MACIP_API_ADMIN_TOKEN='<token-admin>'
+export MACIP_API_PROVISIONER_TOKEN='<outro-token-forte>'
 macip-backup-api    # 127.0.0.1:8080 — migrações rodam no start
 ```
 
 Migrações versionadas/transacionais em `schema_migrations` +
 `pg_advisory_lock` — seguras com instâncias concorrentes e **nunca
 apagam histórico**.
+
+## Preparar instalação Windows — servidor primário A
+
+A migração 8 adiciona identidade da instalação, preparação durável e fila do
+executor. O navegador nunca envia comandos, caminhos administrativos, senha
+Restic ou chave SSH. O executor usa Bearer próprio e recebe somente uma
+operação fixa com identificadores validados.
+
+Estados públicos: `pending`, `running`, `primary_ready` e `failed`.
+`primary_ready` significa **Estrutura primária pronta · Cópia protegida
+pendente**. `GET /api/v1/installations/<id>/profile` continua respondendo 409
+até B estar comprovado. Esta entrega não possui rota para promover B.
+
+O executável `macip-backup-provisioner` usa `LabFileVault` e
+`LabPrimaryAdapter`: árvore privada e repositório Restic local descartáveis,
+sem criar usuário do sistema. É proibido para dados reais. O roteiro completo
+está em `docs/preparar-instalacao-a.md`.
 
 ## Provisionamento (administrativo)
 

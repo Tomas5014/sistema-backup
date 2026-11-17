@@ -398,6 +398,8 @@ describe("agentes do cliente: dados presos à rota", () => {
         json([client("ca", "Cliente A"), client("cb", "Cliente B")]),
       "GET /api/v1/clients/ca/agents": () => agentsA.promise,
       "GET /api/v1/clients/cb/agents": () => agentsB.promise,
+      "GET /api/v1/clients/ca/preparations": () => json([]),
+      "GET /api/v1/clients/cb/preparations": () => json([]),
     });
     renderWithRoutes("/clients/ca", (
       <Route path="/clients/:clientId" element={<ClientAgentsPage />} />

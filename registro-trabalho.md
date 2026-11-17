@@ -3678,3 +3678,30 @@ post-config — aprovado 127.0.0.1 mas o Compose receberia 0.0.0.0.
 Gates: test_lab_helpers **119/119**; test_up 17 · backup 13 ·
 restore_mock 68 · backup_central 62 · perms 10 ·
 backup_central_real 13 inalterados; tsc -b limpo.
+
+## Preparar instalação — servidor primário A
+
+Branch `feature/backup-prepare-installation`, criada diretamente de
+`d68b1cb`. A linha Windows 0.1.3 permaneceu no worktree separado e limpo em
+`7d62a80`; foi consultada somente para conferir os cinco campos do perfil.
+
+- Migração expansiva 8: identificador por cliente, estado reconciliado e
+  tentativas duráveis, com uma operação ativa por instalação.
+- API tipada + executor autenticado: nada de comando/caminho livre. Resultado
+  terminal idempotente, resultado divergente/atrasado recusado, erros
+  sanitizados e perfil normal bloqueado enquanto B não estiver comprovado.
+- `Vault` + `LabFileVault` e `LabPrimaryAdapter`: somente laboratório
+  descartável, com chave Ed25519 e Restic reais; links, dono ou permissões
+  divergentes são recusados. O adaptador não cria conta operacional nem
+  configura OpenSSH.
+- Portal: **Novo cliente → Preparar instalação**, acompanhamento,
+  retry e estado explícito **Estrutura primária pronta · Cópia protegida
+  pendente**. Download permanece desabilitado no portal e retorna 409 na API.
+
+Provas desta sessão, todas descartáveis: API completa **263/263**;
+preparação focal **8/8**; migrações **4/4**; executor Restic/ssh-keygen
+**5/5**; portal **97/97**, typecheck e build. Uma fixture Docker OpenSSH
+confirmou autenticação por chave e `restic cat config` remoto com ID estável.
+Não houve VM Windows: importação pela interface, backup e restore do 0.1.3
+continuam pendentes. B, cofre/host definitivos e dados reais estão fora desta
+entrega.

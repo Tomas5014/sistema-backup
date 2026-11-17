@@ -5,11 +5,14 @@ import { Link, useParams } from "react-router-dom";
 import {
   ApiError,
   createAgent,
-  createClient,
+  listPreparations,
+  prepareClientInstallation,
+  retryPreparation,
   listClientAgents,
   listClients,
   type AgentRow,
   type ClientRow,
+  type PreparationRow,
 } from "../api";
 import { useAuth } from "../auth";
 import { formatDate } from "../format";
@@ -81,12 +84,20 @@ export function ClientsPage() {
   );
 }
 
+function newRequestId(): string {
+  return crypto.randomUUID();
+}
+
 function NewClientForm({ onCreated }: { onCreated: (c: ClientRow) => void }) {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
+  const [identifier, setIdentifier] = useState("");
+  const [machine, setMachine] = useState("");
+  const [suggestedTime, setSuggestedTime] = useState("22:00");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [created, setCreated] = useState<ClientRow | null>(null);
+  const [created, setCreated] = useState<PreparationRow | null>(null);
+  const request = useRef<{ id: string; signature: string } | null>(null);
   const alive = useRef(true);
   useEffect(() => {
     alive.current = true;
@@ -101,11 +112,29 @@ function NewClientForm({ onCreated }: { onCreated: (c: ClientRow) => void }) {
     setPending(true);
     setError(null);
     try {
-      const client = await createClient(name.trim());
+      const signature = JSON.stringify([
+        name.trim(),
+        identifier.trim(),
+        machine.trim(),
+        suggestedTime,
+      ]);
+      if (request.current?.signature !== signature) {
+        request.current = { id: newRequestId(), signature };
+      }
+      const preparation = await prepareClientInstallation({
+        id: request.current.id,
+        client_name: name.trim(),
+        installation_identifier: identifier.trim(),
+        machine_name: machine.trim(),
+        suggested_time: suggestedTime,
+      });
       if (!alive.current) return;
-      setCreated(client);
-      setName("");
-      onCreated(client);
+      setCreated(preparation);
+      onCreated({
+        id: preparation.client_id,
+        name: name.trim(),
+        created_at: preparation.created_at,
+      });
     } catch (err) {
       if (!alive.current) return;
       setError(err instanceof ApiError ? err.message : "Falha inesperada.");
@@ -127,14 +156,18 @@ function NewClientForm({ onCreated }: { onCreated: (c: ClientRow) => void }) {
     return (
       <div className="success-state" role="status">
         <p>
-          Cliente <strong>{created.name}</strong> criado.{" "}
-          <Link to={`/clients/${created.id}`}>Abrir o cliente →</Link>{" "}
+          Preparação registrada para <strong>{created.installation.machine_name}</strong>.{" "}
+          <Link to={`/clients/${created.client_id}`}>Acompanhar preparação →</Link>{" "}
           <button
             type="button"
             className="btn"
             onClick={() => {
               setCreated(null);
               setOpen(false);
+              request.current = null;
+              setName("");
+              setIdentifier("");
+              setMachine("");
             }}
           >
             Fechar
@@ -144,22 +177,28 @@ function NewClientForm({ onCreated }: { onCreated: (c: ClientRow) => void }) {
     );
   }
   return (
-    <form className="form-inline" onSubmit={submit}>
-      <label htmlFor="new-client-name">Nome do cliente</label>
-      <input
-        id="new-client-name"
-        value={name}
-        onChange={(ev) => setName(ev.target.value)}
-        required
-        autoFocus
-        disabled={pending}
-      />
-      <button type="submit" className="btn btn-primary" disabled={pending || !name.trim()}>
-        {pending ? "Cadastrando…" : "Cadastrar"}
-      </button>
-      <button type="button" className="btn" disabled={pending} onClick={() => setOpen(false)}>
-        Cancelar
-      </button>
+    <form className="prepare-form" onSubmit={submit}>
+      <p className="form-context">
+        Cadastre o cliente e envie uma preparação controlada ao servidor primário.
+      </p>
+      <label htmlFor="new-client-name">Nome do cliente
+        <input id="new-client-name" value={name} onChange={(ev) => setName(ev.target.value)} required autoFocus disabled={pending} />
+      </label>
+      <label htmlFor="new-installation-id">Identificador da instalação
+        <input id="new-installation-id" value={identifier} onChange={(ev) => setIdentifier(ev.target.value.toLowerCase())} pattern="[a-z0-9][a-z0-9._-]{2,79}" required disabled={pending} placeholder="pc-financeiro-01" />
+      </label>
+      <label htmlFor="new-machine-name">Máquina
+        <input id="new-machine-name" value={machine} onChange={(ev) => setMachine(ev.target.value)} required disabled={pending} placeholder="PC-FINANCEIRO" />
+      </label>
+      <label htmlFor="new-suggested-time">Horário sugerido
+        <input id="new-suggested-time" type="time" value={suggestedTime} onChange={(ev) => setSuggestedTime(ev.target.value)} required disabled={pending} />
+      </label>
+      <div className="form-actions">
+        <button type="submit" className="btn btn-primary" disabled={pending || !name.trim() || !identifier.trim() || !machine.trim()}>
+          {pending ? "Preparando solicitação…" : "Preparar instalação"}
+        </button>
+        <button type="button" className="btn" disabled={pending} onClick={() => setOpen(false)}>Cancelar</button>
+      </div>
       {error ? <p className="error-state" role="alert">{error}</p> : null}
     </form>
   );
@@ -169,6 +208,7 @@ export function ClientAgentsPage() {
   const { clientId } = useParams<{ clientId: string }>();
   const { operator } = useAuth();
   const [agents, setAgents] = useState<AgentRow[] | null>(null);
+  const [preparations, setPreparations] = useState<PreparationRow[] | null>(null);
   const [clientName, setClientName] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   // respostas de um clientId antigo nunca substituem o atual
@@ -179,28 +219,42 @@ export function ClientAgentsPage() {
     const wanted = clientId;
     setError(null);
     try {
-      const [clientRows, agentRows] = await Promise.all([
+      const [clientRows, agentRows, preparationRows] = await Promise.all([
         listClients(500, 0),
         listClientAgents(wanted as string, 200, 0),
+        listPreparations(wanted as string),
       ]);
       if (gen !== generation.current) return; // rota já mudou
       setClientName(
         clientRows.find((c) => c.id === wanted)?.name ?? null,
       );
       setAgents(agentRows);
+      setPreparations(preparationRows);
     } catch (err) {
       if (gen !== generation.current) return;
       setError(err instanceof ApiError ? err.message : "Falha inesperada.");
       setAgents(null);
+      setPreparations(null);
     }
   }
 
   useEffect(() => {
     setAgents(null);
     setClientName(null); // outro cliente → dados do anterior somem
+    setPreparations(null);
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clientId]);
+
+  useEffect(() => {
+    const active = preparations?.some(
+      (item) => item.state === "pending" || item.state === "running",
+    );
+    if (!active) return;
+    const timer = window.setInterval(() => void load(), 3000);
+    return () => window.clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [clientId, preparations?.map((item) => item.state).join(",")]);
 
   return (
     <main className="page">
@@ -208,6 +262,21 @@ export function ClientAgentsPage() {
         <Link to="/clients">← Clientes</Link>
       </p>
       <h1>Agentes {clientName ? `de ${clientName}` : "do cliente"}</h1>
+      {preparations && preparations.length > 0 ? (
+        <section aria-labelledby="preparation-heading">
+          <h2 id="preparation-heading">Preparação da instalação</h2>
+          <div className="preparation-list">
+            {preparations.map((item) => (
+              <PreparationStatus
+                key={item.installation.id}
+                item={item}
+                admin={operator?.role === "admin"}
+                onChanged={() => void load()}
+              />
+            ))}
+          </div>
+        </section>
+      ) : null}
       {operator?.role === "admin" && clientId ? (
         <NewAgentForm key={clientId} clientId={clientId} clientName={clientName} onCreated={() => void load()} />
       ) : null}
@@ -246,6 +315,97 @@ export function ClientAgentsPage() {
         </table>
       ) : null}
     </main>
+  );
+}
+
+const preparationLabels: Record<PreparationRow["state"], string> = {
+  pending: "Aguardando",
+  running: "Em preparação",
+  primary_ready: "Estrutura primária pronta",
+  failed: "Falhou",
+};
+
+const preparationErrors: Record<string, string> = {
+  access_denied: "O executor não conseguiu acessar o recurso esperado em A.",
+  secret_missing: "O segredo original não está disponível no cofre de laboratório.",
+  repository_mismatch: "O repositório existente possui outra identidade.",
+  key_mismatch: "A chave autorizada diverge da instalação registrada.",
+  invalid_state: "O estado encontrado em A não pertence a esta instalação.",
+  repository_error: "O repositório primário não pôde ser verificado.",
+};
+
+function PreparationStatus({
+  item,
+  admin,
+  onChanged,
+}: {
+  item: PreparationRow;
+  admin: boolean;
+  onChanged: () => void;
+}) {
+  const [retrying, setRetrying] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function retry() {
+    if (retrying) return;
+    setRetrying(true);
+    setError(null);
+    try {
+      await retryPreparation(item.installation.id, newRequestId());
+      onChanged();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Falha inesperada.");
+    } finally {
+      setRetrying(false);
+    }
+  }
+
+  const statusClass = item.state === "failed"
+    ? "failed"
+    : item.state === "primary_ready"
+      ? "success"
+      : "missing";
+  return (
+    <article className="preparation-status">
+      <div className="preparation-heading">
+        <div>
+          <strong>{item.installation.machine_name}</strong>
+          <span>{item.installation.identifier}</span>
+        </div>
+        <span className={`badge badge-${statusClass}`} role="status">
+          {preparationLabels[item.state]}
+        </span>
+      </div>
+      <p className="preparation-message">
+        {item.state === "primary_ready"
+          ? "Estrutura primária pronta · Cópia protegida pendente"
+          : item.state === "running"
+            ? "O executor está reconciliando conta, chave e repositório."
+            : item.state === "pending"
+              ? "A solicitação aguarda o executor do servidor primário."
+              : preparationErrors[item.error_code ?? ""] ?? "A preparação falhou sem expor detalhes internos."}
+      </p>
+      <dl className="preparation-meta">
+        <div><dt>Horário sugerido</dt><dd>{item.installation.suggested_time}</dd></div>
+        <div><dt>Tentativa</dt><dd>{item.operation.attempt}</dd></div>
+      </dl>
+      <div className="form-actions">
+        {admin && item.state === "failed" ? (
+          <button type="button" className="btn" onClick={() => void retry()} disabled={retrying}>
+            {retrying ? "Solicitando…" : "Tentar novamente"}
+          </button>
+        ) : null}
+        <button
+          type="button"
+          className="btn"
+          disabled
+          title="Disponível somente após preparar e comprovar a cópia protegida em B"
+        >
+          Baixar perfil
+        </button>
+      </div>
+      {error ? <p className="error-state" role="alert">{error}</p> : null}
+    </article>
   );
 }
 

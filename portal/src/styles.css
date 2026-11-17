@@ -131,6 +131,41 @@ input, select {
 .form-inline { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin-bottom: 1rem; }
 .form-inline label { font-weight: 500; }
 .form-context { flex-basis: 100%; margin: 0 0 .25rem; color: var(--muted); }
+.prepare-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: .85rem 1rem;
+  max-width: 48rem;
+  margin: 0 0 1.5rem;
+  padding: 1rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.prepare-form .form-context,
+.prepare-form .form-actions,
+.prepare-form .error-state { grid-column: 1 / -1; }
+.form-actions { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
+.preparation-list { display: grid; gap: .75rem; margin-bottom: 1.5rem; }
+.preparation-status {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem;
+}
+.preparation-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: flex-start;
+}
+.preparation-heading div { display: grid; gap: .15rem; }
+.preparation-heading div span { color: var(--muted); font-size: .88rem; }
+.preparation-message { max-width: 70ch; margin: .75rem 0; }
+.preparation-meta { display: flex; gap: 2rem; flex-wrap: wrap; margin: 0 0 .8rem; }
+.preparation-meta div { display: grid; gap: .1rem; }
+.preparation-meta dt { color: var(--muted); font-size: .82rem; }
+.preparation-meta dd { margin: 0; font-variant-numeric: tabular-nums; }
 .success-state { background: #e8f6ec; border: 1px solid #b7e3c3; border-radius: 6px; padding: .6rem .8rem; }
 .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; z-index: 10; }
 .modal { background: #fff; border-radius: 8px; padding: 1.25rem; max-width: 34rem; width: 90%; box-shadow: 0 8px 30px rgba(0,0,0,.3); }
@@ -142,3 +177,7 @@ input, select {
    resultado (atenção que NÃO é vermelho de falha) */
 .badge-muted { background: #eef0f3; color: var(--muted); border-color: #d4d8df; }
 .badge-missing { background: #fdf1d6; color: var(--warn); border-color: #ecd9a8; }
+
+@media (max-width: 640px) {
+  .prepare-form { grid-template-columns: 1fr; }
+}

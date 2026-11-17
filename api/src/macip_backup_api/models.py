@@ -44,9 +44,76 @@ class Agent(Base):
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     created_at = mapped_column(DateTime(timezone=True), server_default=func.now())
     last_seen_at = mapped_column(DateTime(timezone=True), nullable=True)
+    installation_identifier: Mapped[str | None] = mapped_column(
+        String(80), nullable=True
+    )
+    platform: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    suggested_time: Mapped[str | None] = mapped_column(String(5), nullable=True)
 
     client: Mapped[Client] = relationship(back_populates="agents")
     credentials: Mapped[list["AgentCredential"]] = relationship(back_populates="agent")
+
+
+class ProvisioningOperation(Base):
+    """Solicitação fixa ao executor primário; nunca contém comando livre."""
+
+    __tablename__ = "provisioning_operations"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    client_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("clients.id"), nullable=False, index=True
+    )
+    agent_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("agents.id"), nullable=False, index=True
+    )
+    kind: Mapped[str] = mapped_column(String(30), nullable=False)
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False)
+    state: Mapped[str] = mapped_column(String(20), nullable=False)
+    step: Mapped[str] = mapped_column(String(40), nullable=False)
+    requester_kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    requester_ref: Mapped[str] = mapped_column(String(200), nullable=False)
+    claim_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    claimed_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    payload_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    created_at = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    started_at = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class InstallationPreparation(Base):
+    """Estado reconciliado da instalação; perfil fica interno até B."""
+
+    __tablename__ = "installation_preparations"
+
+    agent_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("agents.id"), primary_key=True
+    )
+    client_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("clients.id"), nullable=False, index=True
+    )
+    current_operation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("provisioning_operations.id"), nullable=False
+    )
+    state: Mapped[str] = mapped_column(String(30), nullable=False)
+    step: Mapped[str] = mapped_column(String(40), nullable=False)
+    protection_state: Mapped[str] = mapped_column(String(20), nullable=False)
+    account_name: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    repository_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    public_key_fingerprint: Mapped[str | None] = mapped_column(
+        String(128), nullable=True
+    )
+    vault_reference: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    profile = mapped_column(JSONB, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    created_at = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
 
 
 class AgentCredential(Base):

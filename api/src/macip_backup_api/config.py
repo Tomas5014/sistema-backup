@@ -11,6 +11,10 @@ MACIP_API_SESSION_INSECURE_COOKIE  "1" remove o flag Secure — exceção
                                    produção exige o default (Secure).
 MACIP_API_LOGIN_MAX_ATTEMPTS       falhas por janela (default 5)
 MACIP_API_LOGIN_WINDOW_SECONDS     janela da limitação (default 900)
+
+Executor primário:
+MACIP_API_PROVISIONER_TOKEN        Bearer exclusivo do executor A
+MACIP_API_LAB_PROFILE_EXPORT       "1" habilita exportação só ao executor
 """
 
 from __future__ import annotations
@@ -61,3 +65,16 @@ def login_max_attempts() -> int:
 
 def login_window_seconds() -> int:
     return int(os.environ.get("MACIP_API_LOGIN_WINDOW_SECONDS", "900"))
+
+
+def provisioner_token() -> str:
+    token = os.environ.get("MACIP_API_PROVISIONER_TOKEN", "")
+    if len(token) < 32:
+        raise ConfigError(
+            "MACIP_API_PROVISIONER_TOKEN ausente ou curto — use token exclusivo forte"
+        )
+    return token
+
+
+def lab_profile_export_enabled() -> bool:
+    return os.environ.get("MACIP_API_LAB_PROFILE_EXPORT") == "1"

@@ -117,6 +117,7 @@ function areaRoutes() {
     "GET /api/v1/clients": () => json(CLIENTS),
     "GET /api/v1/agents": () => json(AGENTS),
     "GET /api/v1/clients/cli-1/agents": () => json(AGENTS),
+    "GET /api/v1/clients/cli-1/preparations": () => json([]),
     "GET /api/v1/executions": () => json([EXECUTION]),
     "GET *": () => json({ detail: "rota não simulada" }, 500),
   };
@@ -335,6 +336,7 @@ describe("execuções: filtros, paginação, detalhe", () => {
       "GET /api/v1/clients": () => json(CLIENTS),
       "GET /api/v1/agents": () => json(AGENTS),
       "GET /api/v1/clients/cli-1/agents": () => json(AGENTS),
+      "GET /api/v1/clients/cli-1/preparations": () => json([]),
       "GET /api/v1/executions": () => {
         urls.push("hit");
         return json(new Array(25).fill(EXECUTION).map((e, i) => ({ ...e, id: `x${i}` })));

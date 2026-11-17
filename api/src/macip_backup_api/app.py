@@ -1741,6 +1741,8 @@ def create_app() -> FastAPI:
 
     from .recovery_routes import register_recovery
     register_recovery(app, require_admin_identity)
+    from .provisioning_routes import register_provisioning
+    register_provisioning(app, require_admin_identity)
     return app
 
 

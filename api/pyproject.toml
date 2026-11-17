@@ -25,6 +25,7 @@ test = [
 [project.scripts]
 macip-backup-api = "macip_backup_api.app:run"
 macip-backup-api-operator = "macip_backup_api.operator_cli:main"
+macip-backup-provisioner = "macip_backup_api.provisioner:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

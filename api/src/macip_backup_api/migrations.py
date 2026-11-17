@@ -261,6 +261,62 @@ CREATE TABLE IF NOT EXISTS recovery_operations (
 CREATE INDEX IF NOT EXISTS ix_recovery_agent_pending ON recovery_operations(agent_id, state);
 '''))
 
+MIGRATIONS.append((8, 'primary-installation-provisioning', '''
+ALTER TABLE agents
+ ADD COLUMN IF NOT EXISTS installation_identifier varchar(80),
+ ADD COLUMN IF NOT EXISTS platform varchar(20),
+ ADD COLUMN IF NOT EXISTS suggested_time varchar(5);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_agents_client_installation
+ ON agents(client_id, installation_identifier)
+ WHERE installation_identifier IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS provisioning_operations (
+ id uuid PRIMARY KEY,
+ client_id uuid NOT NULL REFERENCES clients(id),
+ agent_id uuid NOT NULL REFERENCES agents(id),
+ kind varchar(30) NOT NULL CHECK(kind IN ('prepare_primary','retry_primary')),
+ attempt integer NOT NULL CHECK(attempt > 0),
+ state varchar(20) NOT NULL CHECK(state IN ('pending','running','succeeded','failed')),
+ step varchar(40) NOT NULL,
+ requester_kind varchar(20) NOT NULL,
+ requester_ref varchar(200) NOT NULL,
+ claim_id uuid,
+ claimed_by varchar(100),
+ payload_hash varchar(64),
+ error_code varchar(50),
+ created_at timestamptz NOT NULL DEFAULT now(),
+ started_at timestamptz,
+ finished_at timestamptz
+);
+CREATE INDEX IF NOT EXISTS ix_provisioning_operations_agent
+ ON provisioning_operations(agent_id, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_provisioning_active_installation
+ ON provisioning_operations(agent_id)
+ WHERE state IN ('pending','running');
+
+CREATE TABLE IF NOT EXISTS installation_preparations (
+ agent_id uuid PRIMARY KEY REFERENCES agents(id),
+ client_id uuid NOT NULL REFERENCES clients(id),
+ current_operation_id uuid NOT NULL REFERENCES provisioning_operations(id),
+ state varchar(30) NOT NULL
+   CHECK(state IN ('pending','running','primary_ready','failed')),
+ step varchar(40) NOT NULL,
+ protection_state varchar(20) NOT NULL DEFAULT 'pending'
+   CHECK(protection_state IN ('pending','prepared','proven')),
+ account_name varchar(32),
+ repository_id varchar(64),
+ public_key_fingerprint varchar(128),
+ vault_reference varchar(200),
+ profile jsonb,
+ error_code varchar(50),
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ix_installation_preparations_client
+ ON installation_preparations(client_id);
+'''))
+
 _ADVISORY_KEY = 727_203_001
 
 

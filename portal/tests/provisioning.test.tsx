@@ -34,6 +34,35 @@ const CRED = {
   created_at: "2026-10-26T10:00:00Z",
   revoked_at: null,
 };
+const PREP = {
+  client_id: "cli-1",
+  installation: {
+    id: "ag-1",
+    identifier: "pc-financeiro-01",
+    machine_name: "PC-FINANCEIRO",
+    platform: "windows",
+    suggested_time: "22:00",
+  },
+  state: "pending",
+  step: "queued",
+  protection_state: "pending",
+  repository_id: null,
+  error_code: null,
+  profile_available: false,
+  created_at: "2026-10-26T10:00:00Z",
+  updated_at: "2026-10-26T10:00:00Z",
+  operation: {
+    id: "op-1",
+    kind: "prepare_primary",
+    attempt: 1,
+    state: "pending",
+    step: "queued",
+    error_code: null,
+    created_at: "2026-10-26T10:00:00Z",
+    started_at: null,
+    finished_at: null,
+  },
+};
 
 function portal(path: string) {
   return render(
@@ -52,6 +81,7 @@ function baseRoutes(op: typeof OPERATOR | typeof VIEWER = OPERATOR) {
     "GET /api/v1/clients": () => json([CLIENT]),
     "GET /api/v1/agents": () => json([AGENT]),
     "GET /api/v1/clients/cli-1/agents": () => json([AGENT]),
+    "GET /api/v1/clients/cli-1/preparations": () => json([]),
     "GET /api/v1/agents/ag-1/credentials": () => json([CRED]),
   };
 }
@@ -66,33 +96,46 @@ afterEach(() => {
 });
 
 describe("cadastro de cliente", () => {
-  it("cria cliente e mostra link para abri-lo mesmo fora da página", async () => {
-    const created = { id: "cli-new", name: "Zorba", created_at: "2026-10-28T00:00:00Z" };
+  it("cadastra cliente e instalação e inicia preparação", async () => {
+    const created = {
+      ...PREP,
+      client_id: "cli-new",
+      installation: { ...PREP.installation, id: "ag-new", machine_name: "PC-ZORBA" },
+    };
     calls = stubFetch({
       ...baseRoutes(),
-      "POST /api/v1/clients": () => json(created, 201),
+      "POST /api/v1/clients/prepare": () => json(created, 202),
     });
     portal("/clients");
     await userEvent.click(await screen.findByRole("button", { name: "Novo cliente" }));
     await userEvent.type(screen.getByLabelText("Nome do cliente"), "Zorba");
-    await userEvent.click(screen.getByRole("button", { name: "Cadastrar" }));
-    const link = await screen.findByRole("link", { name: /Abrir o cliente/ });
+    await userEvent.type(screen.getByLabelText("Identificador da instalação"), "pc-zorba-01");
+    await userEvent.type(screen.getByLabelText("Máquina"), "PC-ZORBA");
+    await userEvent.click(screen.getByRole("button", { name: "Preparar instalação" }));
+    const link = await screen.findByRole("link", { name: /Acompanhar preparação/ });
     expect(link).toHaveAttribute("href", "/clients/cli-new");
-    const post = calls.find((c) => c.key === "POST /api/v1/clients");
+    const post = calls.find((c) => c.key === "POST /api/v1/clients/prepare");
     expect(post?.init?.headers).toMatchObject({ "X-CSRF-Token": "csrf-test" });
-    expect(JSON.parse(String(post?.init?.body)).name).toBe("Zorba");
+    expect(JSON.parse(String(post?.init?.body))).toMatchObject({
+      client_name: "Zorba",
+      installation_identifier: "pc-zorba-01",
+      machine_name: "PC-ZORBA",
+      suggested_time: "22:00",
+    });
   });
 
   it("conflito 409 mostra o erro do servidor", async () => {
     calls = stubFetch({
       ...baseRoutes(),
-      "POST /api/v1/clients": () => json({ detail: "cliente já existe" }, 409),
+      "POST /api/v1/clients/prepare": () => json({ detail: "instalação já existe" }, 409),
     });
     portal("/clients");
     await userEvent.click(await screen.findByRole("button", { name: "Novo cliente" }));
     await userEvent.type(screen.getByLabelText("Nome do cliente"), "Acme Ltda");
-    await userEvent.click(screen.getByRole("button", { name: "Cadastrar" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("cliente já existe");
+    await userEvent.type(screen.getByLabelText("Identificador da instalação"), "pc-acme-01");
+    await userEvent.type(screen.getByLabelText("Máquina"), "PC-ACME");
+    await userEvent.click(screen.getByRole("button", { name: "Preparar instalação" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("instalação já existe");
   });
 
   it("bloqueia submissão duplicada enquanto pendente", async () => {
@@ -100,18 +143,20 @@ describe("cadastro de cliente", () => {
     const gate = new Promise<Response>((res) => (release = res));
     calls = stubFetch({
       ...baseRoutes(),
-      "POST /api/v1/clients": () => gate,
+      "POST /api/v1/clients/prepare": () => gate,
     });
     portal("/clients");
     await userEvent.click(await screen.findByRole("button", { name: "Novo cliente" }));
     const input = screen.getByLabelText("Nome do cliente");
     await userEvent.type(input, "Zorba");
-    const btn = screen.getByRole("button", { name: "Cadastrar" });
+    await userEvent.type(screen.getByLabelText("Identificador da instalação"), "pc-zorba-01");
+    await userEvent.type(screen.getByLabelText("Máquina"), "PC-ZORBA");
+    const btn = screen.getByRole("button", { name: "Preparar instalação" });
     await userEvent.click(btn);
-    await userEvent.click(screen.getByRole("button", { name: "Cadastrando…" }));
-    release(json({ id: "c2", name: "Zorba", created_at: "x" }, 201));
-    await screen.findByText(/criado/);
-    expect(calls.filter((c) => c.key === "POST /api/v1/clients")).toHaveLength(1);
+    await userEvent.click(screen.getByRole("button", { name: "Preparando solicitação…" }));
+    release(json({ ...PREP, client_id: "c2" }, 202));
+    await screen.findByText(/Preparação registrada/);
+    expect(calls.filter((c) => c.key === "POST /api/v1/clients/prepare")).toHaveLength(1);
   });
 
   it("viewer não vê ações de escrita", async () => {
@@ -119,6 +164,56 @@ describe("cadastro de cliente", () => {
     portal("/clients");
     await screen.findByText("Acme Ltda");
     expect(screen.queryByRole("button", { name: "Novo cliente" })).toBeNull();
+  });
+});
+
+describe("preparação da instalação", () => {
+  it("separa primário pronto da cópia protegida e bloqueia perfil", async () => {
+    calls = stubFetch({
+      ...baseRoutes(),
+      "GET /api/v1/clients/cli-1/preparations": () => json([
+        {
+          ...PREP,
+          state: "primary_ready",
+          step: "verified",
+          repository_id: "a".repeat(64),
+          operation: { ...PREP.operation, state: "succeeded", step: "verified" },
+        },
+      ]),
+    });
+    portal("/clients/cli-1");
+    expect(await screen.findByText("Estrutura primária pronta · Cópia protegida pendente")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Baixar perfil" })).toBeDisabled();
+    expect(calls.some((call) => call.key.includes("/profile"))).toBe(false);
+  });
+
+  it("mostra erro sanitizado e admin tenta novamente com CSRF", async () => {
+    calls = stubFetch({
+      ...baseRoutes(),
+      "GET /api/v1/clients/cli-1/preparations": () => json([
+        { ...PREP, state: "failed", error_code: "repository_mismatch", operation: { ...PREP.operation, state: "failed" } },
+      ]),
+      "POST /api/v1/installations/ag-1/preparation/retry": () => json(PREP, 202),
+    });
+    portal("/clients/cli-1");
+    expect(await screen.findByText(/outra identidade/)).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "Tentar novamente" }));
+    await waitFor(() => expect(calls.some((call) => call.key === "POST /api/v1/installations/ag-1/preparation/retry")).toBe(true));
+    const post = calls.find((call) => call.key === "POST /api/v1/installations/ag-1/preparation/retry");
+    expect(post?.init?.headers).toMatchObject({ "X-CSRF-Token": "csrf-test" });
+  });
+
+  it("viewer acompanha, mas não vê retry", async () => {
+    calls = stubFetch({
+      ...baseRoutes(VIEWER),
+      "GET /api/v1/clients/cli-1/preparations": () => json([
+        { ...PREP, state: "failed", error_code: "access_denied", operation: { ...PREP.operation, state: "failed" } },
+      ]),
+    });
+    portal("/clients/cli-1");
+    expect(await screen.findByText(/não conseguiu acessar/)).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Tentar novamente" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Baixar perfil" })).toBeDisabled();
   });
 });
 
@@ -288,14 +383,16 @@ describe("respostas atrasadas", () => {
     const gate = new Promise<Response>((res) => (release = res));
     calls = stubFetch({
       ...baseRoutes(),
-      "POST /api/v1/clients": () => gate,
+      "POST /api/v1/clients/prepare": () => gate,
     });
     const { unmount } = portal("/clients");
     await userEvent.click(await screen.findByRole("button", { name: "Novo cliente" }));
     await userEvent.type(screen.getByLabelText("Nome do cliente"), "Fantasma");
-    await userEvent.click(screen.getByRole("button", { name: "Cadastrar" }));
+    await userEvent.type(screen.getByLabelText("Identificador da instalação"), "pc-fantasma-01");
+    await userEvent.type(screen.getByLabelText("Máquina"), "PC-FANTASMA");
+    await userEvent.click(screen.getByRole("button", { name: "Preparar instalação" }));
     unmount(); // saiu da tela antes da resposta
-    await act(async () => release(json({ id: "x", name: "Fantasma", created_at: "y" }, 201)));
+    await act(async () => release(json({ ...PREP, client_id: "x" }, 202)));
     expect(document.body.textContent ?? "").not.toContain("Fantasma");
   });
 });
@@ -310,6 +407,7 @@ describe("cadastro pendente entre clientes", () => {
       ...baseRoutes(),
       "GET /api/v1/clients": () => json([CLIENT, clientB]),
       "GET /api/v1/clients/cli-2/agents": () => json([agentB]),
+      "GET /api/v1/clients/cli-2/preparations": () => json([]),
       "POST /api/v1/clients/cli-1/agents": () => gatePostA,
     });
     portal("/clients/cli-1");

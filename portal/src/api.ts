@@ -31,6 +31,38 @@ export interface AgentRow {
   last_seen_at: string | null;
 }
 
+export type PreparationState = "pending" | "running" | "primary_ready" | "failed";
+
+export interface PreparationRow {
+  client_id: string;
+  installation: {
+    id: string;
+    identifier: string;
+    machine_name: string;
+    platform: "windows";
+    suggested_time: string;
+  };
+  state: PreparationState;
+  step: string;
+  protection_state: "pending" | "prepared" | "proven";
+  repository_id: string | null;
+  error_code: string | null;
+  profile_available: boolean;
+  created_at: string;
+  updated_at: string;
+  operation: {
+    id: string;
+    kind: "prepare_primary" | "retry_primary";
+    attempt: number;
+    state: "pending" | "running" | "succeeded" | "failed";
+    step: string;
+    error_code: string | null;
+    created_at: string;
+    started_at: string | null;
+    finished_at: string | null;
+  };
+}
+
 export type ExecutionStatus =
   | "success"
   | "partial"
@@ -269,6 +301,39 @@ export async function createClient(name: string): Promise<ClientRow> {
     csrf: true,
   });
   return (await r.json()) as ClientRow;
+}
+
+export async function prepareClientInstallation(input: {
+  id: string;
+  client_name: string;
+  installation_identifier: string;
+  machine_name: string;
+  suggested_time: string;
+}): Promise<PreparationRow> {
+  const response = await apiFetch("/api/v1/clients/prepare", {
+    method: "POST",
+    body: input,
+    csrf: true,
+  });
+  return (await response.json()) as PreparationRow;
+}
+
+export async function listPreparations(clientId: string): Promise<PreparationRow[]> {
+  const response = await apiFetch(
+    `/api/v1/clients/${encodeURIComponent(clientId)}/preparations`,
+  );
+  return (await response.json()) as PreparationRow[];
+}
+
+export async function retryPreparation(
+  installationId: string,
+  requestId: string,
+): Promise<PreparationRow> {
+  const response = await apiFetch(
+    `/api/v1/installations/${encodeURIComponent(installationId)}/preparation/retry`,
+    { method: "POST", body: { id: requestId }, csrf: true },
+  );
+  return (await response.json()) as PreparationRow;
 }
 
 export async function createAgent(
