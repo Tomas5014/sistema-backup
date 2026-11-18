@@ -3741,3 +3741,29 @@ de B conservou os pontos antigos e voltou a exigir prova.
 O roteiro reproduzível está em `docs/copia-protegida-b.md`. O aplicativo
 Windows permanece em `7d62a80` no worktree separado. Importação pela
 interface, backup e restauração na VM Windows continuam pendentes.
+
+## Roteiro do ensaio Windows 0.1.3 → A → B
+
+Continuação de `af03650` na mesma branch. O roteiro
+`docs/ensaio-windows-a-b.md` separa comandos do servidor e cliques da VM,
+com cadastro, bloqueio do perfil, seed interno, prova de B, download normal,
+entrega privada das credenciais, agenda sem sessão e dois restores pelo app.
+Depois da captura do ponto Windows, o roteiro exige seu ID exato, comparação
+da origem registrada com o manifesto, cópia para B, parada exclusiva de A
+e desligamento da VM fictícia, restauração e registro da duração/SHA-256.
+
+Os helpers versionados `tools/windows-lab-server.py` e
+`tools/windows-lab-data.ps1` mantêm a área entre as etapas do operador.
+O smoke test executou o servidor com PostgreSQL/OpenSSH/Restic reais,
+cadastro por HTTP administrativo, bloqueio antes da prova e liberação
+depois, entrega das credenciais em arquivos privados separados e prova
+repetida com A desligado. O PowerShell no Linux gerou e conferiu o manifesto.
+Resultado: 3 testes aprovados, sem falhas ou skips. Blocos Bash e compilação
+Python conferidos. Recursos descartáveis removidos.
+
+O teste com caminhos contendo espaços reproduziu falha de host key causada
+pelo argumento `UserKnownHostsFile`. Corrigidas a citação no parser SSH e a
+codificação CSV da opção Restic somente no executor B. A cópia real do
+roteiro com espaços cobre a regressão. O aplicativo Windows segue congelado.
+Os cliques, o disparo sem sessão e as restaurações na VM aguardam execução
+e evidência do operador.

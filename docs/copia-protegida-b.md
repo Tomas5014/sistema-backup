@@ -1,5 +1,8 @@
 # Cópia protegida em B · laboratório
 
+Para o ensaio com cliques no aplicativo Windows 0.1.3 e execução sem
+sessão aberta, siga [Ensaio Windows → A → B](ensaio-windows-a-b.md).
+
 A produz os backups. B lê A por SFTP com uma chave SSH própria, usa uma chave
 Restic de leitura para A e escreve em seu repositório local independente. O
 usuário que executa B é o único com acesso ao volume e ao cofre descartável de

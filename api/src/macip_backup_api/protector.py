@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import csv
 from contextlib import contextmanager
 from datetime import datetime
 import fcntl
 import hashlib
+import io
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -25,6 +27,13 @@ from .provisioner import ApiTransport, LabFileVault
 
 _ID = re.compile(r"[0-9a-f]{64}")
 _PROOF_METHOD = "restic-offline-sha256-v1"
+
+
+def sftp_args_option(arguments: list[str]) -> str:
+    # Cobra interpreta -o como CSV antes de o Restic interpretar os argumentos SSH.
+    output = io.StringIO()
+    csv.writer(output, lineterminator="").writerow(["sftp.args=" + shlex.join(arguments)])
+    return output.getvalue()
 
 
 class ProtectionError(RuntimeError):
@@ -265,10 +274,11 @@ class LabProtector:
         with tempfile.TemporaryDirectory(prefix="ssh-b-", dir=self.state) as directory:
             hosts = Path(directory) / "known_hosts"
             hosts.write_text(context["known_hosts"] + "\n", encoding="utf-8")
-            options = ["-o", "sftp.args=" + shlex.join([
+            options = ["-o", sftp_args_option([
                 "-F", "/dev/null", "-oBatchMode=yes", "-oStrictHostKeyChecking=yes",
                 "-oIdentitiesOnly=yes", "-oIdentityAgent=none", "-oGlobalKnownHostsFile=/dev/null",
-                f"-oUserKnownHostsFile={hosts}", "-oConnectTimeout=5", "-i", str(key),
+                "-oUserKnownHostsFile=" + json.dumps(str(hosts), ensure_ascii=False),
+                "-oConnectTimeout=5", "-i", str(key),
             ])]
             source = context["repository"]
             env = {"PATH": os.environ.get("PATH", os.defpath), "RESTIC_PASSWORD": source_password.decode()}
