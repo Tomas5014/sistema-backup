@@ -365,11 +365,11 @@ class ApiTransport:
         handlers = [ProxyHandler({})] if lab_http else []
         self._opener = build_opener(*handlers, _NoRedirect())
 
-    def request(self, path: str, body: dict) -> dict:
+    def request(self, path: str, body: dict | None = None) -> dict:
         request = Request(
             self.url + path,
-            data=json.dumps(body).encode(),
-            method="POST",
+            data=json.dumps(body).encode() if body is not None else None,
+            method="POST" if body is not None else "GET",
             headers={
                 "Authorization": "Bearer " + self.token,
                 "Content-Type": "application/json",

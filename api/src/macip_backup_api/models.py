@@ -108,6 +108,7 @@ class InstallationPreparation(Base):
     )
     vault_reference: Mapped[str | None] = mapped_column(String(200), nullable=True)
     profile = mapped_column(JSONB, nullable=True)
+    protected_copy = mapped_column(JSONB, nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(50), nullable=True)
     created_at = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

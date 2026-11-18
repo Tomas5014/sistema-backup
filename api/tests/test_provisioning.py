@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 import base64
 import json
 from pathlib import Path
@@ -424,6 +425,12 @@ def test_full_api_executor_restic_flow_resumes_abandoned_claim(client):
 
 @pytest.fixture
 def sftp_profile(client, tmp_path):
+    with lab_sftp_profile(client, tmp_path) as (profile, _, _, _):
+        yield profile
+
+
+@contextmanager
+def lab_sftp_profile(client, tmp_path):
     image = os.environ.get("MACIP_TEST_PROVISIONING_SFTP_IMAGE")
     if not image:
         pytest.skip("defina MACIP_TEST_PROVISIONING_SFTP_IMAGE com uma imagem OpenSSH local")
@@ -437,6 +444,8 @@ def sftp_profile(client, tmp_path):
     name = f"macip-profile-test-{uuid.uuid4().hex[:12]}"
     hostkey = tmp_path / "hostkey"
     run("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(hostkey))
+    reader = tmp_path / "b-reader"
+    run("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(reader))
     run("docker", "run", "--pull=never", "--rm", "-d", "--name", name,
         "-p", "127.0.0.1::22", "--entrypoint", "/bin/sh", image, "-c", "exec sleep infinity")
     try:
@@ -472,7 +481,12 @@ def sftp_profile(client, tmp_path):
         account_dir = primary.account_path(account)
         run("docker", "exec", name, "mkdir", "-p", "/jail", "/run/sshd")
         run("docker", "cp", str(account_dir / "repository"), f"{name}:/jail/repository")
-        run("docker", "cp", str(account_dir / ".ssh/authorized_keys"), f"{name}:/authorized_keys")
+        authorized = tmp_path / "authorized_keys"
+        authorized.write_text(
+            'restrict,command="internal-sftp" ' + (account_dir / ".ssh/authorized_keys").read_text()
+            + 'restrict,command="internal-sftp -R" ' + reader.with_suffix(".pub").read_text()
+        )
+        run("docker", "cp", str(authorized), f"{name}:/authorized_keys")
         run("docker", "cp", str(hostkey), f"{name}:/hostkey")
         run("docker", "exec", name, "/bin/sh", "-eu", "-c", """
             useradd --create-home --shell /usr/sbin/nologin "$1"
@@ -488,7 +502,7 @@ def sftp_profile(client, tmp_path):
             "-h", "/hostkey", "-oUsePAM=no", "-oPasswordAuthentication=no",
             "-oKbdInteractiveAuthentication=no", "-oPermitRootLogin=no",
             "-oDisableForwarding=yes", "-oAuthorizedKeysFile=.ssh/authorized_keys",
-            f"-oAllowUsers={account}", "-oChrootDirectory=/jail", "-oForceCommand=internal-sftp",
+            f"-oAllowUsers={account}", "-oChrootDirectory=/jail",
             "-oSubsystem=sftp internal-sftp")
         for _ in range(30):
             try:
@@ -500,9 +514,17 @@ def sftp_profile(client, tmp_path):
             time.sleep(0.1)
         else:
             pytest.fail("sshd descartável não respondeu")
-        yield profile_path, profile, private, known_hosts, bundle["restic_password"], name
+        profile_result = profile_path, profile, private, known_hosts, bundle["restic_password"], name
+        def stop():
+            nonlocal name
+            if name is not None:
+                run("docker", "stop", "-t", "1", name)
+                name = None
+
+        yield profile_result, uuid.UUID(installation), reader, stop
     finally:
-        run("docker", "stop", "-t", "1", name)
+        if name is not None:
+            run("docker", "stop", "-t", "1", name)
 
 
 def assert_exported_sftp_id(sftp_profile, tmp_path):

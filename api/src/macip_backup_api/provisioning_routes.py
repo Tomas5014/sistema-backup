@@ -14,7 +14,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import and_, func, or_, select, text
@@ -24,6 +24,7 @@ from . import config
 from .auth import csrf_guard, require_admin, require_viewer
 from .db import session
 from .models import Agent, Client, InstallationPreparation, ProvisioningOperation
+from .protection_routes import public_protection, register_protection, source_fingerprint
 from .provisioning_sftp import matches_endpoint
 
 _bearer = HTTPBearer(auto_error=False)
@@ -162,6 +163,7 @@ def _profile_is_current(row: InstallationPreparation) -> bool:
     return (
         isinstance(repository, str)
         and isinstance(known_hosts, str)
+        and row.profile.get("repositorio_id") == row.repository_id
         and matches_endpoint(row.account_name, repository, known_hosts)
     )
 
@@ -169,6 +171,7 @@ def _profile_is_current(row: InstallationPreparation) -> bool:
 def _preparation(db: Session, row: InstallationPreparation) -> dict:
     agent = db.get(Agent, row.agent_id)
     operation = db.get(ProvisioningOperation, row.current_operation_id)
+    protection_state, last_copy, profile_available = public_protection(row)
     return {
         "client_id": str(row.client_id),
         "installation": {
@@ -180,10 +183,11 @@ def _preparation(db: Session, row: InstallationPreparation) -> dict:
         },
         "state": row.state,
         "step": row.step,
-        "protection_state": row.protection_state,
+        "protection_state": protection_state,
+        "last_protected_copy": last_copy,
         "repository_id": row.repository_id,
         "error_code": row.error_code,
-        "profile_available": row.protection_state == "proven" and _profile_is_current(row),
+        "profile_available": profile_available and _profile_is_current(row),
         "created_at": row.created_at.isoformat(),
         "updated_at": row.updated_at.isoformat(),
         "operation": _operation(operation),
@@ -243,6 +247,8 @@ def _validate_success(db: Session, operation: ProvisioningOperation, result: Suc
 
 
 def register_provisioning(app, require_admin_identity):
+    register_protection(app, _get_preparation, _profile_is_current)
+
     @app.post(
         "/api/v1/clients/prepare",
         status_code=202,
@@ -396,12 +402,13 @@ def register_provisioning(app, require_admin_identity):
         "/api/v1/installations/{agent_id}/profile",
         dependencies=[Depends(require_admin)],
     )
-    def download_profile(agent_id: uuid.UUID, db: Session = Depends(session)):
+    def download_profile(agent_id: uuid.UUID, response: Response, db: Session = Depends(session)):
         preparation = _get_preparation(db, agent_id)
-        if preparation.protection_state != "proven" or preparation.profile is None:
-            raise HTTPException(409, "perfil bloqueado: cópia protegida pendente")
+        if not public_protection(preparation)[2]:
+            raise HTTPException(409, "perfil bloqueado: prova de cópia protegida pendente")
         if not _profile_is_current(preparation):
             raise HTTPException(409, "perfil legado requer nova verificação")
+        response.headers["Cache-Control"] = "no-store"
         return preparation.profile
 
     @app.post(
@@ -517,8 +524,10 @@ def register_provisioning(app, require_admin_identity):
             preparation.vault_reference = f"installation/{operation.agent_id}/bundle"
             preparation.profile = result.profile.model_dump()
             preparation.error_code = None
-            # Entrega B futura. Não há rota desta entrega que promova esse estado.
-            preparation.protection_state = "pending"
+            binding = preparation.protected_copy
+            if not binding or binding["source"] != source_fingerprint(preparation):
+                preparation.protected_copy = None
+                preparation.protection_state = "pending"
         db.commit()
         return _preparation(db, preparation)
 

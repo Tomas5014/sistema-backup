@@ -46,6 +46,7 @@ const PREP = {
   state: "pending",
   step: "queued",
   protection_state: "pending",
+  last_protected_copy: null,
   repository_id: null,
   error_code: null,
   profile_available: false,
@@ -91,6 +92,7 @@ beforeEach(() => {
   document.cookie = "macip_csrf=csrf-test; Path=/";
 });
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
   clearCookies();
 });
@@ -182,9 +184,55 @@ describe("preparação da instalação", () => {
       ]),
     });
     portal("/clients/cli-1");
-    expect(await screen.findByText("Estrutura primária pronta · Cópia protegida pendente")).toBeVisible();
+    expect(await screen.findByText("Estrutura primária pronta")).toBeVisible();
+    expect(screen.getByText("Preparação pendente")).toBeVisible();
     expect(screen.getByRole("button", { name: "Baixar perfil" })).toBeDisabled();
     expect(calls.some((call) => call.key.includes("/profile"))).toBe(false);
+  });
+
+  it.each([
+    ["prepared", false, OPERATOR],
+    ["proven", false, OPERATOR],
+    ["proven", true, VIEWER],
+    ["proven", true, OPERATOR],
+  ])("usa o estado de B e a permissão da API para download (%s, %s, %j)", async (state, available, operator) => {
+    const profile = { nome: "Cliente fictício", repositorio: "sftp://user@backup.lab//repository" };
+    calls = stubFetch({
+      ...baseRoutes(operator),
+      "GET /api/v1/clients/cli-1/preparations": () => json([{
+        ...PREP, state: "primary_ready", protection_state: state, profile_available: available,
+        last_protected_copy: {
+          snapshot_a: "a".repeat(64), snapshot_b: "b".repeat(64),
+          confirmed_at: "2026-10-26T12:00:00Z",
+        },
+      }]),
+      "GET /api/v1/installations/ag-1/profile": () => json(profile),
+    });
+    portal("/clients/cli-1");
+    expect(await screen.findByText("Última cópia confirmada")).toBeVisible();
+    expect(screen.getByText("aaaaaaaa")).toBeVisible();
+    expect(screen.getByText("bbbbbbbb")).toBeVisible();
+    const button = screen.getByRole("button", { name: "Baixar perfil" });
+    if (!available || operator.role === "viewer") {
+      expect(button).toBeDisabled();
+      expect(calls.some((call) => call.key.endsWith("/profile"))).toBe(false);
+      return;
+    }
+    const create = vi.fn(() => "blob:perfil");
+    const OriginalURL = URL;
+    vi.stubGlobal("URL", class extends OriginalURL {
+      static createObjectURL = create;
+      static revokeObjectURL = vi.fn();
+    });
+    let filename: string | undefined;
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
+      filename = this.download;
+    });
+    await userEvent.click(button);
+    await waitFor(() => expect(click).toHaveBeenCalledOnce());
+    expect(create).toHaveBeenCalledOnce();
+    expect(filename).toBe("perfil-macip.json");
+    expect(calls.some((call) => call.key === "GET /api/v1/installations/ag-1/profile")).toBe(true);
   });
 
   it("mostra erro sanitizado e admin tenta novamente com CSRF", async () => {

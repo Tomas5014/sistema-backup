@@ -322,6 +322,11 @@ ALTER TABLE provisioning_operations
  ADD COLUMN IF NOT EXISTS claim_expires_at timestamptz;
 '''))
 
+MIGRATIONS.append((10, 'protected-copy-evidence', '''
+ALTER TABLE installation_preparations
+ ADD COLUMN IF NOT EXISTS protected_copy jsonb;
+'''))
+
 _ADVISORY_KEY = 727_203_001
 
 

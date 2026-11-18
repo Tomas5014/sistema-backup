@@ -59,8 +59,10 @@ operação fixa com identificadores validados.
 
 Estados públicos: `pending`, `running`, `primary_ready` e `failed`.
 `primary_ready` significa **Estrutura primária pronta · Cópia protegida
-pendente**. `GET /api/v1/installations/<id>/profile` continua respondendo 409
-até B estar comprovado. Esta entrega não possui rota para promover B.
+pendente** enquanto B não estiver comprovado. `GET /api/v1/installations/<id>/profile`
+responde 409 até a prova do vínculo atual em um laboratório explicitamente habilitado.
+A migração 10 guarda o vínculo, o último ponto copiado e a prova de
+restauração. Veja [Cópia protegida em B](../docs/copia-protegida-b.md).
 
 O executável `macip-backup-provisioner` usa `LabFileVault` e
 `LabPrimaryAdapter`: árvore privada e repositório Restic local descartáveis,

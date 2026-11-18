@@ -3705,3 +3705,39 @@ confirmou autenticação por chave e `restic cat config` remoto com ID estável.
 Não houve VM Windows: importação pela interface, backup e restore do 0.1.3
 continuam pendentes. B, cofre/host definitivos e dados reais estão fora desta
 entrega.
+
+## Cópia protegida em B — laboratório descartável
+
+Continuação de `738507f` na branch `feature/backup-prepare-installation`.
+A migração expansiva 10 acrescenta o vínculo e a evidência de B ao cadastro.
+`macip-backup-protector` oferece `prepare`, `copy` e `prove`, com lock
+por instalação, volume identificado e cofre local privado de laboratório.
+B usa chave SSH própria e senha Restic adicional para ler A e uma senha
+independente para o repositório protegido.
+
+A cópia registra os IDs completos em A e em B. O Restic conserva os pontos
+anteriores ao repetir a cópia. O perfil exige prova do vínculo atual e
+habilitação explícita de laboratório na central. A prova executa
+`check --read-data` e `restore --verify` em processo com sockets bloqueados
+por seccomp e compara SHA-256 de todos os arquivos do manifesto.
+
+Foram executados testes com PostgreSQL 16.14, Restic 0.18.1, OpenSSH e
+Chrome reais em recursos descartáveis. A suíte focal de preparação,
+proteção, transporte e migrações aprovou 30 testes e 12 subtestes.
+O portal aprovou 101 testes com HTTP simulado, typecheck e build.
+A prova integrada no Chrome usou a mesma API/PostgreSQL do ensaio Restic,
+validou o botão bloqueado antes da prova e baixou o perfil após a prova.
+Desktop e celular foram inspecionados pelas capturas do laboratório.
+
+As recusas cobriram montagem ausente, espaço insuficiente, credencial de
+outro cliente, chave do Windows usada por B, escrita pela chave de leitura,
+manifesto divergente e prova antiga após troca do vínculo. A chave do
+Windows acessou A e teve escrita/exclusão na área B recusadas pelo SFTP
+isolado. Dois clientes tiveram senhas e IDs independentes. A foi desligado,
+a origem fictícia foi removida, a falha de nova cópia preservou o último
+ponto confirmado e a recuperação por B passou. A substituição do volume
+de B conservou os pontos antigos e voltou a exigir prova.
+
+O roteiro reproduzível está em `docs/copia-protegida-b.md`. O aplicativo
+Windows permanece em `7d62a80` no worktree separado. Importação pela
+interface, backup e restauração na VM Windows continuam pendentes.

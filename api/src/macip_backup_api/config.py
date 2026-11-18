@@ -78,3 +78,7 @@ def provisioner_token() -> str:
 
 def lab_profile_export_enabled() -> bool:
     return os.environ.get("MACIP_API_LAB_PROFILE_EXPORT") == "1"
+
+
+def lab_protection_enabled() -> bool:
+    return os.environ.get("MACIP_API_LAB_PROTECTION") == "1"

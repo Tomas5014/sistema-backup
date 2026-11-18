@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
   ApiError,
+  downloadInstallationProfile,
   createAgent,
   listPreparations,
   prepareClientInstallation,
@@ -248,7 +249,7 @@ export function ClientAgentsPage() {
 
   useEffect(() => {
     const active = preparations?.some(
-      (item) => item.state === "pending" || item.state === "running",
+      (item) => item.state !== "failed",
     );
     if (!active) return;
     const timer = window.setInterval(() => void load(), 3000);
@@ -334,6 +335,12 @@ const preparationErrors: Record<string, string> = {
   repository_error: "O repositório primário não pôde ser verificado.",
 };
 
+const protectionLabels: Record<PreparationRow["protection_state"], string> = {
+  pending: "Preparação pendente",
+  prepared: "Estrutura pronta · Prova de restauração pendente",
+  proven: "Restauração comprovada em laboratório",
+};
+
 function PreparationStatus({
   item,
   admin,
@@ -344,7 +351,13 @@ function PreparationStatus({
   onChanged: () => void;
 }) {
   const [retrying, setRetrying] = useState(false);
+  const [downloading, setDownloading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => { alive.current = false; };
+  }, []);
 
   async function retry() {
     if (retrying) return;
@@ -357,6 +370,26 @@ function PreparationStatus({
       setError(err instanceof ApiError ? err.message : "Falha inesperada.");
     } finally {
       setRetrying(false);
+    }
+  }
+
+  async function download() {
+    if (!admin || !item.profile_available || downloading) return;
+    setDownloading(true);
+    setError(null);
+    try {
+      const profile = await downloadInstallationProfile(item.installation.id);
+      if (!alive.current) return;
+      const url = URL.createObjectURL(profile);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "perfil-macip.json";
+      link.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 0);
+    } catch (err) {
+      if (alive.current) setError(err instanceof ApiError ? err.message : "Falha no download.");
+    } finally {
+      if (alive.current) setDownloading(false);
     }
   }
 
@@ -376,16 +409,27 @@ function PreparationStatus({
           {preparationLabels[item.state]}
         </span>
       </div>
-      <p className="preparation-message">
-        {item.state === "primary_ready"
-          ? "Estrutura primária pronta · Cópia protegida pendente"
-          : item.state === "running"
+      {item.state !== "primary_ready" ? (
+        <p className="preparation-message">
+          {item.state === "running"
             ? "O executor está reconciliando conta, chave e repositório."
             : item.state === "pending"
               ? "A solicitação aguarda o executor do servidor primário."
               : preparationErrors[item.error_code ?? ""] ?? "A preparação falhou sem expor detalhes internos."}
-      </p>
+        </p>
+      ) : null}
       <dl className="preparation-meta">
+        <div><dt>Servidor B</dt><dd>{protectionLabels[item.protection_state]}</dd></div>
+        <div>
+          <dt>Última cópia confirmada</dt>
+          <dd>{item.last_protected_copy ? formatDate(item.last_protected_copy.confirmed_at) : "Nenhuma confirmada"}</dd>
+          {item.last_protected_copy ? (
+            <dd>
+              A <span title={item.last_protected_copy.snapshot_a}>{item.last_protected_copy.snapshot_a.slice(0, 8)}</span>
+              {" → "}B <span title={item.last_protected_copy.snapshot_b}>{item.last_protected_copy.snapshot_b.slice(0, 8)}</span>
+            </dd>
+          ) : null}
+        </div>
         <div><dt>Horário sugerido</dt><dd>{item.installation.suggested_time}</dd></div>
         <div><dt>Tentativa</dt><dd>{item.operation.attempt}</dd></div>
       </dl>
@@ -398,10 +442,11 @@ function PreparationStatus({
         <button
           type="button"
           className="btn"
-          disabled
-          title="Disponível somente após preparar e comprovar a cópia protegida em B"
+          disabled={!admin || !item.profile_available || downloading}
+          onClick={() => void download()}
+          title={item.profile_available ? undefined : "Disponível após comprovar a restauração em B"}
         >
-          Baixar perfil
+          {downloading ? "Baixando…" : "Baixar perfil"}
         </button>
       </div>
       {error ? <p className="error-state" role="alert">{error}</p> : null}

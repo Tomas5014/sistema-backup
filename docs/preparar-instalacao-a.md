@@ -1,7 +1,7 @@
 # Preparar instalação — entrega do servidor primário A
 
-Escopo: cadastro, fila, executor fixo, reconciliação idempotente e painel.
-Não inclui B, ativação por código, alertas ou infraestrutura de produção.
+O primário A usa cadastro, fila, executor fixo e reconciliação idempotente.
+O ensaio de cópia e restauração está em [Cópia protegida em B](copia-protegida-b.md).
 
 ## Garantias
 
@@ -114,14 +114,3 @@ uma já construída com `tests/sftp/Dockerfile`. O teste usa porta livre em
 consumidor Windows, disponibilize `pwsh` no PATH ou indique seu caminho em
 `MACIP_TEST_POWERSHELL`. O teste executa o `Read-Perfil` original sobre o JSON
 devolvido pela API. A prova PowerShell no Linux cobre o leitor de perfil.
-
-## Próxima entrega B
-
-Manter estados distintos:
-
-- `prepared`: repositório B e rotina existem;
-- `proven`: ponto fictício copiado, A/Windows indisponíveis durante restore e
-  conteúdo comparado.
-
-Somente `proven` poderá liberar o perfil ao operador. A prova usará dados
-fictícios e não dependerá de entregar previamente o perfil ao cliente.

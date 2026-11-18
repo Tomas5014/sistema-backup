@@ -162,8 +162,8 @@ input, select {
 .preparation-heading div { display: grid; gap: .15rem; }
 .preparation-heading div span { color: var(--muted); font-size: .88rem; }
 .preparation-message { max-width: 70ch; margin: .75rem 0; }
-.preparation-meta { display: flex; gap: 2rem; flex-wrap: wrap; margin: 0 0 .8rem; }
-.preparation-meta div { display: grid; gap: .1rem; }
+.preparation-meta { display: flex; gap: .75rem 2rem; flex-wrap: wrap; margin: .75rem 0 .8rem; }
+.preparation-meta div { display: grid; gap: .1rem; align-content: start; }
 .preparation-meta dt { color: var(--muted); font-size: .82rem; }
 .preparation-meta dd { margin: 0; font-variant-numeric: tabular-nums; }
 .success-state { background: #e8f6ec; border: 1px solid #b7e3c3; border-radius: 6px; padding: .6rem .8rem; }

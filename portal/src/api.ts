@@ -45,6 +45,11 @@ export interface PreparationRow {
   state: PreparationState;
   step: string;
   protection_state: "pending" | "prepared" | "proven";
+  last_protected_copy: {
+    snapshot_a: string;
+    snapshot_b: string;
+    confirmed_at: string;
+  } | null;
   repository_id: string | null;
   error_code: string | null;
   profile_available: boolean;
@@ -334,6 +339,13 @@ export async function retryPreparation(
     { method: "POST", body: { id: requestId }, csrf: true },
   );
   return (await response.json()) as PreparationRow;
+}
+
+export async function downloadInstallationProfile(installationId: string): Promise<Blob> {
+  const response = await apiFetch(
+    `/api/v1/installations/${encodeURIComponent(installationId)}/profile`,
+  );
+  return await response.blob();
 }
 
 export async function createAgent(
