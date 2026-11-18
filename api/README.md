@@ -51,7 +51,9 @@ apagam histórico**.
 ## Preparar instalação Windows — servidor primário A
 
 A migração 8 adiciona identidade da instalação, preparação durável e fila do
-executor. O navegador nunca envia comandos, caminhos administrativos, senha
+executor. A migração 9 acrescenta prazo de cinco minutos por reserva. O
+executor pode reassumir uma operação vencida com outro `claim_id`.
+O navegador nunca envia comandos, caminhos administrativos, senha
 Restic ou chave SSH. O executor usa Bearer próprio e recebe somente uma
 operação fixa com identificadores validados.
 

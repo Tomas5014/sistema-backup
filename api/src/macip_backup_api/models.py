@@ -73,6 +73,7 @@ class ProvisioningOperation(Base):
     requester_kind: Mapped[str] = mapped_column(String(20), nullable=False)
     requester_ref: Mapped[str] = mapped_column(String(200), nullable=False)
     claim_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    claim_expires_at = mapped_column(DateTime(timezone=True), nullable=True)
     claimed_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
     payload_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(50), nullable=True)

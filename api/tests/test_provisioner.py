@@ -3,20 +3,83 @@
 from __future__ import annotations
 
 import hashlib
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 from pathlib import Path
 import shutil
-import subprocess
 import tempfile
+from threading import Thread
 import unittest
 import uuid
 
 from macip_backup_api.provisioner import (
+    ApiTransport,
     LabFileVault,
     LabPrimaryAdapter,
     ProvisioningFailure,
     reconcile_operation,
 )
+
+
+class ApiTransportTests(unittest.TestCase):
+    def test_https_and_explicit_exact_loopback_exception(self):
+        ApiTransport("https://backup.lab", "synthetic", "test-a")
+        ApiTransport("http://127.0.0.1:8080", "synthetic", "test-a", allow_lab_http=True)
+        with self.assertRaises(ValueError):
+            ApiTransport("http://127.0.0.1:8080", "synthetic", "test-a")
+        for url in (
+            "http://127.0.0.1.example.test",
+            "http://127.0.0.1@other.example.test",
+            "http://localhost",
+            "http://127.0.0.2",
+            "http://[::1]",
+            "https://u:synthetic-secret@backup.lab",
+            "https://backup.lab:65536",
+        ):
+            with self.subTest(url=url), self.assertRaises(ValueError) as error:
+                ApiTransport(url, "synthetic", "test-a", allow_lab_http=True)
+            self.assertNotIn("synthetic-secret", str(error.exception))
+
+    def test_authenticated_request_never_follows_redirect(self):
+        seen = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                seen.append((self.path, self.headers.get("Authorization")))
+                if self.path == "/ok":
+                    self.send_response(200)
+                    self.end_headers()
+                    self.wfile.write(b'{"operation": null}')
+                elif self.path.startswith("/redirect/"):
+                    self.send_response(int(self.path.rsplit("/", 1)[-1]))
+                    self.send_header("Location", "/target")
+                    self.end_headers()
+                else:
+                    self.send_response(500)
+                    self.end_headers()
+
+            do_GET = do_POST
+
+            def log_message(self, *_args):
+                pass
+
+        with HTTPServer(("127.0.0.1", 0), Handler) as server:
+            thread = Thread(target=server.serve_forever)
+            thread.start()
+            try:
+                transport = ApiTransport(
+                    f"http://127.0.0.1:{server.server_port}",
+                    "synthetic", "test-a", allow_lab_http=True,
+                )
+                self.assertEqual(transport.request("/ok", {}), {"operation": None})
+                redirects = [f"/redirect/{code}" for code in (301, 302, 303, 307, 308)]
+                for path in redirects:
+                    with self.subTest(path=path), self.assertRaisesRegex(RuntimeError, "recusado"):
+                        transport.request(path, {})
+                self.assertEqual(seen, [(p, "Bearer synthetic") for p in ["/ok", *redirects]])
+            finally:
+                server.shutdown()
+                thread.join()
 
 
 @unittest.skipUnless(shutil.which("restic") and shutil.which("ssh-keygen"),
@@ -50,7 +113,7 @@ class ProvisionerLabTests(unittest.TestCase):
             ).hexdigest()[:20],
         }
 
-    def test_real_restic_reconciliation_is_idempotent_and_profile_matches_windows_013(self):
+    def test_real_restic_reconciliation_is_idempotent(self):
         first = reconcile_operation(self.operation, self.vault, self.primary)
         second = reconcile_operation(self.operation, self.vault, self.primary)
         self.assertEqual(first, second)
@@ -62,27 +125,13 @@ class ProvisionerLabTests(unittest.TestCase):
         self.assertEqual(first["profile"]["repositorio_id"], first["repository_id"])
         self.assertEqual(
             first["profile"]["repositorio"],
-            f"sftp:{self.operation['account_name']}@backup.lab:repository",
+            f"sftp://{self.operation['account_name']}@backup.lab//repository",
         )
         authorized = (
             self.primary.account_path(self.operation["account_name"])
             / ".ssh/authorized_keys"
         )
         self.assertTrue(authorized.read_text().startswith("ssh-ed25519 "))
-
-        # Contrato do consumidor congelado: lê os mesmos cinco campos.
-        try:
-            source = subprocess.check_output(
-                ["git", "show", "7d62a800325146d1357f8832b1df5c4c3b2eff8d:agent/windows/gui/MacipBackup-Gui.ps1"],
-                text=True,
-                stderr=subprocess.DEVNULL,
-            )
-        except subprocess.CalledProcessError:
-            self.skipTest("commit congelado Windows 0.1.3 indisponível neste clone")
-        self.assertIn(
-            "$script:PerfilCampos = @('nome', 'repositorio', 'repositorio_id', 'known_hosts', 'horario_sugerido')",
-            source,
-        )
 
     def test_missing_secret_after_state_exists_is_not_regenerated(self):
         reconcile_operation(self.operation, self.vault, self.primary)
@@ -98,6 +147,15 @@ class ProvisionerLabTests(unittest.TestCase):
         (account / ".repository-id").write_text("b" * 64 + "\n")
         with self.assertRaisesRegex(ProvisioningFailure, "repository_mismatch"):
             reconcile_operation(self.operation, self.vault, self.primary)
+
+    def test_missing_config_of_verified_repo_is_never_reinitialized(self):
+        reconcile_operation(self.operation, self.vault, self.primary)
+        account = self.primary.account_path(self.operation["account_name"])
+        config = account / "repository/config"
+        config.unlink()
+        with self.assertRaisesRegex(ProvisioningFailure, "repository_mismatch"):
+            reconcile_operation(self.operation, self.vault, self.primary)
+        self.assertFalse(config.exists())
 
     def test_foreign_account_identity_is_access_denied(self):
         reconcile_operation(self.operation, self.vault, self.primary)

@@ -11,25 +11,27 @@ import hmac
 import json
 import re
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-from sqlalchemy import func, select, text
+from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.orm import Session
 
 from . import config
 from .auth import csrf_guard, require_admin, require_viewer
 from .db import session
 from .models import Agent, Client, InstallationPreparation, ProvisioningOperation
+from .provisioning_sftp import matches_endpoint
 
 _bearer = HTTPBearer(auto_error=False)
 _IDENTIFIER = r"^[a-z0-9][a-z0-9._-]{2,79}$"
 _TIME = r"^(?:[01][0-9]|2[0-3]):[0-5][0-9]$"
 _REPOSITORY_ID = r"^[a-f0-9]{64}$"
 _ACCOUNT = r"^macip[a-f0-9]{20}$"
+_CLAIM_DURATION = timedelta(minutes=5)
 _SAFE_ERRORS = {
     "access_denied",
     "secret_missing",
@@ -152,6 +154,18 @@ def _operation(row: ProvisioningOperation) -> dict:
     }
 
 
+def _profile_is_current(row: InstallationPreparation) -> bool:
+    if not isinstance(row.profile, dict) or not row.account_name:
+        return False
+    repository = row.profile.get("repositorio")
+    known_hosts = row.profile.get("known_hosts")
+    return (
+        isinstance(repository, str)
+        and isinstance(known_hosts, str)
+        and matches_endpoint(row.account_name, repository, known_hosts)
+    )
+
+
 def _preparation(db: Session, row: InstallationPreparation) -> dict:
     agent = db.get(Agent, row.agent_id)
     operation = db.get(ProvisioningOperation, row.current_operation_id)
@@ -169,7 +183,7 @@ def _preparation(db: Session, row: InstallationPreparation) -> dict:
         "protection_state": row.protection_state,
         "repository_id": row.repository_id,
         "error_code": row.error_code,
-        "profile_available": row.protection_state == "proven" and row.profile is not None,
+        "profile_available": row.protection_state == "proven" and _profile_is_current(row),
         "created_at": row.created_at.isoformat(),
         "updated_at": row.updated_at.isoformat(),
         "operation": _operation(operation),
@@ -224,15 +238,7 @@ def _validate_success(db: Session, operation: ProvisioningOperation, result: Suc
         raise HTTPException(422, "resultado de preparação incompatível")
     if profile.nome != client.name or profile.horario_sugerido != agent.suggested_time:
         raise HTTPException(422, "resultado de preparação incompatível")
-    repository = re.fullmatch(
-        rf"sftp:{re.escape(expected_account)}@([A-Za-z0-9.-]+):repository",
-        profile.repositorio,
-    )
-    known_host = re.fullmatch(
-        r"([^ ]+) (ssh-(?:ed25519|rsa)|ecdsa-[^ ]+) ([A-Za-z0-9+/=]+)",
-        profile.known_hosts,
-    )
-    if not repository or not known_host or repository.group(1) != known_host.group(1):
+    if not matches_endpoint(expected_account, profile.repositorio, profile.known_hosts):
         raise HTTPException(422, "resultado de preparação incompatível")
 
 
@@ -394,6 +400,8 @@ def register_provisioning(app, require_admin_identity):
         preparation = _get_preparation(db, agent_id)
         if preparation.protection_state != "proven" or preparation.profile is None:
             raise HTTPException(409, "perfil bloqueado: cópia protegida pendente")
+        if not _profile_is_current(preparation):
+            raise HTTPException(409, "perfil legado requer nova verificação")
         return preparation.profile
 
     @app.post(
@@ -403,7 +411,17 @@ def register_provisioning(app, require_admin_identity):
     def claim_operation(payload: ClaimIn, db: Session = Depends(session)):
         operation = db.execute(
             select(ProvisioningOperation)
-            .where(ProvisioningOperation.state == "pending")
+            .where(or_(
+                ProvisioningOperation.state == "pending",
+                and_(
+                    ProvisioningOperation.state == "running",
+                    or_(
+                        # Reservas criadas antes da migração 9 não têm duração.
+                        ProvisioningOperation.claim_expires_at.is_(None),
+                        ProvisioningOperation.claim_expires_at <= func.clock_timestamp(),
+                    ),
+                ),
+            ))
             .order_by(ProvisioningOperation.created_at, ProvisioningOperation.id)
             .with_for_update(skip_locked=True)
             .limit(1)
@@ -412,14 +430,18 @@ def register_provisioning(app, require_admin_identity):
             return {"operation": None}
         preparation = _get_preparation(db, operation.agent_id, lock=True)
         claim_id = uuid.uuid4()
+        now = db.scalar(select(func.clock_timestamp()))
+        expires = now + _CLAIM_DURATION
         operation.state = "running"
         operation.step = "reconciling"
         operation.claim_id = claim_id
+        operation.claim_expires_at = expires
         operation.claimed_by = payload.executor_id
-        operation.started_at = datetime.now(UTC)
+        if operation.started_at is None:
+            operation.started_at = now
         preparation.state = "running"
         preparation.step = "reconciling"
-        preparation.updated_at = datetime.now(UTC)
+        preparation.updated_at = now
         agent = db.get(Agent, operation.agent_id)
         client = db.get(Client, operation.client_id)
         db.commit()
@@ -427,6 +449,7 @@ def register_provisioning(app, require_admin_identity):
             "operation": {
                 "id": str(operation.id),
                 "claim_id": str(claim_id),
+                "claim_expires_at": expires.isoformat(),
                 "attempt": operation.attempt,
                 "client_id": str(client.id),
                 "client_name": client.name,
@@ -466,10 +489,12 @@ def register_provisioning(app, require_admin_identity):
             return _preparation(db, preparation)
         if operation.state != "running" or operation.claim_id != payload.claim_id:
             raise HTTPException(409, "claim ausente ou divergente")
+        now = db.scalar(select(func.clock_timestamp()))
+        if operation.claim_expires_at is None or operation.claim_expires_at <= now:
+            raise HTTPException(409, "claim expirado")
         if preparation.current_operation_id != operation.id:
             raise HTTPException(409, "operação não é mais vigente")
 
-        now = datetime.now(UTC)
         operation.state = payload.state
         operation.payload_hash = digest
         operation.finished_at = now
@@ -507,4 +532,6 @@ def register_provisioning(app, require_admin_identity):
         preparation = _get_preparation(db, agent_id)
         if preparation.state != "primary_ready" or preparation.profile is None:
             raise HTTPException(409, "estrutura primária ainda não verificada")
+        if not _profile_is_current(preparation):
+            raise HTTPException(409, "perfil legado requer nova verificação")
         return preparation.profile

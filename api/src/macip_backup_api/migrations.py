@@ -317,6 +317,11 @@ CREATE INDEX IF NOT EXISTS ix_installation_preparations_client
  ON installation_preparations(client_id);
 '''))
 
+MIGRATIONS.append((9, 'primary-provisioning-claim-expiry', '''
+ALTER TABLE provisioning_operations
+ ADD COLUMN IF NOT EXISTS claim_expires_at timestamptz;
+'''))
+
 _ADVISORY_KEY = 727_203_001
 
 

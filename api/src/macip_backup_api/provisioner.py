@@ -8,6 +8,7 @@ dados reais. A API recebe somente resultado tipado e sanitizado.
 from __future__ import annotations
 
 import base64
+import fcntl
 import hashlib
 import json
 import os
@@ -19,7 +20,10 @@ import subprocess
 import tempfile
 from typing import Protocol
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.parse import urlsplit
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
+
+from .provisioning_sftp import HOST, REPOSITORY, matches_known_hosts, repository_url
 
 
 class ProvisioningFailure(RuntimeError):
@@ -93,6 +97,7 @@ class LabPrimaryAdapter:
         *,
         host: str,
         known_hosts: str,
+        port: int = 22,
         restic_bin: str = "restic",
     ):
         root = Path(root)
@@ -102,16 +107,13 @@ class LabPrimaryAdapter:
         info = root.stat()
         if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
             raise ValueError("raiz A deve pertencer ao executor e ter modo 0700")
-        if not re.fullmatch(r"[A-Za-z0-9.-]+", host):
-            raise ValueError("host SFTP incompatível")
-        match = re.fullmatch(
-            r"([^ ]+) (ssh-(?:ed25519|rsa)|ecdsa-[^ ]+) ([A-Za-z0-9+/=]+)",
-            known_hosts,
-        )
-        if not match or match.group(1) != host:
-            raise ValueError("known_hosts não corresponde ao host")
+        if not re.fullmatch(HOST, host) or not 1 <= port <= 65535:
+            raise ValueError("host ou porta SFTP incompatível")
+        if not matches_known_hosts(known_hosts, host, port):
+            raise ValueError("known_hosts não corresponde ao host e porta")
         self.root = root
         self.host = host
+        self.port = port
         self.known_hosts = known_hosts
         self.restic_bin = restic_bin
 
@@ -195,30 +197,28 @@ class LabPrimaryAdapter:
             authorized.write_text(wanted)
             authorized.chmod(0o600)
 
-        repository = account / "repository"
+        repository = account / REPOSITORY
         self._private_directory(repository)
         environment = dict(os.environ, RESTIC_PASSWORD=password)
         cache = account / ".cache"
         self._private_directory(cache)
         base = [self.restic_bin, "--repo", str(repository), "--cache-dir", str(cache)]
-        if (repository / "config").exists():
-            command = [*base, "cat", "config"]
-        else:
-            command = [*base, "init"]
-        try:
-            completed = subprocess.run(
-                command,
-                env=environment,
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            raise ProvisioningFailure("repository_error") from None
-        if completed.returncode != 0:
-            lowered = completed.stderr.lower()
-            code = "access_denied" if "permission denied" in lowered else "repository_error"
-            raise ProvisioningFailure(code)
+        identity_file = account / ".repository-id"
+        config_file = repository / "config"
+        if config_file.is_symlink():
+            raise ProvisioningFailure("access_denied")
+        if not config_file.exists():
+            # Um repositório conhecido ou não vazio exige inspeção do operador.
+            if identity_file.exists() or identity_file.is_symlink() or any(repository.iterdir()):
+                raise ProvisioningFailure("repository_mismatch")
+            try:
+                initialized = subprocess.run(
+                    [*base, "init"], env=environment, capture_output=True, text=True, timeout=60
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                raise ProvisioningFailure("repository_error") from None
+            if initialized.returncode != 0:
+                raise _repository_failure(initialized.stderr)
         try:
             checked = subprocess.run(
                 [*base, "cat", "config"],
@@ -230,15 +230,14 @@ class LabPrimaryAdapter:
         except (OSError, subprocess.TimeoutExpired):
             raise ProvisioningFailure("repository_error") from None
         if checked.returncode != 0:
-            raise ProvisioningFailure("repository_error")
+            raise _repository_failure(checked.stderr)
         try:
             repository_id = json.loads(checked.stdout)["id"]
         except (KeyError, TypeError, json.JSONDecodeError):
             raise ProvisioningFailure("repository_error") from None
         if not re.fullmatch(r"[a-f0-9]{64}", repository_id):
             raise ProvisioningFailure("repository_error")
-        identity_file = account / ".repository-id"
-        if identity_file.exists():
+        if identity_file.exists() or identity_file.is_symlink():
             self._validate_private_file(identity_file)
             if identity_file.read_text().strip() != repository_id:
                 raise ProvisioningFailure("repository_mismatch")
@@ -260,6 +259,12 @@ class LabPrimaryAdapter:
         if len(parts) < 2 or not parts[1].startswith("SHA256:"):
             raise ProvisioningFailure("key_mismatch")
         return repository_id, parts[1]
+
+
+def _repository_failure(stderr: str) -> ProvisioningFailure:
+    return ProvisioningFailure(
+        "access_denied" if "permission denied" in stderr.lower() else "repository_error"
+    )
 
 
 def _create_bundle(installation_id: str) -> dict:
@@ -324,7 +329,7 @@ def reconcile_operation(operation: dict, vault: Vault, primary: LabPrimaryAdapte
         "public_key_fingerprint": fingerprint,
         "profile": {
             "nome": operation["client_name"],
-            "repositorio": f"sftp:{account_name}@{primary.host}:repository",
+            "repositorio": repository_url(account_name, primary.host, primary.port),
             "repositorio_id": repository_id,
             "known_hosts": primary.known_hosts,
             "horario_sugerido": operation["suggested_time"],
@@ -332,13 +337,33 @@ def reconcile_operation(operation: dict, vault: Vault, primary: LabPrimaryAdapte
     }
 
 
+class _NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 class ApiTransport:
-    def __init__(self, url: str, token: str, executor_id: str):
-        if not url.startswith("https://") and not url.startswith("http://127.0.0.1"):
-            raise ValueError("API exige HTTPS; HTTP permitido somente em 127.0.0.1")
+    def __init__(self, url: str, token: str, executor_id: str, *, allow_lab_http=False):
+        try:
+            parsed = urlsplit(url)
+            port = parsed.port
+        except ValueError:
+            raise ValueError("URL da API inválida") from None
+        if (
+            not parsed.hostname or "@" in parsed.netloc or port == 0
+            or re.search(r"[\x00-\x20\x7f\\?#]", url)
+        ):
+            raise ValueError("URL da API inválida ou contém credenciais")
+        lab_http = (
+            allow_lab_http and parsed.scheme == "http" and parsed.hostname == "127.0.0.1"
+        )
+        if parsed.scheme != "https" and not lab_http:
+            raise ValueError("API exige HTTPS; exceção de laboratório só em 127.0.0.1")
         self.url = url.rstrip("/")
         self.token = token
         self.executor_id = executor_id
+        handlers = [ProxyHandler({})] if lab_http else []
+        self._opener = build_opener(*handlers, _NoRedirect())
 
     def request(self, path: str, body: dict) -> dict:
         request = Request(
@@ -351,10 +376,10 @@ class ApiTransport:
             },
         )
         try:
-            with urlopen(request, timeout=30) as response:
+            with self._opener.open(request, timeout=30) as response:
                 return json.loads(response.read())
-        except (HTTPError, URLError, TimeoutError) as error:
-            raise RuntimeError("API de preparação indisponível") from error
+        except (HTTPError, URLError, TimeoutError):
+            raise RuntimeError("API de preparação indisponível ou redirecionamento recusado") from None
 
     def claim(self) -> dict | None:
         return self.request(
@@ -369,6 +394,20 @@ class ApiTransport:
 
 
 def run_once(transport: ApiTransport, vault: Vault, primary: LabPrimaryAdapter) -> dict:
+    # Uma raiz A é operada por um único executor por vez. Uma reserva vencida
+    # na API não autoriza dois processos a escrever na mesma árvore.
+    fd = os.open(primary.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return {"status": "busy"}
+        return _run_claim(transport, vault, primary)
+    finally:
+        os.close(fd)
+
+
+def _run_claim(transport: ApiTransport, vault: Vault, primary: LabPrimaryAdapter) -> dict:
     operation = transport.claim()
     if operation is None:
         return {"status": "idle"}
@@ -412,11 +451,13 @@ def main() -> int:
         required["MACIP_PROVISIONER_API_URL"],
         required["MACIP_PROVISIONER_TOKEN"],
         required["MACIP_PROVISIONER_ID"],
+        allow_lab_http=os.environ.get("MACIP_PROVISIONER_LAB_ALLOW_HTTP") == "1",
     )
     vault = LabFileVault(Path(required["MACIP_PROVISIONER_LAB_VAULT"]))
     primary = LabPrimaryAdapter(
         Path(required["MACIP_PROVISIONER_LAB_ROOT"]),
         host=required["MACIP_PROVISIONER_SFTP_HOST"],
+        port=int(os.environ.get("MACIP_PROVISIONER_SFTP_PORT", "22")),
         known_hosts=required["MACIP_PROVISIONER_KNOWN_HOSTS"],
     )
     print(json.dumps(run_once(transport, vault, primary), ensure_ascii=False))

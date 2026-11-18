@@ -7,11 +7,18 @@ Não inclui B, ativação por código, alertas ou infraestrutura de produção.
 
 - Identificador único dentro do cliente; vários clientes podem usar o mesmo.
 - Uma operação `pending`/`running` por instalação.
+- A migração 9 acrescenta reservas de cinco minutos. Após o prazo, o próximo
+  executor pode assumir a mesma operação com outro `claim_id`. Um resultado
+  da reserva vencida recebe HTTP 409. A repetição idêntica de um resultado já
+  confirmado continua idempotente.
 - Retry reutiliza bundle do cofre, conta, chave e repositório.
 - Segredo ausente depois do início, identidade alheia ou repository ID
   divergente interrompem o fluxo.
 - Perfil interno segue o consumidor Windows 0.1.3 (`7d62a80`), sem senha ou
-  chave privada.
+  chave privada. A forma exportada é
+  `sftp://conta@host[:porta]//repository`. O caminho visto pelo SFTP é
+  `/repository` dentro do chroot da conta. Em porta diferente de 22, a linha
+  `known_hosts` usa `[host]:porta`.
 - API e botão de download permanecem bloqueados enquanto B estiver pendente.
 
 ## Laboratório descartável
@@ -29,6 +36,7 @@ MACIP_PROVISIONER_ID=primary-a-lab
 MACIP_PROVISIONER_LAB_ROOT=/área descartável/primary-a
 MACIP_PROVISIONER_LAB_VAULT=/área descartável/vault
 MACIP_PROVISIONER_SFTP_HOST=backup.lab
+MACIP_PROVISIONER_SFTP_PORT=22
 MACIP_PROVISIONER_KNOWN_HOSTS=backup.lab ssh-ed25519 <chave pública fictícia>
 ```
 
@@ -38,8 +46,21 @@ Cada chamada processa no máximo uma operação:
 macip-backup-provisioner
 ```
 
-O processo não imprime segredo. `SSL_CERT_FILE` pode apontar a CA pública do
-laboratório. HTTP só é aceito em `127.0.0.1`; demais endereços exigem HTTPS.
+O processo não imprime segredo. Em HTTPS, `SSL_CERT_FILE` pode apontar para
+a CA pública do laboratório. Para testar com a API local deste roteiro, use
+`MACIP_PROVISIONER_API_URL=http://127.0.0.1:8080` e
+`MACIP_PROVISIONER_LAB_ALLOW_HTTP=1` no ambiente do executor. A exceção vale
+para o host literal `127.0.0.1` e desativa proxies HTTP. O transporte recusa
+credenciais na URL e redirecionamentos.
+
+Use a mesma raiz A e o mesmo cofre em todas as retomadas. O executor usa um
+lock exclusivo na raiz de A para impedir duas reconciliações no mesmo
+laboratório. Ao atualizar do esquema 8, encerre os executores antigos antes
+de migrar. Reservas antigas sem prazo ficam disponíveis para nova reserva.
+Um perfil legado relativo permanece registrado para auditoria e a exportação
+o recusa. Para outro ensaio, prepare uma instalação descartável nova.
+O código anterior recusa o esquema 9. Para retorno integral, preserve um
+backup pré-migração e considere as escritas posteriores antes de restaurá-lo.
 
 ## Abrir o painel local
 
@@ -82,8 +103,17 @@ Com PostgreSQL descartável:
 cd api
 PYTHONPATH=src \
 MACIP_API_TEST_DATABASE_URL='postgresql+psycopg://postgres@127.0.0.1:55439/macip_provisioning_test' \
-../.venv-api/bin/python -m pytest tests/test_provisioning.py tests/test_migrations.py -q
+../.venv-api/bin/python -m pytest -o tmp_path_retention_policy=none \
+  tests/test_provisioning.py tests/test_provisioner.py tests/test_migrations.py -q
 ```
+
+Para incluir as duas provas do perfil, defina
+`MACIP_TEST_PROVISIONING_SFTP_IMAGE` com uma imagem OpenSSH local, por exemplo
+uma já construída com `tests/sftp/Dockerfile`. O teste usa porta livre em
+`127.0.0.1`, gera chaves temporárias e remove o contêiner ao final. Para o
+consumidor Windows, disponibilize `pwsh` no PATH ou indique seu caminho em
+`MACIP_TEST_POWERSHELL`. O teste executa o `Read-Perfil` original sobre o JSON
+devolvido pela API. A prova PowerShell no Linux cobre o leitor de perfil.
 
 ## Próxima entrega B
 
