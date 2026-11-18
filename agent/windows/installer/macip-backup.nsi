@@ -65,6 +65,7 @@ Section "Instalar"
   ssh_ok:
 
   File "..\Backup-MacipCliente.ps1"
+  File "..\Central-Alerts.ps1"
   File "..\gui\MacipBackup-Gui.ps1"
   File "..\gui\Activation-Code.ps1"
   File "..\gui\perfil.example.json"
@@ -139,6 +140,7 @@ remover_arquivos:
   RMDir "$SMPROGRAMS\MAC IP Backup"
   ; somente os arquivos instalados pelo pacote, por nome -- nada de curinga
   Delete "$INSTDIR\Backup-MacipCliente.ps1"
+  Delete "$INSTDIR\Central-Alerts.ps1"
   Delete "$INSTDIR\MacipBackup-Gui.ps1"
   Delete "$INSTDIR\Activation-Code.ps1"
   Delete "$INSTDIR\Desinstalar-Tarefa.ps1"

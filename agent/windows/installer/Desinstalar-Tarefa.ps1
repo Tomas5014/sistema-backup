@@ -68,7 +68,7 @@ function Get-PadraoAcaoApp {
     # -File capturado: ele e o PRIMEIRO parametro efetivo; nada antes nem
     # depois. -File citado dentro de -Command ou tokens extras nao casam.
     # A igualdade do caminho e conferida depois, normalizada.
-    return '^-NoProfile -NonInteractive -File "([^"]+)" -Modo Backup -Config "[^"]+" -DiretorioEstado "[^"]+"$'
+    return '^-NoProfile -NonInteractive -File "([^"]+)" -Modo Backup -Config "[^"]+" -DiretorioEstado "[^"]+"(?: -Disparo "\$\(Arg0\)")?$'
 }
 
 function Test-Propriedade {

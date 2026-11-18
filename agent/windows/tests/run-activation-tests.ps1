@@ -33,6 +33,7 @@ try {
     function Invoke-ActivationHttp {
         param($Url,$Body)
         $script:requests += $Body
+        if ($Url -like '*/monitoring') { return [pscustomobject]@{ contract_version=1; installation_id=[Guid]::NewGuid().ToString(); token='synthetic-monitoring-token' } }
         if ($Url -like '*/redeem') {
             if ($script:loseResponse) { $script:loseResponse = $false; throw 'resposta perdida' }
             return [pscustomobject]@{ contract_version=1; activation_id=$Body.activation_id; delivery_url='https://a.lab/v1/activate' }

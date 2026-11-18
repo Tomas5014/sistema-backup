@@ -411,3 +411,7 @@ instalado na prova foi `macip-agente-windows-5a2f3f8.zip`, SHA-256
 `4d9489626e6920b510b533c4f3e83215ef42e18e07439a6c1974f0f694945be0`.
 Evidência registrada em `docs/piloto-windows-sftp.md` — é prova de
 laboratório, não aceite de cliente nem de produção.
+
+Candidata por código com telemetria: [Monitoramento central de laboratório](CENTRAL-ALERTS.md).
+Inclui fila persistente, envio independente da GUI e reenvio sem novo backup.
+A referência 0.1.3 e a importação por perfil permanecem alternativas separadas.

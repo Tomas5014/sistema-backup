@@ -259,7 +259,7 @@ function Get-PadraoAcaoApp {
     # e com o -File capturado: ele e o PRIMEIRO parametro efetivo; nada
     # antes nem depois. -File citado dentro de -Command ou tokens extras
     # nao casam. A igualdade do caminho e conferida depois, normalizada.
-    return '^-NoProfile -NonInteractive -File "([^"]+)" -Modo Backup -Config "[^"]+" -DiretorioEstado "[^"]+"$'
+    return '^-NoProfile -NonInteractive -File "([^"]+)" -Modo Backup -Config "[^"]+" -DiretorioEstado "[^"]+"(?: -Disparo "\$\(Arg0\)")?$'
 }
 
 function Test-TarefaDoApp {
@@ -287,7 +287,7 @@ function Test-TarefaDoApp {
 
 function Get-TaskActionArgs {
     param([string]$Agente, [string]$Config, [string]$Estado)
-    return '-NoProfile -NonInteractive -File "{0}" -Modo Backup -Config "{1}" -DiretorioEstado "{2}"' -f $Agente, $Config, $Estado
+    return '-NoProfile -NonInteractive -File "{0}" -Modo Backup -Config "{1}" -DiretorioEstado "{2}" -Disparo "$(Arg0)"' -f $Agente, $Config, $Estado
 }
 
 function Write-TaskDef {
@@ -391,6 +391,12 @@ function Set-TarefaHabilitada {
     $t = $info.Tarefa
     if (-not (Test-TarefaDoApp -Tarefa $t)) { throw "Tarefa $($script:TaskName) nao pertence ao MAC IP Backup - recusado." }
     $t.Enabled = $On
+    try {
+        $config = Get-ConfigAtual
+        $cfg = Read-AgenteConfig $config
+        Set-MonitorSchedule $config $cfg.horario (-not $On)
+        [void](Sync-MonitorQueue $config)
+    } catch { Write-Warning 'Pausa local aplicada. Comunicacao da agenda pendente; confira a central.' }
 }
 
 function Resolve-ContaSid {
@@ -435,7 +441,7 @@ function Start-TarefaAgora {
     if ($sidTarefa -cne $sidPreparo) {
         throw "Conta da tarefa ($contaTarefa) difere da conta do preparo (SID divergente) - recusado."
     }
-    $t.Run($null) | Out-Null
+    $t.Run(@('manual')) | Out-Null
 }
 
 function Get-InfoTarefa {
@@ -1464,6 +1470,16 @@ function Build-Configuracao {
             $repo = $cfgAnt.repositorio; $rid = $cfgAnt.repositorio_id
             $Perfil = [pscustomobject]@{ repositorio = $repo; repositorio_id = $rid }
         }
+        $monitorSource = if ($perfilNovo -and $Perfil.caminho) { Split-Path -Parent $Perfil.caminho } elseif (-not $perfilNovo) { Split-Path -Parent $configAtual } else { $null }
+        if ($monitorSource -and (Test-Path -LiteralPath (Join-Path $monitorSource 'monitoring.json'))) {
+            $monitor = Get-Content -LiteralPath (Join-Path $monitorSource 'monitoring.json') -Raw | ConvertFrom-Json
+            $queue = Join-Path $script:BaseDir ('monitoring-' + [Guid]::Parse($monitor.installation_id).ToString())
+            if (-not (Test-Path -LiteralPath $queue)) { New-Item -ItemType Directory -Path $queue | Out-Null; Protect-PastaEstado $queue }
+            $monitor | Add-Member NoteProperty queue $queue -Force
+            Write-MonitorJson (Join-Path $cfgDir 'monitoring.json') $monitor
+            Copy-Item -LiteralPath (Join-Path $monitorSource 'monitoring.dpapi') -Destination (Join-Path $cfgDir 'monitoring.dpapi')
+            [void](Get-MonitorZone)
+        }
         $jsonPath = Join-Path $cfgDir 'backup.json'
         $tmp = "$jsonPath.tmp"
         (New-BackupJsonObj -Perfil $Perfil -Origem $Origem -Exclusoes $Exclusoes `
@@ -1571,6 +1587,12 @@ function Publish-Configuracao {
         $meta.config_atual = $Built.Config
         $meta.conta_tarefa = $Conta
         Save-GuiMeta -Meta $meta
+        try {
+            $taskInfo = Get-TarefaInfo
+            Set-MonitorSchedule $Built.Config $Built.Horario (-not [bool]$taskInfo.Tarefa.Enabled)
+            [void](Sync-MonitorQueue $Built.Config)
+        } catch { Write-Warning 'Agenda local salva. Monitoramento pendente; confira a central antes do aceite.' }
+
     } catch {
         # Antes de repor a definicao anterior, confirma que a tarefa ATUAL
         # e a do app e aponta para o conjunto publicado POR ESTA tentativa
@@ -1717,6 +1739,7 @@ function Get-DetalhesSuporte {
         $linhas += ('confirmado: ' + (Format-DataBR $Conf.fim_utc) + '   snapshot ' + [string]$Conf.snapshot)
     } else { $linhas += 'confirmado: nenhum ainda' }
     $linhas += ('estado: ' + $(if ($Estado) { $Estado } else { '-' }))
+    $linhas += $(if ($ConfigPath -and (Read-Monitor $ConfigPath)) { 'Monitoramento central: vinculado; confira fila e prazo na central' } else { 'Monitoramento não configurado' })
     $linhas += ('config: ' + $(if ($ConfigPath) { $ConfigPath } else { '-' }))
     $linhas += ('powershell: ' + $PSVersionTable.PSVersion.ToString())
     return ($linhas -join "`r`n")
@@ -2385,6 +2408,8 @@ function Show-Gui {
     Add-Linha $t3 $lblUlt -1 | Out-Null
     $lblProx = New-Rotulo 'Próximo backup: -'
     Add-Linha $t3 $lblProx -1 | Out-Null
+    $lblMonitor = New-Rotulo 'Monitoramento não configurado'
+    Add-Linha $t3 $lblMonitor -1 | Out-Null
     $lblAcao = New-Rotulo ''
     Add-Linha $t3 $lblAcao -1 | Out-Null
     $btAgora = New-Botao 'Executar backup agora' 190 $true
@@ -2413,6 +2438,7 @@ function Show-Gui {
             $info = $null; $infoErro = $null
             try { $info = Get-InfoTarefa } catch { $infoErro = $_.Exception.Message }
             $cfgPath = Get-ConfigAtual
+            $lblMonitor.Text = if ($cfgPath -and (Read-Monitor $cfgPath)) { 'Monitoramento central vinculado — confira fila, envio e prazos no painel.' } else { 'Monitoramento não configurado' }
             $origem = ''
             if ($cfgPath -and (Test-Path -LiteralPath $cfgPath -PathType Leaf)) {
                 try { $origem = [string](Read-AgenteConfig -Caminho $cfgPath).origem } catch { }

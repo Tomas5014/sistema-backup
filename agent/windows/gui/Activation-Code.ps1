@@ -112,13 +112,22 @@ function Invoke-CodeActivation {
     Protect-ResticPassword -Senha $password -Destino (Join-Path $Directory 'restic.dpapi')
     $key = Join-Path $Directory 'id_ed25519'
     [void](Test-ConexaoDestino -Perfil $profile -ChavePath $key -SenhaRestic $password)
+    $monitor = Invoke-ActivationHttp ($central + '/api/v1/activations/monitoring') @{
+        activation_id = $attempt.activation_id; resume_secret = $secret
+    }
+    if ($monitor.contract_version -ne 1 -or -not $monitor.token) { throw 'Monitoramento da ativacao indisponivel.' }
+    Protect-ResticPassword -Senha (ConvertTo-SecureString $monitor.token -AsPlainText -Force) -Destino (Join-Path $Directory 'monitoring.dpapi')
+    Write-MonitorJson (Join-Path $Directory 'monitoring.json') @{
+        central = ([Uri]$central).GetLeftPart([UriPartial]::Authority)
+        installation_id = $monitor.installation_id
+    }
     return [pscustomobject]@{ State = 'ready'; Profile = $profile; Key = $key; Password = $password }
 }
 
 function Remove-CodeActivation {
     param([string]$Directory)
     if (-not (Test-Path -LiteralPath $Directory)) { return }
-    $allowed = @('id_ed25519','id_ed25519.pub','resume.dpapi','attempt.json','profile.json','restic.dpapi')
+    $allowed = @('id_ed25519','id_ed25519.pub','resume.dpapi','attempt.json','profile.json','restic.dpapi','monitoring.json','monitoring.dpapi')
     $items = @(Get-ChildItem -LiteralPath $Directory -Force)
     if ((Get-Item -LiteralPath $Directory).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Pasta de tentativa insegura.' }
     foreach ($item in $items) {

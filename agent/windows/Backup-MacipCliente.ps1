@@ -5,15 +5,18 @@
 # (sem prompts, disparado pelo Agendador). Nunca executa "restic init".
 [CmdletBinding()]
 param(
-    [ValidateSet('Preparar', 'Backup')]
+    [ValidateSet('Preparar', 'Backup', 'Sincronizar')]
     [string]$Modo,
     [string]$Config,
     [string]$DiretorioEstado,
     [string]$ResticExe,
-    [securestring]$SenhaRestic
+    [securestring]$SenhaRestic,
+    [ValidateSet('', 'manual', '$(Arg0)')]
+    [string]$Disparo = 'manual'
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'Central-Alerts.ps1')
 
 if (-not $script:ResticExeNome) {
     $script:ResticExeNome = $(if ($env:OS -eq 'Windows_NT') { 'restic.exe' } else { 'restic' })
@@ -578,7 +581,8 @@ function Invoke-AgentePreparar {
 }
 
 function Invoke-AgenteBackup {
-    param([string]$Config, [string]$DiretorioEstado)
+    param([string]$Config, [string]$DiretorioEstado, [string]$Disparo = 'manual')
+    $monitorPending = $null
     $estado = $null
     $res = [ordered]@{
         inicio_utc    = [DateTime]::UtcNow.ToString('o')
@@ -605,6 +609,10 @@ function Invoke-AgenteBackup {
         # nunca cria pasta operacional so para registrar falha.
         $gravar = ($null -ne $prep)
 
+        if ($gravar) {
+            try { $monitorPending = Start-MonitorResult $Config $prep.repositorio_id $Disparo $res.inicio_utc }
+            catch { Write-Warning 'Registro de monitoramento pendente; backup preservado.' }
+        }
         $cfg = Read-AgenteConfig -Caminho $Config
         if (-not $estado -or -not $prep) {
             throw 'Preparacao nao concluida (execute -Modo Preparar na conta da tarefa).'
@@ -689,6 +697,10 @@ function Invoke-AgenteBackup {
     finally {
         if (-not $res.fim_utc) { $res.fim_utc = [DateTime]::UtcNow.ToString('o') }
         if ($gravar -and $estado) { Write-Resultado -Estado $estado -Dados $res }
+        try {
+            Complete-MonitorResult $monitorPending $res
+            [void](Sync-MonitorQueue $Config)
+        } catch { Write-Warning 'Monitoramento indisponivel; resultado local preservado para reenvio.' }
     }
     return [pscustomobject]$res
 }
@@ -696,8 +708,13 @@ function Invoke-AgenteBackup {
 if ($MyInvocation.InvocationName -eq '.') { return }
 
 if (-not $Modo) {
-    Write-Error 'Uso: -Modo Preparar|Backup -Config <backup.json> [-DiretorioEstado <pasta>] [-ResticExe <restic.exe>]'
+    Write-Error 'Uso: -Modo Preparar|Backup|Sincronizar -Config <backup.json> [-DiretorioEstado <pasta>] [-ResticExe <restic.exe>]'
     exit 2
+}
+
+if ($Modo -eq 'Sincronizar') {
+    Write-Host (Sync-MonitorQueue $Config)
+    exit 0
 }
 
 if ($Modo -eq 'Preparar') {
@@ -705,7 +722,7 @@ if ($Modo -eq 'Preparar') {
     exit 0
 }
 
-$r = Invoke-AgenteBackup -Config $Config -DiretorioEstado $DiretorioEstado
+$r = Invoke-AgenteBackup -Config $Config -DiretorioEstado $DiretorioEstado -Disparo $Disparo
 if ($r.status -eq 'sucesso') {
     Write-Host "BACKUP OK: $($r.snapshot)"
     exit 0

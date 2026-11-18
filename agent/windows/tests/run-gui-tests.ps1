@@ -1445,6 +1445,13 @@ namespace System.Windows.Forms {
     }
     $Svc = New-SvcFalso -Tarefa (New-TarefaFalsa)
     eq (Invoke-DesinstalacaoTarefa) 0 'uninstall: tarefa propria desabilitada -> remover'
+    $marcada = New-TarefaFalsa
+    $argumentos = [string]$marcada.Definition.Actions.Item(1).Arguments
+    $Svc = New-SvcFalso -Tarefa (New-TarefaFalsa -ArgsAcao ($argumentos + ' -Disparo "$(Arg0)"'))
+    eq (Invoke-DesinstalacaoTarefa) 0 'uninstall: tarefa com marcador agendado -> remover'
+    $Svc = New-SvcFalso -Tarefa (New-TarefaFalsa -ArgsAcao ($argumentos + ' -Disparo "manual"'))
+    eq (Invoke-DesinstalacaoTarefa) 3 'uninstall: marcador livre nao substitui identidade exata'
+
     $tFalsa = New-TarefaFalsa -Instancias 1
     $Svc = New-SvcFalso -Tarefa $tFalsa
     eq (Invoke-DesinstalacaoTarefa) 0 'uninstall: execucao em andamento -> encerrada, remover'
