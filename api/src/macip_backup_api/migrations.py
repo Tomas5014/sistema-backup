@@ -348,6 +348,35 @@ CREATE TABLE IF NOT EXISTS activation_attempts (
 CREATE INDEX IF NOT EXISTS ix_activation_attempts_remote ON activation_attempts(remote_hash, attempted_at);
 '''))
 
+MIGRATIONS.append((12, "windows-central-alerts-lab", r'''
+ALTER TABLE agent_credentials ADD COLUMN IF NOT EXISTS scope varchar(30) NOT NULL DEFAULT 'agent';
+CREATE TABLE IF NOT EXISTS windows_monitors (
+ agent_id uuid PRIMARY KEY REFERENCES agents(id), schedule_id uuid NOT NULL,
+ schedule jsonb NOT NULL, paused boolean NOT NULL DEFAULT false,
+ effective_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS windows_results (
+ agent_id uuid NOT NULL REFERENCES agents(id), execution_id uuid NOT NULL,
+ started_at timestamptz NOT NULL, finished_at timestamptz NOT NULL,
+ received_at timestamptz NOT NULL DEFAULT now(), payload jsonb NOT NULL,
+ payload_hash varchar(64) NOT NULL, PRIMARY KEY(agent_id,execution_id)
+);
+CREATE TABLE IF NOT EXISTS protected_points (
+ agent_id uuid NOT NULL REFERENCES agents(id), binding_id uuid NOT NULL,
+ snapshot_a varchar(64) NOT NULL, snapshot_b varchar(64) NOT NULL,
+ confirmed_at timestamptz NOT NULL DEFAULT now(),
+ PRIMARY KEY(agent_id,binding_id,snapshot_a)
+);
+CREATE TABLE IF NOT EXISTS central_alerts (
+ id uuid PRIMARY KEY, agent_id uuid NOT NULL REFERENCES agents(id),
+ kind varchar(30) NOT NULL, occurrence_key varchar(240) NOT NULL,
+ detail jsonb NOT NULL, created_at timestamptz NOT NULL DEFAULT now(),
+ resolved_at timestamptz, acknowledged_at timestamptz, acknowledged_by varchar(200),
+ delivery_state varchar(20) NOT NULL DEFAULT 'pending', delivered_at timestamptz,
+ UNIQUE(agent_id,kind,occurrence_key)
+);
+'''))
+
 _ADVISORY_KEY = 727_203_001
 
 

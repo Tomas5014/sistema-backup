@@ -29,5 +29,7 @@ macip-backup-provisioner = "macip_backup_api.provisioner:main"
 macip-backup-protector = "macip_backup_api.protector:main"
 macip-backup-activation-a = "macip_backup_api.activation_executor:main"
 
+macip-backup-alerts = "macip_backup_api.central_alerts:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]

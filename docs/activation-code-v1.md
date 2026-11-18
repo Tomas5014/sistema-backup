@@ -141,6 +141,16 @@ Docker de laboratório, o nome do contêiner é uma configuração local de A,
 e seu marcador deve corresponder à raiz de contas. A API não escolhe
 comandos, contêineres nem caminhos administrativos.
 
+## Extensão de monitoramento na candidata posterior
+
+As branches de alertas adicionam `POST /api/v1/activations/monitoring`
+após a entrega pronta. A candidata Windows pede a credencial limitada
+com a mesma identidade/segredo de retomada, por HTTPS; não a inclui no
+perfil JSON. Veja [Alertas centrais](alertas-centrais-laboratorio.md).
+O consumidor de ativação anterior continua aceito. A candidata nova exige
+`MACIP_API_LAB_ALERTS=1` e migração 12 na central. No helper de laboratório,
+`activation-api` habilita esse modo explicitamente.
+
 ## Verificações e limites
 
 O teste `tests/test_activation_real.py` executa central e A em HTTPS com

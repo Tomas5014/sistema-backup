@@ -53,7 +53,7 @@ def api_env(cfg):
     }
     if cfg.get("activation_public"):
         environment.update({
-            "MACIP_API_LAB_ACTIVATION": "1",
+            "MACIP_API_LAB_ACTIVATION": "1", "MACIP_API_LAB_ALERTS": "1",
             "MACIP_API_SESSION_INSECURE_COOKIE": "0",
             "MACIP_API_ACTIVATION_PUBLIC_URL": cfg["activation_public"],
             "MACIP_API_ACTIVATION_DELIVERY_URL": cfg["activation_delivery"],
@@ -94,7 +94,7 @@ def main():
     parser.add_argument("action", choices=(
         "init", "api", "operator", "prepare-a", "seed", "prepare-b", "copy-seed",
         "prove-seed", "export-credentials", "windows-point", "copy-windows", "stop-a", "prove-windows", "stop",
-        "configure-activation", "activation-api", "activation-a", "refresh-b", "copy-activation", "prove-activation",
+        "configure-activation", "activation-api", "activation-a", "alerts", "refresh-b", "copy-activation", "prove-activation",
     ))
     parser.add_argument("area", type=Path)
     parser.add_argument("--sftp-ip")
@@ -110,6 +110,7 @@ def main():
     parser.add_argument("--key")
     parser.add_argument("--ca")
     parser.add_argument("--delivery-port", type=int, default=9447)
+    parser.add_argument("--smtp-port", type=int)
     args = parser.parse_args()
     root = args.area
     global DIAGNOSTIC_ROOT
@@ -161,6 +162,13 @@ def main():
     if root.stat().st_uid != os.getuid() or root.stat().st_mode & 0o077:
         raise RuntimeError("area privada com propriedade ou modo divergente")
     cfg = json.loads((root / "private/config.json").read_text())
+    if args.action == "alerts":
+        if not args.smtp_port:
+            raise RuntimeError("informe --smtp-port do capturador local descartável")
+        environment = {key: value for key, value in os.environ.items() if not key.startswith("MACIP_")}
+        environment.update(MACIP_API_DATABASE_URL=cfg["database"], MACIP_API_LAB_ALERTS="1")
+        os.execve(sys.executable, [sys.executable, "-m", "macip_backup_api.central_alerts", "--smtp-port", str(args.smtp_port)], environment)
+
     if args.action == "configure-activation":
         from urllib.parse import urlsplit
         for url in (args.public_url, args.delivery_url):

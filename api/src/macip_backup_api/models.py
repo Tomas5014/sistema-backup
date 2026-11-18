@@ -130,6 +130,8 @@ class AgentCredential(Base):
     created_at = mapped_column(DateTime(timezone=True), server_default=func.now())
     revoked_at = mapped_column(DateTime(timezone=True), nullable=True)
 
+    scope: Mapped[str] = mapped_column(String(30), nullable=False, default="agent", server_default="agent")
+
     agent: Mapped[Agent] = relationship(back_populates="credentials")
 
 

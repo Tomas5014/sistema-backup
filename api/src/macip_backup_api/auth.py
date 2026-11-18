@@ -156,6 +156,8 @@ def require_agent(
     ).scalar_one_or_none()
     if credential is None or credential.revoked_at is not None:
         raise HTTPException(403, "token inválido ou revogado")
+    if credential.scope != "agent":
+        raise HTTPException(403, "credencial limitada ao envio de resultados")
     agent = db.get(Agent, credential.agent_id)
     if agent is None:
         raise HTTPException(403, "agente inexistente")

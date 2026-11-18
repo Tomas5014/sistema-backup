@@ -335,3 +335,65 @@ As recusas incluíram área existente, link, referência de outra origem,
 item excluído presente e SHA-256 alterado. A sintaxe dos blocos Bash foi
 conferida com `bash -n`. Os contêineres e o volume tmpfs criados pelos
 testes foram removidos.
+
+## 10. Aceite dos alertas centrais da candidata
+
+Use as branches `feature/backup-central-alerts` e
+`feature/windows-backup-central-alerts` para esta prova adicional. A
+referência 0.1.3 permanece o caminho por perfil, sem monitoramento novo.
+Instalador candidato, DPAPI real, agendamento com sessão encerrada e
+restauração do ponto Windows somente por B continuam pendentes de VM.
+Preparação e comandos do capturador estão em
+[Alertas centrais de laboratório](alertas-centrais-laboratorio.md).
+Não envie avisos a destinatários reais.
+
+1. Suba central HTTPS, A/B e Mailpit exclusivos. Mantenha o avaliador
+   rodando a cada 30 segundos, independente da GUI. Ative por código,
+   conclua a prova atualizada de B e salve uma agenda na conta executora.
+   Confira no cadastro do cliente **Último backup**, **Última cópia
+   protegida** e **Próximo prazo**. Confira também a execução no histórico.
+2. Com dados fictícios, provoque uma falha de acesso ao SFTP apenas no
+   laboratório. Execute um novo backup. Confira o UUID, o resultado
+   `failed`/`partial` e o motivo no alerta **Backup falhou**. Volte o acesso.
+   Confirme uma única mensagem dessa ocorrência no capturador. Abra-a e
+   registre o reconhecimento no painel, sem capturar credenciais.
+3. Escolha uma próxima ocorrência real e sua tolerância, registre agenda
+   e fuso recebidos na central. Deixe a VM desligada nessa janela, mantendo
+   o avaliador ligado. Depois do prazo, confira **Backup não confirmado no
+   prazo**, sua ocorrência UTC e mensagem no Mailpit. Um backup manual ou
+   antigo não deve resolver essa ocorrência. Ligue a VM; envio tardio
+   correspondente deve resolver preservando o histórico. Se o Agendador
+   não executar a janela perdida, registre essa limitação e mantenha a
+   ocorrência histórica; não fabrique resultado nem edite a fila.
+4. Pause pela GUI e confirme a pausa **recebida** no painel antes da nova
+   janela. Não deve haver nova cobrança durante essa pausa. Retome e
+   confirme a nova agenda. Não pause unidades do laboratório Linux antigo.
+5. Gere um novo snapshot Windows, registre o ID completo em A e interrompa
+   somente a rotina de cópia do laboratório. Após o prazo de cópia,
+   confira **Cópia protegida atrasada** para esse ID exato. A prova seed
+   antiga não pode satisfazê-lo. Reconheça a mensagem. Copie esse snapshot
+   exato para B pelo procedimento existente. Confira os IDs A/B, a cópia
+   confirmada e a resolução, preservando a ocorrência anterior.
+6. Interrompa somente o acesso HTTPS da VM à central descartável, mantendo
+   o SFTP disponível. Faça backup sem GUI. Confira sucesso local e JSON
+   terminal pendente. Volte a comunicação; invoque apenas
+   `-Modo Sincronizar -Config <configuração efetiva>` na conta executora.
+   O comando não faz backup. Confira o mesmo UUID uma única vez no painel,
+   nenhuma nova restauração/execução e fila confirmada. Não use o placeholder
+   literalmente: os caminhos absolutos estão na tarefa instalada.
+7. Repita o isolamento com outro cliente fictício: token de uma instalação
+   não pode publicar resultado no repositório da outra nem consultar ou
+   alterar seus cadastros. Viewer pode ler, mas não reconhecer ocorrências.
+   Confirme que nenhum resultado ou diagnóstico contém nomes de arquivos,
+   chaves, código de ativação ou senha.
+8. Preserve evidências não sensíveis: versões/SHAs, IDs de execução,
+   agenda/ocorrência/prazos com fuso, snapshots A/B, horários de envio,
+   Message-ID, operador e horário do reconhecimento, resolução e tempo
+   de recuperação somente por B. Não confunda reconhecimento simulado em
+   testes com reconhecimento operacional do responsável na VM.
+
+Aprovação exige três ocorrências distintas entregues e reconhecidas,
+retorno normal comprovado, ausência de duplicatas após reenvio e a prova
+Windows/B das seções anteriores. Falha não explicada, envio ambíguo,
+agenda ainda não confirmada ou ausência da prova de B tornam o aceite
+pendente. Esta documentação não inicia nem aprova o piloto.

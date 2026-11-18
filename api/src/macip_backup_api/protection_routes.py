@@ -14,6 +14,7 @@ from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 
 from . import config
 from .db import session
@@ -154,8 +155,17 @@ def register_protection(app, get_preparation, profile_is_current):
     @app.post(prefix + "/copy", dependencies=auth)
     def copy(agent_id: uuid.UUID, payload: PointIn, db: Session = Depends(session)):
         row, binding, pair = point(db, agent_id, payload)
+        # Inventário durável por ponto. Uma prova antiga nunca confirma um ponto novo.
+        db.execute(text("INSERT INTO protected_points(agent_id,binding_id,snapshot_a,snapshot_b) "
+            "VALUES(:agent,:binding,:a,:b) ON CONFLICT DO NOTHING"),
+            dict(agent=row.agent_id, binding=payload.binding_id, a=payload.snapshot_a, b=payload.snapshot_b))
+        stored = db.scalar(text("SELECT snapshot_b FROM protected_points WHERE agent_id=:agent AND binding_id=:binding AND snapshot_a=:a"),
+            dict(agent=row.agent_id, binding=payload.binding_id, a=payload.snapshot_a))
+        if stored != payload.snapshot_b:
+            raise HTTPException(409, "ponto A já associado a outro ponto B")
         old = binding.get("last_copy")
         if old and all(old[key] == value for key, value in pair.items()):
+            db.commit()
             return old
         record = {**pair, "confirmed_at": datetime.now(UTC).isoformat()}
         row.protected_copy = {**binding, "last_copy": record}

@@ -3801,3 +3801,84 @@ foi inspecionado em desktop/celular com API fictícia. NSIS não disponível
 para compilar instalador nesta sessão. A referência 0.1.3 permanece
 preservada. Cliques na VM, DPAPI real, agendamento sem sessão e recuperação
 do ponto Windows somente por B seguem para aceite integrado da candidata.
+
+## 2026-11-18 — Alertas centrais de laboratório Windows
+
+Branches separadas: central `feature/backup-central-alerts`, baseada em
+`0a25d30149ba43beaf598d652831384736eccaef`; Windows
+`feature/windows-backup-central-alerts`, baseada em
+`1a00be647d55109c31dd503ad4826cf738aabbc7`. Sem merge das linhas e sem
+alteração do instalador 0.1.3 de referência.
+
+Migração expansiva 12: escopo de credencial, agendas Windows, resultados
+mínimos, inventário de pares A/B e ocorrências duráveis. O resgate
+finalizado entrega credencial exclusiva `windows-results`, por HTTPS,
+somente com B vigente. Credencial não autoriza a API comum de agentes ou
+administração. Reenvio idempotente projeta o mesmo resultado no histórico
+já existente. Campos livres de arquivos, stderr e credenciais não entram
+no contrato de telemetria.
+
+Windows persiste UUID/estado antes do backup, conclui o registro com flush
+e troca atômica e envia sem depender da GUI. Fila continua após falha de
+comunicação ou resposta perdida. Novo modo público `Sincronizar` não
+repete backup. O marcador do Agendador distingue execução automática e
+manual; definição legada segue reconhecida. Remoção seletiva confere
+também a definição nova e recusa marcador divergente. Pausa/retomada usam
+cadeia de agendas com comparação da revisão anterior. Perfil sem vínculo
+continua funcionando e mostra Monitoramento não configurado.
+
+A central calcula ocorrências com fuso IANA e tolerância, sem aceitar
+backup manual ou antigo como confirmação de agenda. Cada snapshot de A
+exige par A/B no vínculo atual. Prova seed não substitui cópia nova; falta
+de vínculo vigente também pode gerar atraso. Alertas preservam histórico,
+reconhecimento e resolução. Mailpit recebe somente mensagens para domínio
+reservado example.invalid, pelo loopback; entrega ambígua não é repetida
+automaticamente. Nenhum destinatário real foi usado.
+
+Verificações executadas em recursos exclusivos descartáveis:
+
+- API: `pytest tests/test_central_alerts.py tests/test_activation_real.py
+  tests/test_activation.py tests/test_migrations.py tests/test_monitoring.py
+  tests/test_protected_copy.py tests/test_provisioning.py tests/test_provisioner.py
+  -q --tb=short`, com PostgreSQL, Mailpit, OpenSSH e Restic reais:
+  **103 testes e 12 subtestes aprovados**, sem skips nessa bateria.
+  O relógio de cobrança e parte dos emissores B são simulados nos testes
+  unitários de alertas. O teste integrado separado usa HTTPS real entre
+  central/A/PowerShell, confiança em CA, OpenSSH e Restic reais, e B com
+  restauração sem rede. A perda da resposta é simulada depois do aceite
+  HTTPS real; só uma execução fica no banco e na projeção de histórico.
+- API: reexecução focada após os ajustes finais de avaliador/entrada
+  pública, `pytest tests/test_central_alerts.py -q --tb=short`. Inclui três
+  alertas capturados no Mailpit, reconhecimento com autorização/CSRF,
+  dois clientes, eventos simultâneos/repetidos/fora de ordem, pausa,
+  retomada, recusa SMTP e helper documentado em caminho com espaços.
+  **10 testes aprovados**, sem skips, após esses ajustes finais.
+- Portal: `npm run typecheck`, `npm test` e `npm run build` aprovados;
+  **106 testes aprovados**. Chrome real em 1200 e 390 pixels verificou
+  três mensagens, reconhecimento e ausência de overflow, com API
+  **simulada**. Não substitui o aceite integrado com Windows.
+- PowerShell 7.4.6 no Linux: **30 verificações novas de fila**, **16 de
+  ativação**, **393 da GUI** e **150 do agente**, sem falhas. A prova de
+  fila inclui comando público em outro processo, sem GUI, sucesso do
+  backup preservado durante recusa de comunicação e reenvio sem backup.
+  Restic e proteção de segredos são simulados nessa prova. GUI usa COM
+  simulado; **1 teste COM real ignorado**. O grupo opcional Restic/SSH
+  registrador foi ignorado; a integração HTTPS/SFTP/Restic real foi
+  executada separadamente na bateria central.
+- `git diff --check`, ajuda do helper e conferência dos comandos contra
+  as entradas públicas. Python 3.14.4, Node 24.19.0 e Restic 0.18.1.
+  Avisos de depreciação Starlette/React Router existentes não são skips.
+
+Não foi compilado instalador: NSIS não está disponível. Permanecem
+pendentes a VM Windows, DPAPI/WinForms/COM reais, tarefa com sessão
+encerrada e recuperação do ponto Windows somente por B. Nenhum aceite
+operacional, produção ou novo piloto foi declarado. O estado anterior dos
+timers de recuperação Linux permanece disabled/inactive, conforme o
+operador; nenhum timer operacional foi acessado ou reativado.
+
+Limpeza desta sessão: PostgreSQL `macip-alerts-test-pg` e Mailpit
+`macip-alerts-test-mail`, criados com `--rm`, foram parados por seus IDs
+registrados e removidos. Fixtures removeram os contêineres SFTP e volumes
+temporários próprios; o contêiner preexistente de outro projeto foi
+preservado. Capturas sintéticas e auxiliares locais foram descartados.
+Alterações preexistentes não relacionadas permanecem fora dos commits.

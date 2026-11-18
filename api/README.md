@@ -423,3 +423,8 @@ MACIP_API_TEST_DATABASE_URL='postgresql://postgres:<senha-teste>@localhost:55432
 - URL configurada mas inacessível → **falha clara** (não skip).
 - SQLite não substitui — `ON CONFLICT`/`advisory lock` são específicos
   de PostgreSQL.
+
+Alertas Windows de laboratório: [contrato, fila, SMTP capturado e retorno](../docs/alertas-centrais-laboratorio.md).
+Exigem migração 12 e `MACIP_API_LAB_ALERTS=1`. O avaliador é independente
+(`macip-backup-alerts --smtp-port PORTA_LOCAL`); o painel não o executa.
+Credenciais `windows-results` não autorizam os endpoints gerais de agentes.

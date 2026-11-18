@@ -66,6 +66,10 @@ def client():
         engine = db_module.engine()
         with engine.begin() as connection:
             for table in (
+                "central_alerts",
+                "protected_points",
+                "windows_results",
+                "windows_monitors",
                 "activation_attempts",
                 "activation_codes",
                 "installation_preparations",

@@ -67,6 +67,7 @@ class ExecutorTransport:
 def test_real_https_powershell_key_and_B_reproof(
     client, tmp_path, enabled_activation, enabled_protection, monkeypatch, caplog,
 ):
+    monkeypatch.setenv("MACIP_API_LAB_ALERTS", "1")
     pwsh = os.environ.get("MACIP_TEST_POWERSHELL")
     windows = os.environ.get("MACIP_TEST_WINDOWS_WORKTREE")
     if not pwsh or not windows:
@@ -171,3 +172,36 @@ $result=Invoke-CodeActivation -Code $code -Directory (Join-Path $Base 'activatio
                 rows = str(db.execute(text("SELECT * FROM activation_codes")).all())
                 assert sftp[4] not in rows
             assert not (win_base / "gui.json").exists()
+            # Envio Windows por HTTPS real. DPAPI continua explicitamente simulado no harness Linux.
+            telemetry = tmp_path / "telemetry.ps1"
+            telemetry.write_text(harness.read_text().split("$code=(Get-Content")[0] + r'''
+$directory=Join-Path $Base 'activation-code'
+$monitorPath=Join-Path $directory 'monitoring.json'
+$monitor=Get-Content -LiteralPath $monitorPath -Raw | ConvertFrom-Json
+$queue=Join-Path $Base 'queue'
+New-Item -ItemType Directory -Path $queue | Out-Null
+$monitor | Add-Member NoteProperty queue $queue
+Write-MonitorJson $monitorPath $monitor
+$config=Join-Path $directory 'backup.json'
+Set-MonitorSchedule $config '10:00' $false
+$event=Start-MonitorResult $config $args[0] 'manual' ([DateTime]::UtcNow.AddMinutes(-1).ToString('o'))
+Complete-MonitorResult $event @{fim_utc=[DateTime]::UtcNow.ToString('o');status='sucesso';codigo_restic=0;snapshot=$args[1]}
+$realHttp=${function:Invoke-MonitorHttp}
+$script:lost=$true
+function Invoke-MonitorHttp($Monitor,$Path,$Body) {
+    & $realHttp $Monitor $Path $Body
+    if ($Path -eq 'executions' -and $script:lost) { $script:lost=$false; throw 'resposta perdida simulada apos aceite real' }
+}
+try { [void](Sync-MonitorQueue $config) } catch { }
+if (@(Get-ChildItem $queue -Filter 'event-*.json').Count -ne 1) { throw 'perdeu resultado nao confirmado' }
+[void](Sync-MonitorQueue $config)
+if (@(Get-ChildItem $queue -Filter 'event-*.json').Count -ne 0) { throw 'reenvio falhou' }
+''')
+            sent = subprocess.run([pwsh,"-NoProfile","-File",str(telemetry),windows,str(win_base),str(code_file),sftp[1]["repositorio_id"],point],
+                                  env={**os.environ,"SSL_CERT_FILE":str(certificate),"NO_PROXY":"localhost,127.0.0.1"},capture_output=True,timeout=60)
+            assert sent.returncode == 0, sent.stderr.decode()
+            with engine().connect() as db:
+                assert db.scalar(text("SELECT count(*) FROM windows_results WHERE agent_id=:id"), {"id":installation}) == 1
+            received = client.get(f"/api/v1/installations/{installation}/alerts", headers={"Authorization":"Bearer test-admin-9f8e7d6c5b4a3210"})
+            assert received.json()["last_backup"]["snapshot_id"] == point
+            assert sftp[4] not in received.text

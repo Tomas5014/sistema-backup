@@ -18,6 +18,7 @@ import {
   type ClientRow,
   type PreparationRow,
 } from "../api";
+import { InstallationAlerts } from "../components/InstallationAlerts";
 import { useAuth } from "../auth";
 import { formatDate } from "../format";
 import { EmptyState, ErrorState, Loading, Pagination } from "../components/common";
@@ -486,6 +487,7 @@ function PreparationStatus({
           {downloading ? "Baixando…" : "Baixar perfil"}
         </button>
       </div>
+      <InstallationAlerts id={item.installation.id} admin={admin} />
       {code ? (
         <div>
           <label htmlFor={`activation-code-${item.installation.id}`}>Código de ativação</label>

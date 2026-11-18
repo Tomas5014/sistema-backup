@@ -700,3 +700,27 @@ export async function getMonitoring(
   const response = await apiFetch(`/api/v1/monitoring/tasks/${taskId}`);
   return response.json() as Promise<TaskMonitoring>;
 }
+
+export interface CentralAlert {
+  id: string;
+  kind: "backup_failed" | "backup_missing" | "copy_late";
+  detail: Record<string, string>;
+  created_at: string;
+  resolved_at: string | null;
+  acknowledged_at: string | null;
+  delivery_state: string;
+}
+export interface InstallationAlerts {
+  configured: boolean;
+  paused: boolean;
+  last_backup: { status: string; finished_at: string; snapshot_id: string | null } | null;
+  last_protected_copy: { confirmed_at: string; snapshot_a: string; snapshot_b: string } | null;
+  next_deadline: string | null;
+  alerts: CentralAlert[];
+}
+export async function installationAlerts(id: string): Promise<InstallationAlerts> {
+  return (await apiFetch(`/api/v1/installations/${encodeURIComponent(id)}/alerts`)).json();
+}
+export async function acknowledgeAlert(id: string): Promise<void> {
+  await apiFetch(`/api/v1/alerts/${encodeURIComponent(id)}/ack`, { method: "POST", csrf: true });
+}
