@@ -68,6 +68,9 @@ try {
 
 # ---------- dados do app ----------
 
+$activationModule = Join-Path $PSScriptRoot 'Activation-Code.ps1'
+. $activationModule
+
 function Read-GuiMeta {
     if (Test-Path -LiteralPath $script:GuiMeta -PathType Leaf) {
         try { return (Get-Content -LiteralPath $script:GuiMeta -Raw | ConvertFrom-Json) }
@@ -2022,7 +2025,14 @@ function Show-Gui {
     $t1 = New-Aba '1. Ativar'
     Add-Linha $t1 (New-Titulo 'Passo 1 de 3 — Ativação') -1 -margemTopo 0 | Out-Null
     Add-Linha $t1 (New-Rotulo ("Conta Windows em uso: $conta — é ela quem roda o backup, inclusive sem sessão aberta.")) -1 | Out-Null
-    Add-Linha $t1 (New-Rotulo 'A MAC IP fornece o perfil (.json), a chave privada e a senha Restic pelos canais combinados. Importe os três aqui — a senha nunca vai para o perfil nem para o arquivo de configuração.') -1 | Out-Null
+    Add-Linha $t1 (New-Rotulo 'Cole o código emitido pela central do laboratório ou use a alternativa por perfil.') -1 | Out-Null
+    Add-Linha $t1 (New-Secao 'Código de ativação') -1 -margemTopo 12 | Out-Null
+    $tbCodigo = New-Caixa 'Código de ativação do laboratório'
+    $tbCodigo.UseSystemPasswordChar = $true
+    Add-Linha $t1 $tbCodigo -1 | Out-Null
+    $btCodigo = New-Botao 'Usar código de ativação' 0 $true
+    $btNovaAtivacao = New-Botao 'Descartar tentativa' 0
+    Add-Linha $t1 (New-LinhaBotoes @($btCodigo,$btNovaAtivacao)) -1 | Out-Null
     Add-Linha $t1 (New-Secao 'Perfil') -1 -margemTopo 12 | Out-Null
     Add-Linha $t1 (New-Rotulo 'Arquivo de perfil MAC IP (.json) recebido:') -1 | Out-Null
     $tbPerfil = New-Caixa 'Caminho do perfil MAC IP importado'
@@ -2059,6 +2069,60 @@ function Show-Gui {
     $script:ativacaoToken = $null     # prova de que ESTA combinacao perfil+chave+senha validou
     $script:OpRede = $false           # trava: uma operacao de rede por vez
     $entradasAtv = @($tbPerfil, $btPerfil, $tbChave, $btChave, $tbSenha)
+
+    $btNovaAtivacao.Add_Click({
+        if ($script:OpRede) { return }
+        if ([System.Windows.Forms.MessageBox]::Show($form,
+            'Descartar os dados locais desta tentativa para usar outro código?',
+            'Ativação', 'YesNo', 'Question') -ne 'Yes') { return }
+        try {
+            Remove-CodeActivation -Directory (Join-Path $script:BaseDir 'activation-code')
+            $script:perfilAtual = $null; $script:ativacaoToken = $null
+            $tbPerfil.Clear(); $tbChave.Clear(); $tbSenha.Clear(); $tbCodigo.Clear()
+            $lblAtv.Text = 'Cole um novo código ou importe um perfil.'
+        } catch { $lblAtv.Text = $_.Exception.Message }
+    })
+
+    $btCodigo.Add_Click({
+        if ($script:OpRede) { return }
+        $script:OpRede = $true
+        $btCodigo.Enabled = $false; $btValidar.Enabled = $false; $btSalvar.Enabled = $false
+        foreach ($c in $entradasAtv) { $c.Enabled = $false }
+        $tbCodigo.Enabled = $false
+        $lblAtv.Text = 'Consultando ativação…'
+        try {
+            $activation = Invoke-Assincrono -Funcao 'Invoke-CodeActivation' -Form $form -PrazoMs 150000 -Params @{
+                Code = $tbCodigo.Text.Trim(); Directory = (Join-Path $script:BaseDir 'activation-code')
+            }
+            if ($activation.State -eq 'pending') {
+                $lblAtv.Text = 'Chave registrada. Preparação pendente: aguarde nova prova de B e clique novamente com o mesmo código.'
+                $lblAtv.ForeColor = 'DarkBlue'
+            } else {
+                $script:perfilAtual = $activation.Profile
+                $tbPerfil.Text = $activation.Profile.caminho
+                $tbChave.Text = $activation.Key
+                $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($activation.Password)
+                try { $tbSenha.Text = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr) }
+                finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }
+                $script:ativacaoToken = Get-TokenAtivacao -Perfil $script:perfilAtual -ChavePath $tbChave.Text -SenhaTxt $tbSenha.Text
+                if ($activation.Profile.horario_sugerido) {
+                    $hm = [DateTime]::ParseExact($activation.Profile.horario_sugerido, 'HH:mm', $null)
+                    $dtpHora.Value = [DateTime]::Today.AddHours($hm.Hour).AddMinutes($hm.Minute)
+                }
+                $tbCodigo.Clear()
+                $lblAtv.Text = 'Destino validado. Continue em Pasta e horário.'
+                $lblAtv.ForeColor = 'DarkGreen'
+                $tabs.SelectedTab = $script:Aba['2. Pasta e horário']
+            }
+        } catch {
+            $lblAtv.ForeColor = 'DarkRed'; $lblAtv.Text = $_.Exception.Message
+        } finally {
+            $script:OpRede = $false
+            $btCodigo.Enabled = $true; $btValidar.Enabled = $true; $btSalvar.Enabled = $true
+            $tbCodigo.Enabled = $true
+            foreach ($c in $entradasAtv) { $c.Enabled = $true }
+        }
+    })
 
     $btPerfil.Add_Click({
         $dlg = New-Object "$W.OpenFileDialog"

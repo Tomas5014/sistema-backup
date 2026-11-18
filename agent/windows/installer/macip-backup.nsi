@@ -66,6 +66,7 @@ Section "Instalar"
 
   File "..\Backup-MacipCliente.ps1"
   File "..\gui\MacipBackup-Gui.ps1"
+  File "..\gui\Activation-Code.ps1"
   File "..\gui\perfil.example.json"
   File "Desinstalar-Tarefa.ps1"      ; verificacao estruturada da tarefa no uninstall
   File "payload\restic.exe"          ; binario aprovado pela MAC IP (nao versionado)
@@ -139,6 +140,7 @@ remover_arquivos:
   ; somente os arquivos instalados pelo pacote, por nome -- nada de curinga
   Delete "$INSTDIR\Backup-MacipCliente.ps1"
   Delete "$INSTDIR\MacipBackup-Gui.ps1"
+  Delete "$INSTDIR\Activation-Code.ps1"
   Delete "$INSTDIR\Desinstalar-Tarefa.ps1"
   Delete "$INSTDIR\perfil.example.json"
   Delete "$INSTDIR\instalar-como-conta.txt"
