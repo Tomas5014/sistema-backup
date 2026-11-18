@@ -1,5 +1,11 @@
 # Ensaio Windows 0.1.3 → A → B
 
+O caminho experimental por código está em
+[Ativação por código v1](activation-code-v1.md). Ele usa a branch Windows
+candidata derivada de 0.1.3. Para validar a referência 0.1.3, siga a
+alternativa por perfil abaixo. O aceite integrado da candidata deve
+registrar os cliques, a agenda sem sessão e o restore do ponto Windows por B.
+
 Estado deste roteiro: preparado para execução pelo operador. Os cliques,
 o disparo com sessão encerrada e as restaurações na VM Windows permanecem
 pendentes de evidência operacional. O servidor de ensaio deve ser um Linux

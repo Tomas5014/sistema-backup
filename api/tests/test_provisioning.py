@@ -447,6 +447,7 @@ def lab_sftp_profile(client, tmp_path):
     reader = tmp_path / "b-reader"
     run("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(reader))
     run("docker", "run", "--pull=never", "--rm", "-d", "--name", name,
+        "--label", f"macip.activation-accounts={tmp_path / 'primary-a'}",
         "-p", "127.0.0.1::22", "--entrypoint", "/bin/sh", image, "-c", "exec sleep infinity")
     try:
         port = int(run("docker", "port", name, "22/tcp").stdout.decode().strip().rsplit(":", 1)[1])

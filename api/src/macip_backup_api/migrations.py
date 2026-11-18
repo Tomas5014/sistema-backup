@@ -327,6 +327,27 @@ ALTER TABLE installation_preparations
  ADD COLUMN IF NOT EXISTS protected_copy jsonb;
 '''))
 
+MIGRATIONS.append((11, 'lab-activation-codes', '''
+CREATE TABLE IF NOT EXISTS activation_codes (
+ id uuid PRIMARY KEY,
+ agent_id uuid NOT NULL REFERENCES agents(id),
+ code_hash varchar(64) NOT NULL UNIQUE,
+ requester_kind varchar(20) NOT NULL, requester_ref varchar(200) NOT NULL,
+ created_at timestamptz NOT NULL DEFAULT now(), expires_at timestamptz NOT NULL,
+ revoked_at timestamptz, used_at timestamptz, delivered_at timestamptz,
+ activation_id uuid UNIQUE, device_id uuid, resume_hash varchar(64),
+ public_key text, issued_source varchar(64) NOT NULL,
+ registered_source varchar(64),
+ state varchar(30) NOT NULL DEFAULT 'issued'
+);
+CREATE TABLE IF NOT EXISTS activation_attempts (
+ id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+ remote_hash varchar(64) NOT NULL,
+ attempted_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ix_activation_attempts_remote ON activation_attempts(remote_hash, attempted_at);
+'''))
+
 _ADVISORY_KEY = 727_203_001
 
 

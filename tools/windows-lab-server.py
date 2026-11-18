@@ -45,12 +45,20 @@ def api(cfg, role):
 
 
 def api_env(cfg):
-    return {
+    environment = {
         **os.environ, "MACIP_API_DATABASE_URL": cfg["database"],
         "MACIP_API_ADMIN_TOKEN": cfg["admin"], "MACIP_API_PROVISIONER_TOKEN": cfg["a_token"],
         "MACIP_API_PROTECTOR_TOKEN": cfg["b_token"], "MACIP_API_LAB_PROFILE_EXPORT": "1",
         "MACIP_API_LAB_PROTECTION": "1", "MACIP_API_SESSION_INSECURE_COOKIE": "1",
     }
+    if cfg.get("activation_public"):
+        environment.update({
+            "MACIP_API_LAB_ACTIVATION": "1",
+            "MACIP_API_SESSION_INSECURE_COOKIE": "0",
+            "MACIP_API_ACTIVATION_PUBLIC_URL": cfg["activation_public"],
+            "MACIP_API_ACTIVATION_DELIVERY_URL": cfg["activation_delivery"],
+        })
+    return environment
 
 
 def check_container(name, root):
@@ -86,6 +94,7 @@ def main():
     parser.add_argument("action", choices=(
         "init", "api", "operator", "prepare-a", "seed", "prepare-b", "copy-seed",
         "prove-seed", "export-credentials", "windows-point", "copy-windows", "stop-a", "prove-windows", "stop",
+        "configure-activation", "activation-api", "activation-a", "refresh-b", "copy-activation", "prove-activation",
     ))
     parser.add_argument("area", type=Path)
     parser.add_argument("--sftp-ip")
@@ -95,6 +104,12 @@ def main():
     parser.add_argument("--installation", type=uuid.UUID)
     parser.add_argument("--snapshot")
     parser.add_argument("--reference", type=Path)
+    parser.add_argument("--public-url")
+    parser.add_argument("--delivery-url")
+    parser.add_argument("--certificate")
+    parser.add_argument("--key")
+    parser.add_argument("--ca")
+    parser.add_argument("--delivery-port", type=int, default=9447)
     args = parser.parse_args()
     root = args.area
     global DIAGNOSTIC_ROOT
@@ -146,6 +161,55 @@ def main():
     if root.stat().st_uid != os.getuid() or root.stat().st_mode & 0o077:
         raise RuntimeError("area privada com propriedade ou modo divergente")
     cfg = json.loads((root / "private/config.json").read_text())
+    if args.action == "configure-activation":
+        from urllib.parse import urlsplit
+        for url in (args.public_url, args.delivery_url):
+            parsed = urlsplit(url or "")
+            if parsed.scheme != "https" or not parsed.hostname or "@" in parsed.netloc or parsed.query or parsed.fragment:
+                raise RuntimeError("configure endereços HTTPS do laboratório")
+        cfg.update(activation_public=args.public_url.rstrip("/"), activation_delivery=args.delivery_url,
+                   api=args.public_url.rstrip("/"))
+        (root / "private/config.json").write_text(json.dumps(cfg))
+        return
+    if args.action in {"activation-api", "activation-a"}:
+        if not args.certificate or not args.key or not args.ca:
+            raise RuntimeError("informe certificate, key e ca do laboratório")
+        environment = {**api_env(cfg), "SSL_CERT_FILE": args.ca}
+        if args.action == "activation-api":
+            os.environ.update(environment)
+            import uvicorn
+            from fastapi import HTTPException
+            from fastapi.responses import FileResponse
+            from fastapi.staticfiles import StaticFiles
+            from macip_backup_api.app import create_app
+            app = create_app()
+            dist = Path(__file__).resolve().parents[1] / "portal/dist"
+            app.mount("/assets", StaticFiles(directory=dist / "assets"))
+
+            @app.get("/{path:path}")
+            def frontend(path: str):
+                if path.startswith("api/"):
+                    raise HTTPException(404, "rota inexistente")
+                return FileResponse(dist / "index.html")
+
+            uvicorn.run(app, host=cfg["ip"], port=cfg["api_port"], ssl_certfile=args.certificate,
+                        ssl_keyfile=args.key)
+            return
+        else:
+            # A recebe somente sua identidade. Tokens de B, administração e
+            # acesso ao banco permanecem no processo da central.
+            environment = {key: value for key, value in os.environ.items() if not key.startswith("MACIP_")}
+            environment.update({
+                "SSL_CERT_FILE": args.ca, "MACIP_API_LAB_ACTIVATION": "1",
+                "MACIP_PROVISIONER_API_URL": cfg["api"], "MACIP_PROVISIONER_TOKEN": cfg["a_token"],
+                "MACIP_PROVISIONER_LAB_ROOT": str(root / "a"),
+                "MACIP_PROVISIONER_LAB_VAULT": str(root / "private/vault-a"),
+                "MACIP_ACTIVATION_LAB_CONTAINER": cfg["sshd"],
+            })
+            command = [sys.executable, "-m", "macip_backup_api.activation_executor",
+                       "--host", cfg["ip"], "--port", str(args.delivery_port),
+                       "--certificate", args.certificate, "--key", args.key]
+        os.execve(sys.executable, command, environment)
     if args.action == "api":
         os.execve(sys.executable, [sys.executable, "-m", "uvicorn", "macip_backup_api.app:app",
                                   "--host", "127.0.0.1", "--port", str(cfg["api_port"])], api_env(cfg))
@@ -173,6 +237,7 @@ def main():
         run("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(root / "private/hostkey"))
         run("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(root / "private/b-reader"))
         run("docker", "run", "--pull=never", "--rm", "-d", "--name", cfg["sshd"],
+            "--label", f"macip.activation-accounts={root / 'a'}",
             "--label", f"macip.windows-lab={root}", "-p", f'{cfg["ip"]}::22',
             "--entrypoint", "/bin/sh", cfg["sftp_image"], "-c", "exec sleep infinity")
         port = int(run("docker", "port", cfg["sshd"], "22").strip().rsplit(":", 1)[1])
@@ -284,9 +349,9 @@ def main():
     volume = Path((root / "private/volume").read_text())
     protector = LabProtector(Path("/dev/shm"), volume, uuid.UUID((volume / ".macip-volume").read_text()),
                              root / "b-state", reserve_bytes=64 * 1024**2)
-    if args.action in {"prove-seed", "prove-windows"}:
-        kind = "seed" if args.action == "prove-seed" else "windows"
-        copy_file = "copy-seed.json" if kind == "seed" else "copy-windows.json"
+    if args.action in {"prove-seed", "prove-windows", "prove-activation"}:
+        kind = "windows" if args.action == "prove-windows" else "seed"
+        copy_file = "copy-activation.json" if args.action == "prove-activation" else "copy-" + kind + ".json"
         expected_copy = json.loads((root / "evidence" / copy_file).read_text())
         current = b_api.request(f"/api/v1/protector/installations/{installation}")["protection"]
         if current is None or current.get("last_copy") != expected_copy:
@@ -294,14 +359,15 @@ def main():
         started = time.monotonic()
         result = protector.execute(b_api, installation, "prove",
                                    manifest=root / f"private/{kind}-manifest.json")
-        record(root, f"{kind}-proof.json", {**result, "duration_seconds": time.monotonic() - started})
+        proof_name = "activation-proof.json" if args.action == "prove-activation" else f"{kind}-proof.json"
+        record(root, proof_name, {**result, "duration_seconds": time.monotonic() - started})
     else:
         snapshot = None
-        if args.action == "copy-seed":
+        if args.action in {"copy-seed", "copy-activation"}:
             snapshot = json.loads((root / "evidence/seed.json").read_text())["snapshot_a"]
         elif args.action == "copy-windows":
             snapshot = json.loads((root / "evidence/windows-point.json").read_text())["snapshot_a"]
-        action = "prepare" if args.action == "prepare-b" else "copy"
+        action = "prepare" if args.action in {"prepare-b", "refresh-b"} else "copy"
         result = protector.execute(
             b_api, installation, action, snapshot=snapshot,
             source_key=root / "private/b-reader", source_password_file=root / "private/a-read-password",

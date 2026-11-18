@@ -53,6 +53,7 @@ export interface PreparationRow {
   repository_id: string | null;
   error_code: string | null;
   profile_available: boolean;
+  activation_available?: boolean;
   created_at: string;
   updated_at: string;
   operation: {
@@ -346,6 +347,25 @@ export async function downloadInstallationProfile(installationId: string): Promi
     `/api/v1/installations/${encodeURIComponent(installationId)}/profile`,
   );
   return await response.blob();
+}
+
+export interface ActivationCode {
+  id: string;
+  activation_code: string;
+  expires_at: string;
+}
+
+export async function issueActivationCode(installationId: string): Promise<ActivationCode> {
+  const r = await apiFetch("/api/v1/activation-codes", {
+    method: "POST", body: { installation_id: installationId }, csrf: true,
+  });
+  return await r.json();
+}
+
+export async function revokeActivationCode(id: string): Promise<void> {
+  await apiFetch(`/api/v1/activation-codes/${encodeURIComponent(id)}/revoke`, {
+    method: "POST", csrf: true,
+  });
 }
 
 export async function createAgent(

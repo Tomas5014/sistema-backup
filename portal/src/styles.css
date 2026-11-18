@@ -166,6 +166,7 @@ input, select {
 .preparation-meta div { display: grid; gap: .1rem; align-content: start; }
 .preparation-meta dt { color: var(--muted); font-size: .82rem; }
 .preparation-meta dd { margin: 0; font-variant-numeric: tabular-nums; }
+.preparation-status textarea { width: 100%; min-height: 5rem; margin-top: .35rem; }
 .success-state { background: #e8f6ec; border: 1px solid #b7e3c3; border-radius: 6px; padding: .6rem .8rem; }
 .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; z-index: 10; }
 .modal { background: #fff; border-radius: 8px; padding: 1.25rem; max-width: 34rem; width: 90%; box-shadow: 0 8px 30px rgba(0,0,0,.3); }

@@ -27,6 +27,7 @@ macip-backup-api = "macip_backup_api.app:run"
 macip-backup-api-operator = "macip_backup_api.operator_cli:main"
 macip-backup-provisioner = "macip_backup_api.provisioner:main"
 macip-backup-protector = "macip_backup_api.protector:main"
+macip-backup-activation-a = "macip_backup_api.activation_executor:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -170,6 +170,30 @@ describe("cadastro de cliente", () => {
 });
 
 describe("preparação da instalação", () => {
+  it("emite código com CSRF, oculta e revoga sem storage", async () => {
+    const activationCode = "https://central.lab#macip-activation=" + "a".repeat(43);
+    calls = stubFetch({
+      ...baseRoutes(),
+      "GET /api/v1/clients/cli-1/preparations": () => json([{
+        ...PREP, state: "primary_ready", activation_available: true, profile_available: true,
+      }]),
+      "POST /api/v1/activation-codes": () => json({
+        id: "code-1", activation_code: activationCode, expires_at: "2026-11-18T12:00:00Z",
+      }, 201),
+      "POST /api/v1/activation-codes/code-1/revoke": () => json({ state: "revoked" }),
+    });
+    portal("/clients/cli-1");
+    await userEvent.click(await screen.findByRole("button", { name: "Gerar código de ativação" }));
+    expect(await screen.findByLabelText("Código de ativação")).toHaveValue(activationCode);
+    const post = calls.find((call) => call.key === "POST /api/v1/activation-codes");
+    expect(post?.init?.headers).toMatchObject({ "X-CSRF-Token": "csrf-test" });
+    expect(localStorage.length).toBe(0);
+    expect(sessionStorage.length).toBe(0);
+    await userEvent.click(screen.getByRole("button", { name: "Revogar código" }));
+    await waitFor(() => expect(screen.queryByLabelText("Código de ativação")).toBeNull());
+    expect(calls.find((call) => call.key.endsWith("/revoke"))?.init?.headers).toMatchObject({ "X-CSRF-Token": "csrf-test" });
+  });
+
   it("separa primário pronto da cópia protegida e bloqueia perfil", async () => {
     calls = stubFetch({
       ...baseRoutes(),

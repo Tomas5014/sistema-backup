@@ -1,5 +1,11 @@
 # MAC IP Backup API — central de controle
 
+A ativação por código de laboratório usa a migração 11 e o contrato
+[activation v1](../docs/activation-code-v1.md). A habilitação explícita é
+`MACIP_API_LAB_ACTIVATION=1`, com `MACIP_API_ACTIVATION_PUBLIC_URL` e
+`MACIP_API_ACTIVATION_DELIVERY_URL` HTTPS. O executor A recebe sua
+identidade existente e entrega o segredo diretamente ao cliente.
+
 Primeira etapa: cadastro de clientes/agentes e recebimento autenticado
 de resultados de execução. **Pacote separado** — instalar o agente
 Linux não exige FastAPI, PostgreSQL nem nada daqui.

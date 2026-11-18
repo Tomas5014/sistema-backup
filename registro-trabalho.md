@@ -3767,3 +3767,37 @@ codificação CSV da opção Restic somente no executor B. A cópia real do
 roteiro com espaços cobre a regressão. O aplicativo Windows segue congelado.
 Os cliques, o disparo sem sessão e as restaurações na VM aguardam execução
 e evidência do operador.
+
+## Ativação por código em laboratório
+
+Branches separadas sobre as bases revisadas: central em `078efb8` e
+Windows em `7d62a80`. Contrato v1 documentado em
+`docs/activation-code-v1.md`, com o caminho alternativo por perfil.
+A migração expansiva 11 registra hash de código, solicitante, horários,
+identidades de ativação/dispositivo/chave, hash de retomada e estado.
+O resgate atômico possui expiração, revogação e limite de tentativas.
+
+A chave nasce no Windows. O executor HTTPS de A acrescenta sua parte
+pública, preserva a chave restrita de B e lê a senha original no cofre.
+A central autoriza a entrega com metadados e não recebe o segredo Restic.
+O registro da nova impressão digital invalida o vínculo anterior de B.
+Somente após nova prova o aplicativo recebe o segredo diretamente de A,
+valida SFTP/ID e segue para Pasta e horário. O salvamento da agenda
+mantém a transação e a confirmação nativa de conta existentes.
+
+Verificações executadas: suíte focal API/preparação/migração/transporte
+33 testes e 12 subtestes aprovados; portal 102 testes, typecheck e build
+aprovados. A integração real executou endpoints HTTPS com certificado
+temporário, PowerShell 7.4.6, OpenSSH e Restic 0.18.1, com nova prova de B
+por seccomp. CA desconhecida foi recusada. A chave privada permaneceu no
+cliente e a regra de leitura de B permaneceu íntegra. A tentativa retomou
+após falha e a senha ficou fora do banco e das respostas comuns.
+
+Windows no Linux: 16 verificações novas com rede/DPAPI/SFTP simulados,
+391 verificações GUI aprovadas e 1 prova COM ignorada; 150 verificações do
+agente aprovadas, com o grupo opcional de Restic/SSH registrador ignorado.
+A prova HTTPS/SFTP real foi executada separadamente. O painel renderizado
+foi inspecionado em desktop/celular com API fictícia. NSIS não disponível
+para compilar instalador nesta sessão. A referência 0.1.3 permanece
+preservada. Cliques na VM, DPAPI real, agendamento sem sessão e recuperação
+do ponto Windows somente por B seguem para aceite integrado da candidata.

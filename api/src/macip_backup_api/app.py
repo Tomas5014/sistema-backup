@@ -114,7 +114,7 @@ from .schemas import (
 _SECRET_KEY_RE = re.compile(
     r"password|passwd|senha|secret|token|cookie|authorization|"
     r"credential|private|api_?key|access_?key|secret_?key|identity|"
-    r"session|_key\b"
+    r"session|_key\b|activation_code|resume_secret"
 )
 # userinfo = tudo antes do último "@" no segmento autoridade — cobre
 # senhas com "@" embutido e espaços (URL malformada ainda é segredo)

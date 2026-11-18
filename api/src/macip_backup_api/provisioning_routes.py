@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 import re
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -188,6 +189,8 @@ def _preparation(db: Session, row: InstallationPreparation) -> dict:
         "repository_id": row.repository_id,
         "error_code": row.error_code,
         "profile_available": profile_available and _profile_is_current(row),
+        "activation_available": profile_available and _profile_is_current(row)
+            and os.environ.get("MACIP_API_LAB_ACTIVATION") == "1",
         "created_at": row.created_at.isoformat(),
         "updated_at": row.updated_at.isoformat(),
         "operation": _operation(operation),
@@ -247,6 +250,8 @@ def _validate_success(db: Session, operation: ProvisioningOperation, result: Suc
 
 
 def register_provisioning(app, require_admin_identity):
+    from .activation_routes import register_activation
+    register_activation(app, require_admin_identity, require_provisioner)
     register_protection(app, _get_preparation, _profile_is_current)
 
     @app.post(

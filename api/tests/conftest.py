@@ -66,6 +66,8 @@ def client():
         engine = db_module.engine()
         with engine.begin() as connection:
             for table in (
+                "activation_attempts",
+                "activation_codes",
                 "installation_preparations",
                 "provisioning_operations",
                 "task_confirmations",

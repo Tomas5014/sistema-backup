@@ -5,6 +5,9 @@ import { Link, useParams } from "react-router-dom";
 import {
   ApiError,
   downloadInstallationProfile,
+  issueActivationCode,
+  revokeActivationCode,
+  type ActivationCode,
   createAgent,
   listPreparations,
   prepareClientInstallation,
@@ -352,6 +355,8 @@ function PreparationStatus({
 }) {
   const [retrying, setRetrying] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  const [code, setCode] = useState<ActivationCode | null>(null);
+  const [issuing, setIssuing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const alive = useRef(true);
   useEffect(() => {
@@ -390,6 +395,33 @@ function PreparationStatus({
       if (alive.current) setError(err instanceof ApiError ? err.message : "Falha no download.");
     } finally {
       if (alive.current) setDownloading(false);
+    }
+  }
+
+  async function issueCode() {
+    if (issuing) return;
+    setIssuing(true);
+    setError(null);
+    try {
+      const value = await issueActivationCode(item.installation.id);
+      if (alive.current) setCode(value);
+    } catch (err) {
+      if (alive.current) setError(err instanceof ApiError ? err.message : "Falha ao gerar código.");
+    } finally {
+      if (alive.current) setIssuing(false);
+    }
+  }
+
+  async function revokeCode() {
+    if (!code || issuing) return;
+    setIssuing(true);
+    try {
+      await revokeActivationCode(code.id);
+      if (alive.current) setCode(null);
+    } catch (err) {
+      if (alive.current) setError(err instanceof ApiError ? err.message : "Falha ao revogar.");
+    } finally {
+      if (alive.current) setIssuing(false);
     }
   }
 
@@ -434,6 +466,11 @@ function PreparationStatus({
         <div><dt>Tentativa</dt><dd>{item.operation.attempt}</dd></div>
       </dl>
       <div className="form-actions">
+        {admin && item.activation_available && !code ? (
+          <button type="button" className="btn" disabled={issuing} onClick={() => void issueCode()}>
+            {issuing ? "Gerando…" : "Gerar código de ativação"}
+          </button>
+        ) : null}
         {admin && item.state === "failed" ? (
           <button type="button" className="btn" onClick={() => void retry()} disabled={retrying}>
             {retrying ? "Solicitando…" : "Tentar novamente"}
@@ -449,6 +486,18 @@ function PreparationStatus({
           {downloading ? "Baixando…" : "Baixar perfil"}
         </button>
       </div>
+      {code ? (
+        <div>
+          <label htmlFor={`activation-code-${item.installation.id}`}>Código de ativação</label>
+          <textarea id={`activation-code-${item.installation.id}`} readOnly value={code.activation_code}
+            onFocus={(ev) => ev.currentTarget.select()} />
+          <p>Uso único. Expira em {formatDate(code.expires_at)}. Entregue pelo canal privado do laboratório.</p>
+          <div className="form-actions">
+            <button type="button" className="btn" disabled={issuing} onClick={() => void revokeCode()}>Revogar código</button>
+            <button type="button" className="btn" onClick={() => setCode(null)}>Ocultar código</button>
+          </div>
+        </div>
+      ) : null}
       {error ? <p className="error-state" role="alert">{error}</p> : null}
     </article>
   );
