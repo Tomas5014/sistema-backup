@@ -1,5 +1,12 @@
 # MAC IP Backup API — central de controle
 
+Atualização/reversão controlada do laboratório: veja
+[roteiro](../docs/atualizacao-reversao-laboratorio.md) e
+[matriz compatível](../docs/lab-automation-pins.json). Esquema atual: **14**,
+contratos de ativação/resultados v1. O painel consulta versão/estado; somente
+o administrador local escolhe artefatos aprovados pelo helper. A API não
+aceita comandos, branches ou URLs de atualização do navegador.
+
 A ativação por código de laboratório usa a migração 11 e o contrato
 [activation v1](../docs/activation-code-v1.md). A habilitação explícita é
 `MACIP_API_LAB_ACTIVATION=1`, com `MACIP_API_ACTIVATION_PUBLIC_URL` e

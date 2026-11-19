@@ -761,3 +761,13 @@ export async function saveStoragePolicy(id: string, body: StoragePolicy): Promis
 export async function requestStorage(id: string, body: {id: string; side: "a" | "b"; action: "simulate" | "execute"; simulation?: string}): Promise<StorageOperation> {
   return (await (await apiFetch(`/api/v1/installations/${encodeURIComponent(id)}/storage/operations`, {method:"POST",body,csrf:true})).json()) as StorageOperation;
 }
+
+export interface LabVersion {
+  commit: string | null; schema: number | null; windows: string | null;
+  phase: "open" | "drain" | "freeze" | "reconcile";
+  state: string; step: string | null; error: string | null;
+  updated_at: string | null; needs_reconciliation: boolean; inventory_warning?: number;
+}
+export async function labVersion(): Promise<LabVersion> {
+  return (await (await apiFetch('/api/v1/lab/version')).json()) as LabVersion;
+}

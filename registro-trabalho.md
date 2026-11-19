@@ -4181,3 +4181,139 @@ disabled/inactive, permanece distinto destas provas e não foi alterado.
 **Retenção automática de produção não homologada**. Cofre/hosts definitivos,
 dimensionamento com volumes representativos, queda abrupta durante manutenção,
 prune operacional e aceite integrado na VM Windows continuam pendentes.
+
+## 2026-11-19 — atualização/reversão controladas do laboratório
+
+### Escopo e desenho
+
+Central na branch `feature/backup-update-rollback`, base
+`fd9a82adc295ec66a652a3d28dc69fe6842be11b` (retenção, esquema 14).
+Windows em worktree/branch separados, base
+`97de94ba563feeccb24fabea11d12abada67e247`; implementação
+`493a5651fb5bf19869a87c925c8f946bbad6d71b`, guia alinhado na revisão
+Windows fixada em `docs/lab-automation-pins.json`. Não houve merge das linhas.
+Candidata Windows 0.1.4-dev3-lab; API/portal continuam 0.1.0, contratos de
+ativação/resultados v1 e esquema PostgreSQL 14. Nenhuma migração SQL nova
+foi necessária. O manifesto externo do pacote contém seu próprio commit,
+sem tentar gravar o SHA final dentro do mesmo commit.
+
+Reaproveitados: supervisor/processos e identidades PID:starttime, filas
+PostgreSQL de provisionamento/recuperação, locks dos executores A/B,
+cofres/journals descartáveis, Restic/SFTP, reconciliação/cópia e prova B,
+autenticação e build do portal. Não há segundo provisionador nem comando
+remoto livre. O helper local aceita somente artefatos por hash aprovados;
+o navegador apenas consulta versão/estado autenticados. Mutações são
+bloqueadas por barreira HTTP durante manutenção; primeira adoção de código
+legado usa também barreira transacional, conferência dos bytes ativos e locks.
+
+`tools/package-lab-release.py` lê Git archive do commit selecionado, aplica
+os controles existentes contra material operacional e gera portal/manifestos
+interno e externo/checksum. Dependências/imagens não têm reprodução byte a
+byte comprovada. O instalador Windows permanece explicitamente ausente no
+manifesto, sem SHA-256 inventado. Release imutável separada, controlador
+aprovado fora da troca, pré-verificação, drenagem limitada, backup consistente
+pg_dump/restore e saúde precedem retomada/declaração de sucesso. PostgreSQL,
+A, B e Mailpit não são removidos na pausa de atualização. O `stop` definitivo
+do helper não é procedimento de atualização.
+
+Reversão compatível preserva escritas posteriores. Leitor incompatível é
+recusado, sem editar tabelas/migrações. Restore explícito verifica outro banco,
+preserva o banco posterior e estado em rescue, e bloqueia manutenção/perfil
+até inventário físico e nova prova B. SQL não recupera snapshots apagados:
+pontos históricos ausentes ficam auditados, visíveis e fora da recópia
+impossível, sem apagar o histórico. Restore de diretórios interrompido exige
+recuperação assistida; não é promessa de atomicidade diante de queda abrupta.
+
+Windows: payload de Git, manifesto aprovado, código separado de ProgramData,
+controlador/journal, tarefas consultadas por propriedade/ação efetivas,
+preservação de Enabled individual, configuração, DPAPI, chave, identidade
+e fila. Tarefa alheia/ativa, processo/arquivo em uso e leitor incompatível
+recusam a troca. Não há serviço novo, atualização silenciosa nem senha Windows
+na central. Guia: `agent/windows/UPDATE-ROLLBACK.md` da branch Windows.
+
+### Comandos e provas executados
+
+Ambiente observado: Python 3.14.4, Node 24.19.0, PostgreSQL 16.14,
+Restic 0.18.1, PowerShell portátil 7.4.6/Linux; requisitos mínimos de código
+continuam nos pyproject/package.json. Docker/socket local e Chrome reais;
+SFTP construído de `tests/sftp` em imagem exclusiva. Ver versões finais do
+ambiente junto ao relatório; não amplia compatibilidade para todo namespace.
+
+```text
+PYTHONPATH=src:api/src .venv-api/bin/python -m pytest \
+  api/tests/test_lab_updates.py api/tests/test_lab_updates_real.py -q --tb=short
+MACIP_TEST_LAB_UPDATE_REAL=1, MACIP_TEST_UPDATE_BROWSER=1
+MACIP_TEST_PROVISIONING_SFTP_IMAGE=macip-update-sftp-fixture
+MACIP_TEST_UPDATE_PG_IMAGE=<ID local conferido do PostgreSQL 16>
+DOCKER_HOST=unix:///var/run/docker.sock; DOCKER_CONTEXT ausente
+```
+
+Rodada integrada de fechamento: **7 aprovados, 0 falhas, 0 skips** (6 testes
+controlados e 1 cenário integrado longo). A prova usa PostgreSQL, TLS, supervisor,
+OpenSSH/A, Restic/B, dump/restore e Chrome reais. Dois clientes fictícios mantêm
+identidades, repositórios e históricos distintos. Inclui atualização, escrita
+posterior mantida no rollback, falha real de migração transacional, retomada,
+migração expansiva de fixture 15 com recusa do leitor 14, restore em outro banco,
+preservação do banco posterior, inventário e nova prova B. Browser 1200/390 px
+confere versão/estado e ausência de comandos de atualização; capturas
+inspecionadas, sem overflow horizontal. Produtor de resultados Windows é
+sintético. Pacotes candidatos intermediários usam rótulos sintéticos;
+pacote-base usa Git real, e o artefato final é produzido após o commit.
+
+```text
+cd api
+PYTHONPATH=src:../src ../.venv-api/bin/python -m pytest \
+  tests/test_lab_automation.py tests/test_lab_supervisor.py \
+  tests/test_migrations.py tests/test_storage_api.py tests/test_recovery.py \
+  tests/test_provisioning.py -q --tb=short
+```
+
+Com banco/imagem exclusivos: **53 aprovados, 0 falhas, 1 skip** (PowerShell
+não estava no PATH dessa rodada). O caso `test_windows_013_read_perfil_consumes_exported_json`
+foi repetido com `MACIP_TEST_POWERSHELL=/tmp/macip-update-pwsh/pwsh`:
+**1 aprovado**, SFTP real e consumidor 0.1.3 inalterado. Não substitui GUI/VM.
+
+Portal: `npm --prefix portal test -- --reporter=dot`: **115 aprovados**;
+`npm --prefix portal run typecheck` e `npm --prefix portal run build` aprovados.
+Fetch simulado nos testes React; Chrome real no cenário integrado. Ajuda da
+entrada pública, compileall, JSON e `git diff --check` conferidos.
+
+Windows: `run-update-tests.ps1` **24 verificações aprovadas**;
+`run-lab-automation-tests.ps1` **27**; `run-central-alerts-tests.ps1` **30**;
+`run-gui-tests.ps1` **393**, **1 COM real ignorado**;
+`run-windows-agent-tests.ps1` **150**, grupo opcional de registrador Restic/SSH
+ignorado. Filesystem/locks .NET reais; COM/DPAPI/processos Windows simulados.
+Gerador público de manifesto exercitado por commit com restic.exe sintético:
+só prova seleção/hashes/contrato, não build ou aprovação desse executável.
+
+Tentativas integradas iniciais falharam durante o desenvolvimento: Python fora
+da venv no empacotador, adoção com bytes de fixture divergentes e locks breves
+de medição/escrita HTTP. Corrigidos origem/venv e espera limitada sem forçar
+unlock. Teste de barreira ajustado para conferir 405 fora de manutenção e
+503 durante congelamento. Limpeza passou a tratar releases somente leitura.
+As tentativas falhas não são homologação nem novas provas independentes.
+Warnings existentes de Starlette e testes não equivalem a compatibilidade futura.
+
+### Limites e operação
+
+Runbook: `docs/atualizacao-reversao-laboratorio.md`, com pré-verificar,
+atualizar, conferir e recuperar. A matriz JSON substitui a referência obsoleta
+à migração 13. Instalação/assinatura/hash NSIS, Restic Windows aprovado,
+DPAPI/COM/ACL/UAC nativos, tarefa sem sessão, atualização na VM e recuperação
+do ponto Windows somente por B continuam **pendentes**. Cofre/hosts definitivos,
+monitoramento de destinatários reais e produção ficam fora deste laboratório.
+Nenhum acesso a srvdev1, LAN operacional, dados/credenciais reais, instalações
+globais ou timers antigos. Confirmação histórica do operador de timers
+**disabled/inactive** permanece separada e não foi alterada. Sem conclusão do
+MVP, deploy, merge ou tag. Arquivos preexistentes foram preservados fora dos commits.
+
+Fechamento real repetido após os ajustes: **7 aprovados em 234,22 s**,
+processo pytest com código **0**; repetição de gate, não 7 cenários adicionais.
+Limpeza por ID/marcador removeu **18 contêineres A e 9 Mailpit** parados das
+rodadas desta entrega, PostgreSQL exclusivo `macip-update-unit-pg`, tag
+`macip-update-sftp-fixture` e áreas remanescentes identificadas. Nenhum volume
+`macip-auto-*` permaneceu em /dev/shm. Contêiner preexistente preservado.
+Payload Windows sintético e PowerShell portátil são recursos auxiliares,
+removidos após os checks; não integram o artefato distribuível. Pacote final
+é mantido separado em dist, com manifesto externo e SHA-256, após o pin dos
+commits, sem substituir pacotes congelados anteriores.

@@ -174,3 +174,26 @@ def test_legacy_primary_terminal_hash_survives_additive_seed_field(client,monkey
     digest=hashlib.sha256(json.dumps(legacy,sort_keys=True,separators=(',',':')).encode()).hexdigest()
     with engine().begin() as db:db.execute(text('UPDATE provisioning_operations SET payload_hash=:hash WHERE id=:id'),dict(hash=digest,id=operation['id']))
     assert finish(client,operation,payload).status_code==200
+
+
+def test_reconciled_absent_snapshot_is_not_recreated_from_sql_history(client,automation,monkeypatch):
+    from macip_backup_api.auth import token_hash
+    from macip_backup_api.models import AgentCredential
+    from macip_backup_api.storage_routes import audit
+    monkeypatch.setenv('MACIP_API_LAB_ALERTS','1')
+    aid=initial(client);op=bclaim(client);binding=fake_proof(client,aid)
+    assert bfinish(client,op,state='succeeded',error_code=None).status_code==200
+    token=secrets.token_urlsafe(32)
+    with Session(engine()) as db:
+        db.add(AgentCredential(id=uuid.uuid4(),agent_id=uuid.UUID(aid),token_hash=token_hash(token),scope='windows-results'))
+        audit(db,uuid.UUID(aid),'restore-test','reconciled_absent',{'repository_id':'a'*64,'snapshots':['d'*64]});db.commit()
+    body=dict(execution_id=str(uuid.uuid4()),trigger='manual',started_at='2026-01-01T01:00:00Z',finished_at='2026-01-01T01:01:00Z',
+              status='success',result_code='ok',repository_id='a'*64,snapshot_id='d'*64)
+    assert client.post('https://testserver/api/v1/windows-results/executions',json=body,headers={'Authorization':'Bearer '+token}).status_code==200
+    assert bclaim(client) is None
+    with Session(engine()) as db:
+        assert db.scalar(text('SELECT count(*) FROM windows_results WHERE agent_id=:id'),dict(id=aid))==1
+        assert db.scalar(text('SELECT count(*) FROM protected_points WHERE agent_id=:id'),dict(id=aid))==1
+        # Outro inventário explícito pode reconhecer o reaparecimento do ponto.
+        audit(db,uuid.UUID(aid),'restore-test','reconciled_absent',{'repository_id':'a'*64,'snapshots':[]});db.commit()
+    assert bclaim(client)['work']['snapshots']==['d'*64]

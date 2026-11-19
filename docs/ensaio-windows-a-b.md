@@ -406,3 +406,29 @@ retorno normal comprovado, ausência de duplicatas após reenvio e a prova
 Windows/B das seções anteriores. Falha não explicada, envio ambíguo,
 agenda ainda não confirmada ou ausência da prova de B tornam o aceite
 pendente. Esta documentação não inicia nem aprova o piloto.
+
+
+## Atualização e reversão da candidata — novo gate integrado
+
+Use exclusivamente a dupla de commits em
+[lab-automation-pins.json](lab-automation-pins.json), esquema PostgreSQL 14 e
+o [roteiro de atualização do laboratório](atualizacao-reversao-laboratorio.md).
+Preserve a referência Windows 0.1.3; a candidata nova é 0.1.4-dev3-lab, ainda
+sem instalador compilado/homologado. Não misture os códigos das duas linhas.
+
+Na VM descartável, antes/depois da atualização registre identidade, referências
+das duas tarefas, pausa individual, configuração e UUIDs/conteúdo da fila.
+Faça a troca interativa com o manifesto aprovado; confira módulos instalados
+e configuração efetiva. Confirme que DPAPI/chave continuam na conta executora,
+a fila pendente é enviada sem novo backup e tarefa pausada não reativa.
+Exercite recusa de tarefa alheia/ativa, cancelamento, arquivo em uso e leitor
+incompatível; use retorno guiado, sem editar JSON, banco ou tarefas à mão.
+Se for necessária nova autenticação Windows, somente confirmação nativa.
+
+Na Central, confirme duas instalações/identidades/históricos distintos, backup
+restaurável e saúde; reversão compatível deve manter a escrita posterior.
+Uma restauração SQL exige inventário físico e nova prova B antes da manutenção:
+snapshots apagados por retenção não voltam pelo dump. Preserve o banco posterior
+para reconciliação explícita. Complete também backup sem sessão, restauração
+Windows e recuperação do ponto exato somente por B. Testes Linux de filesystem,
+PowerShell e COM/DPAPI simulados não substituem esses cliques/provas na VM.

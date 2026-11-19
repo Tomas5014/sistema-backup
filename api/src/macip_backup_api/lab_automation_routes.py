@@ -79,9 +79,11 @@ def enqueue(db, preparation, *, force=False):
     else:
         copied = {r[0] for r in db.execute(text('SELECT snapshot_a FROM protected_points WHERE agent_id=:id AND binding_id=:binding'),
                   dict(id=preparation.agent_id, binding=binding['binding_id']))}
+        reconciled=db.execute(text("SELECT detail->'snapshots' FROM lab_storage_audit WHERE agent_id=:id AND kind='reconciled_absent' AND detail->>'repository_id'=:repo ORDER BY created_at DESC LIMIT 1"),dict(id=preparation.agent_id,repo=preparation.repository_id)).first()
+        absent=set(reconciled[0]) if reconciled else set()
         snapshots = sorted({r[0] for r in db.execute(text("SELECT payload->>'snapshot_id' FROM windows_results WHERE agent_id=:id "
              "AND payload->>'repository_id'=:repo AND payload->>'snapshot_id' IS NOT NULL"),
-             dict(id=preparation.agent_id, repo=preparation.repository_id))} - copied)
+             dict(id=preparation.agent_id, repo=preparation.repository_id))} - copied - absent)
         if not snapshots:
             return
         kind = 'copy_points'

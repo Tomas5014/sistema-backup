@@ -50,9 +50,20 @@ def base_environment():
 def child(root,role):
     cfg=json.loads(_private_file(root/'private/services'/f'{role}.json'))
     env=base_environment()
+    selected_source=None
+    pointer=root/'updates/active.json'
+    if pointer.exists():
+        from .lab_updates import selected
+        active=json.loads(_private_file(pointer));release,_=selected(root,active['id'])
+        selected_source=release/'source'
+        env['PYTHONPATH']=str(selected_source/'api/src')
+        env['PYTHONDONTWRITEBYTECODE']='1'
     if cfg.get('ca'):env['SSL_CERT_FILE']=cfg['ca']
-    if role in ('central','activation'):
-        helper=Path(__file__).resolve().parents[3]/'tools/windows-lab-server.py'
+    if role=='central' and selected_source:
+        guardian=Path(__file__).resolve().parents[3]/'tools/lab_guard.py'
+        args=[sys.executable,str(guardian),str(root),str(selected_source)]
+    elif role in ('central','activation'):
+        helper=(selected_source or Path(__file__).resolve().parents[3])/'tools/windows-lab-server.py'
         args=[sys.executable,str(helper),'activation-api' if role=='central' else 'activation-a',str(root),
               '--certificate',cfg['certificate'],'--key',cfg['key'],'--ca',cfg['ca']]
         if role=='activation':args+=['--delivery-port',str(cfg['port'])]
@@ -135,7 +146,10 @@ def serve(root):
     atomic_json(state/'processes.json',record)
     try:
         while not stop.is_set():
+            pause=root/'updates/paused.json'
+            paused=json.loads(_private_file(pause))['roles'] if pause.exists() else []
             for role in ROLES:
+                if role in paused:continue
                 proc,token=children.get(role,(None,None))
                 if proc and proc.poll() is None:continue
                 if proc:
@@ -225,8 +239,15 @@ def control(root,action,role=None):
         os.close(fd)
         log=os.open(state/'supervisor.log',os.O_CREAT|os.O_APPEND|os.O_WRONLY|os.O_NOFOLLOW,0o600)
         try:
+            environment=base_environment()
+            controller=root/'updates/controller.json'
+            if controller.exists():
+                from .lab_updates import selected
+                entry=json.loads(_private_file(controller));release,_=selected(root,entry['id'])
+                environment['PYTHONPATH']=str(release/'source/api/src')
+                environment['PYTHONDONTWRITEBYTECODE']='1'
             proc=subprocess.Popen([sys.executable,'-m','macip_backup_api.lab_supervisor','serve',str(root)],
-                   env=base_environment(),stdin=subprocess.DEVNULL,stdout=log,stderr=log,start_new_session=True,cwd=root)
+                   env=environment,stdin=subprocess.DEVNULL,stdout=log,stderr=log,start_new_session=True,cwd=root)
         finally:os.close(log)
         for _ in range(100):
             if proc.poll() is not None:raise RuntimeError('supervisor não iniciou; confira log privado')

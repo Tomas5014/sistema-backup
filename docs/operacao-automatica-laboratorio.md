@@ -245,34 +245,17 @@ Não remove fila, DPAPI, configurações, repositórios ou recuperações.
 
 ## Gerar e aceitar o instalador candidato
 
-A candidata proposta é **0.1.4-dev2-lab**. Use o commit Windows fixado no
-arquivo de compatibilidade. NSIS e `restic.exe` Windows **aprovado pela
-MAC IP** são requisitos de build. O Restic Linux usado nos testes não é
-payload elegível. Não substitua nem sobrescreva o instalador 0.1.3.
+A referência anterior de automação é **0.1.4-dev2-lab**. A candidata de
+atualização/reversão é **0.1.4-dev3-lab**, com esquema PostgreSQL **14**,
+fixada em [lab-automation-pins.json](lab-automation-pins.json). Preserve o
+instalador 0.1.3. Não compile a nova candidata usando o comando NSIS antigo:
+o payload agora deve vir do commit exato, com manifesto/hash aprovados.
 
-No Windows de build, após checkout do commit e obtenção do payload por
-canal aprovado:
-
-```powershell
-$ErrorActionPreference='Stop'
-git rev-parse HEAD
-$TrackedChanges=git status --porcelain --untracked-files=no
-if($LASTEXITCODE -ne 0 -or $TrackedChanges){throw 'Checkout versionado alterado'}
-Set-Location agent\windows\installer
-$ApprovedSha256=Read-Host 'SHA-256 aprovado do restic.exe Windows'
-if($ApprovedSha256 -cnotmatch '^[0-9a-fA-F]{64}$'){throw 'Hash aprovado invalido'}
-$Actual=(Get-FileHash -LiteralPath .\payload\restic.exe -Algorithm SHA256).Hash
-if($Actual -ine $ApprovedSha256){throw 'Payload diverge do aprovado'}
-if(-not(Get-Command makensis -ErrorAction SilentlyContinue)){throw 'NSIS ausente'}
-makensis /DVERSAO=0.1.4-dev2-lab macip-backup.nsi
-if($LASTEXITCODE -ne 0){throw 'Build NSIS falhou'}
-Get-FileHash -LiteralPath .\MacipBackupSetup-0.1.4-dev2-lab.exe -Algorithm SHA256
-```
-
-Registre SHA Git, versão/ID do Restic aprovado, comando, hash do instalador
-e política de assinatura aplicada. Sem esses insumos, o build é
-**pendente**, não instalador homologado. Depois do build, congele também
-os artefatos antes da VM; correções bloqueadoras exigem nova candidata.
+Siga [atualizacao-reversao-laboratorio.md](atualizacao-reversao-laboratorio.md)
+para Central e `agent/windows/UPDATE-ROLLBACK.md` na branch Windows fixada
+para payload/NSIS e retorno. Sem NSIS e Restic Windows aprovado, o build
+continua pendente, sem SHA-256 de instalador. Não use o comando `stop` do
+helper como pausa para atualização: ele remove o PostgreSQL efêmero.
 
 ## Evidências e gates
 

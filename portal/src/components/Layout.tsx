@@ -9,6 +9,7 @@ import {
   useLocation,
 } from "react-router-dom";
 import { useAuth } from "../auth";
+import { LabVersion } from "./LabVersion";
 import { Loading } from "./common";
 
 export function Layout() {
@@ -88,6 +89,7 @@ export function Layout() {
           {logoutError} — a sessão pode continuar ativa no servidor.
         </p>
       ) : null}
+      <LabVersion />
       <Outlet />
     </div>
   );
