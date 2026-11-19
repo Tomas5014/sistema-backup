@@ -1,5 +1,9 @@
 # Agente de backup Windows — MAC IP (piloto)
 
+Candidata atual: [Operação automática do laboratório](LAB-AUTOMATION.md).
+Configuração e envio periódico são feitos pelo aplicativo. A referência
+0.1.3 continua preservada; build e aceite na VM permanecem pendentes.
+
 Primeira versão reutilizável: **um mesmo script** para qualquer cliente.
 Tudo que muda de um cliente para outro está no `backup.json`, preenchido
 pela MAC IP. Compatível com **Windows PowerShell 5.1**, Restic e OpenSSH

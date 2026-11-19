@@ -1,5 +1,9 @@
 # Ativação por código · candidata de laboratório
 
+Para a candidata atual, siga [Automação do laboratório](LAB-AUTOMATION.md).
+B verifica automaticamente a chave nova, e a GUI registra o envio periódico.
+As instruções manuais abaixo permanecem como referência da etapa anterior.
+
 Esta branch parte de `7d62a800325146d1357f8832b1df5c4c3b2eff8d`.
 Preserve o instalador Windows 0.1.3 como referência. Para gerar outra
 candidata, use uma versão distinta no NSIS, por exemplo 0.1.4-dev1, e

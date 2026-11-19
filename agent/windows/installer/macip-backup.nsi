@@ -14,7 +14,7 @@
 ; mesmo quando outro administrador autorizou a instalacao.
 
 !ifndef VERSAO
-  !define VERSAO "0.1.0"
+  !define VERSAO "0.1.4-dev2-lab"
 !endif
 !define NOME "MAC IP Backup"
 !define PASTA "$PROGRAMFILES64\MACIP-Backup"
@@ -68,6 +68,7 @@ Section "Instalar"
   File "..\Central-Alerts.ps1"
   File "..\gui\MacipBackup-Gui.ps1"
   File "..\gui\Activation-Code.ps1"
+  File "..\gui\Monitoring-Task.ps1"
   File "..\gui\perfil.example.json"
   File "Desinstalar-Tarefa.ps1"      ; verificacao estruturada da tarefa no uninstall
   File "payload\restic.exe"          ; binario aprovado pela MAC IP (nao versionado)
@@ -136,6 +137,14 @@ Section "Uninstall"
   Goto fim_uninstall
 
 remover_arquivos:
+  nsExec::ExecToStack '"$WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\Desinstalar-Tarefa.ps1" -PrefixoAcao "$INSTDIR" -Nome "MACIP-Backup-Sync" -DescricaoEsperada "MACIP Backup - envio central do piloto" -Monitoramento'
+  Pop $0
+  Pop $1
+  ${If} $0 != 0
+  ${AndIf} $0 != 2
+    MessageBox MB_ICONEXCLAMATION|MB_OK "A tarefa de envio nao foi confirmada como propria e parada. Arquivos preservados. $1"
+    Goto fim_uninstall
+  ${EndIf}
   Delete "$SMPROGRAMS\MAC IP Backup\MAC IP Backup.lnk"
   RMDir "$SMPROGRAMS\MAC IP Backup"
   ; somente os arquivos instalados pelo pacote, por nome -- nada de curinga
@@ -143,6 +152,7 @@ remover_arquivos:
   Delete "$INSTDIR\Central-Alerts.ps1"
   Delete "$INSTDIR\MacipBackup-Gui.ps1"
   Delete "$INSTDIR\Activation-Code.ps1"
+  Delete "$INSTDIR\Monitoring-Task.ps1"
   Delete "$INSTDIR\Desinstalar-Tarefa.ps1"
   Delete "$INSTDIR\perfil.example.json"
   Delete "$INSTDIR\instalar-como-conta.txt"

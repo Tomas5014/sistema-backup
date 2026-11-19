@@ -70,6 +70,7 @@ try {
 
 $activationModule = Join-Path $PSScriptRoot 'Activation-Code.ps1'
 . $activationModule
+. (Join-Path $PSScriptRoot 'Monitoring-Task.ps1')
 
 function Read-GuiMeta {
     if (Test-Path -LiteralPath $script:GuiMeta -PathType Leaf) {
@@ -174,10 +175,11 @@ function New-BackendCom {
         }
     }
     $b | Add-Member ScriptMethod Get {
+        param([string]$Name=$script:TaskName)
         $this.Conectar()
         # NAO engole erro aqui: Get-TarefaInfo decide se a falha e ausencia
         # confirmada ou consulta inconclusiva (acesso negado etc).
-        return $this.svc.GetFolder('\').GetTask($script:TaskName)
+        return $this.svc.GetFolder('\').GetTask($Name)
     }
     $b | Add-Member ScriptMethod NewDef {
         param($TarefaExistente)
@@ -189,19 +191,19 @@ function New-BackendCom {
         # $Flag: TASK_CREATE (2) = so se nao existir (falha se uma homonima
         # aparecer entre a consulta e aqui -- NUNCA sobrescreve a estranha);
         # TASK_UPDATE (4) = so se existir. Sem CREATE_OR_UPDATE cego.
-        param($Def, $Conta, $SenhaConta, [int]$Flag)
+        param($Def, $Conta, $SenhaConta, [int]$Flag, [string]$Name=$script:TaskName)
         $this.Conectar()
         $this.svc.GetFolder('\').RegisterTaskDefinition(
-            $script:TaskName, $Def, $Flag, $Conta, $SenhaConta, $script:LogonPassword, $null) | Out-Null
+            $Name, $Def, $Flag, $Conta, $SenhaConta, $script:LogonPassword, $null) | Out-Null
     }
     $b | Add-Member ScriptMethod RegistrarXml {
         # Rollback com TASK_UPDATE: repoe a definicao anterior exatamente
         # como estava (XML serializado ANTES de qualquer alteracao); falha
         # se a tarefa sumiu entre a tentativa e a reposicao.
-        param([string]$Xml, $Conta, $SenhaConta)
+        param([string]$Xml, $Conta, $SenhaConta, [string]$Name=$script:TaskName)
         $this.Conectar()
         $this.svc.GetFolder('\').RegisterTask(
-            $script:TaskName, $Xml, $script:TaskUpdate, $Conta, $SenhaConta, $script:LogonPassword, $null) | Out-Null
+            $Name, $Xml, $script:TaskUpdate, $Conta, $SenhaConta, $script:LogonPassword, $null) | Out-Null
     }
     $b | Add-Member ScriptMethod XmlAtual {
         try { $t = $this.Get() } catch { return $null }   # sem tarefa -> sem XML
@@ -211,6 +213,7 @@ function New-BackendCom {
 }
 
 function Get-TarefaInfo {
+    param($Backend=$null,[string]$Name=$script:TaskName)
     # Consulta estruturada a tarefa do app. Status:
     #   encontrada  -> objeto em .Tarefa
     #   ausente     -> ausencia CONFIRMADA (o proprio GetTask devolveu o
@@ -218,13 +221,13 @@ function Get-TarefaInfo {
     #   erro        -> inconclusivo (falha de conexao, pasta, acesso...)
     # NADA de texto de excecao nem retorno vazio como prova de ausencia:
     # so o codigo especifico do GetTask classifica 'ausente'.
-    $b = Get-Backend
+    $b = if($Backend){$Backend}else{Get-Backend}
     try { $b.Conectar() } catch {
         return [pscustomobject]@{ Tarefa = $null; Status = 'erro'
             Erro = "servico/pasta do Agendador indisponivel: $($_.Exception.Message)" }
     }
     try {
-        $t = $b.Get()
+        $t = $b.Get($Name)
     } catch {
         # O PowerShell empacota a excecao COM (MethodInvocation) -- procura
         # o HRESULT na cadeia interna inteira.
@@ -1527,6 +1530,7 @@ function Test-ConjuntoEmUso {
     # $true = o Agendador referencia este conjunto (config/estado nos
     # argumentos) ou NAO foi possivel confirmar -- inclusive execucao ativa.
     param($Built)
+    if (Test-MonitorUsesConfiguration $Built.Config) { return $true }
     try {
         $info = Get-TarefaInfo
         if ($info.Status -eq 'erro') { return $true }    # consulta inconclusiva = preserva
@@ -1574,6 +1578,8 @@ function Publish-Configuracao {
     param($Built, [string]$Conta, [string]$SenhaConta)
     $Built.Publicado = $true
     $xmlAnterior = $null
+    # Recusa colisao de sincronizacao ANTES de tocar a tarefa de backup.
+    $monitorPrevious = Get-MonitorTaskPreflight $Built.Config
     try {
         $xmlAnterior = Register-TarefaMacip -Horario $Built.Horario -Conta $Conta `
             -SenhaConta $SenhaConta -Config $Built.Config -Estado $Built.Estado
@@ -1582,6 +1588,7 @@ function Publish-Configuracao {
         throw ($_.Exception.Message + $(if ($aviso) { " $aviso" } else { '' }))
     }
     try {
+        Register-MonitorTask $Built.Config $Conta $SenhaConta $monitorPrevious
         $meta = Read-GuiMeta
         $meta.estado_atual = $Built.Estado
         $meta.config_atual = $Built.Config
@@ -1598,6 +1605,7 @@ function Publish-Configuracao {
         # e a do app e aponta para o conjunto publicado POR ESTA tentativa
         # (outra definicao = alguem mexeu no meio -> inconclusivo, preserva).
         $reposto = $false
+        try { Restore-MonitorTask $monitorPrevious $Built.Config $Conta $SenhaConta } catch { }
         if ($xmlAnterior) {
             try {
                 $info2 = Get-TarefaInfo
@@ -2112,13 +2120,13 @@ function Show-Gui {
         $btCodigo.Enabled = $false; $btValidar.Enabled = $false; $btSalvar.Enabled = $false
         foreach ($c in $entradasAtv) { $c.Enabled = $false }
         $tbCodigo.Enabled = $false
-        $lblAtv.Text = 'Consultando ativação…'
+        $lblAtv.Text = 'Registrando a chave e aguardando a verificação automática de B (até 2 minutos). A mesma tentativa pode ser retomada.'
         try {
-            $activation = Invoke-Assincrono -Funcao 'Invoke-CodeActivation' -Form $form -PrazoMs 150000 -Params @{
+            $activation = Invoke-Assincrono -Funcao 'Invoke-CodeActivation' -Form $form -PrazoMs 300000 -Params @{
                 Code = $tbCodigo.Text.Trim(); Directory = (Join-Path $script:BaseDir 'activation-code')
             }
             if ($activation.State -eq 'pending') {
-                $lblAtv.Text = 'Chave registrada. Preparação pendente: aguarde nova prova de B e clique novamente com o mesmo código.'
+                $lblAtv.Text = if ($activation.Reason -eq 'connection') { 'Conexão interrompida. Retome com o mesmo código; sua chave foi preservada.' } else { 'Verificação automática ainda pendente. Confira o progresso no painel e retome com o mesmo código; não é necessário novo cadastro.' }
                 $lblAtv.ForeColor = 'DarkBlue'
             } else {
                 $script:perfilAtual = $activation.Profile
@@ -2438,7 +2446,8 @@ function Show-Gui {
             $info = $null; $infoErro = $null
             try { $info = Get-InfoTarefa } catch { $infoErro = $_.Exception.Message }
             $cfgPath = Get-ConfigAtual
-            $lblMonitor.Text = if ($cfgPath -and (Read-Monitor $cfgPath)) { 'Monitoramento central vinculado — confira fila, envio e prazos no painel.' } else { 'Monitoramento não configurado' }
+            $monitorStatus=if($cfgPath){Get-MonitorStatus $cfgPath}else{$null}
+            $lblMonitor.Text = if(-not $monitorStatus -or $monitorStatus.state -eq 'unconfigured'){'Monitoramento não configurado'} elseif($monitorStatus.state -eq 'synchronized'){'Monitoramento sincronizado · último envio: '+(Format-DataBR $monitorStatus.last_success)} else {'Envio pendente · '+$monitorStatus.pending+' mensagem(ns). A tarefa de sincronização tentará novamente.'}
             $origem = ''
             if ($cfgPath -and (Test-Path -LiteralPath $cfgPath -PathType Leaf)) {
                 try { $origem = [string](Read-AgenteConfig -Caminho $cfgPath).origem } catch { }

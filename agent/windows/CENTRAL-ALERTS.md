@@ -1,5 +1,9 @@
 # Monitoramento central Windows · Laboratório v1
 
+Para a candidata atual, siga [Automação do laboratório](LAB-AUTOMATION.md).
+B verifica automaticamente a chave nova, e a GUI registra o envio periódico.
+As instruções manuais abaixo permanecem como referência da etapa anterior.
+
 A branch `feature/windows-backup-central-alerts` parte da ativação
 `1a00be647d55109c31dd503ad4826cf738aabbc7`. Use a central
 `feature/backup-central-alerts`, migração 12, com

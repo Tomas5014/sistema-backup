@@ -38,6 +38,7 @@ try {
             if ($script:loseResponse) { $script:loseResponse = $false; throw 'resposta perdida' }
             return [pscustomobject]@{ contract_version=1; activation_id=$Body.activation_id; delivery_url='https://a.lab/v1/activate' }
         }
+        if ($script:pendingDeliveries -gt 0) { $script:pendingDeliveries--; return [pscustomobject]@{state='awaiting_protection'} }
         if (-not $script:ready) { return [pscustomobject]@{ state='awaiting_protection' } }
         return [pscustomobject]@{ contract_version=1; state='ready'; restic_password='sintetica-123'; profile=[ordered]@{
             nome='Cliente ficticio'; repositorio='sftp://conta@a.lab//repository'; repositorio_id=('a'*64)
@@ -46,21 +47,25 @@ try {
     }
     $code = 'https://central.lab#macip-activation=' + ('a'*43)
     $directory = Join-Path $root 'attempt'
-    try { Invoke-CodeActivation -Code $code -Directory $directory; throw 'nao recusou perda' }
+    try { Invoke-CodeActivation -Code $code -Directory $directory -WaitSeconds 0; throw 'nao recusou perda' }
     catch { Assert ($_.Exception.Message -eq 'resposta perdida') 'perda de resposta propagada' }
     $keyHash = (Get-FileHash -LiteralPath (Join-Path $directory 'id_ed25519')).Hash
-    $pending = Invoke-CodeActivation -Code $code -Directory $directory
+    $pending = Invoke-CodeActivation -Code $code -Directory $directory -WaitSeconds 0
     Assert ($pending.State -eq 'pending') 'B pendente nao libera'
     Assert ($script:validated -eq 0) 'nao valida antes de B'
     Assert ($script:requests[0].activation_id -eq $script:requests[1].activation_id) 'retomada mantem operacao'
     Assert ($script:requests[0].public_key -eq $script:requests[1].public_key) 'retomada mantem chave'
     Assert (-not ($script:requests[0].Keys -contains 'private_key')) 'chave privada nao enviada'
     $script:ready = $true
-    $completed = Invoke-CodeActivation -Code $code -Directory $directory
+    $completed = Invoke-CodeActivation -Code $code -Directory $directory -WaitSeconds 0
     Assert ($completed.State -eq 'ready') 'codigo pronto libera'
     Assert ($script:validated -eq 1) 'SFTP e ID exigidos antes de avancar'
     Assert ((Get-FileHash -LiteralPath (Join-Path $directory 'id_ed25519')).Hash -eq $keyHash) 'chave original preservada'
     Assert ([IO.File]::ReadAllText($active) -ceq '{"config_atual":"conjunto-anterior"}') 'configuracao ativa preservada'
+    $script:pendingDeliveries=2
+    $automatic=Invoke-CodeActivation -Code $code -Directory $directory -WaitSeconds 4 -PollSeconds 1
+    Assert ($automatic.State -eq 'ready' -and $script:pendingDeliveries -eq 0) 'aguarda automaticamente B sem nova chave ou cadastro'
+    Assert ((Get-FileHash (Join-Path $directory 'id_ed25519')).Hash -eq $keyHash) 'polling preserva a chave original'
     $before = $script:requests.Count
     try { Invoke-CodeActivation -Code ($code.Replace('aaa','bbb')) -Directory $directory; throw 'aceitou codigo trocado' }
     catch { Assert ($_.Exception.Message -like 'Outra ativacao*') 'codigo diferente recusado' }

@@ -65,7 +65,7 @@ function New-ActivationAttempt {
 }
 
 function Invoke-CodeActivation {
-    param([string]$Code, [string]$Directory)
+    param([string]$Code, [string]$Directory, [ValidateRange(0,120)][int]$WaitSeconds=90, [ValidateRange(1,10)][int]$PollSeconds=3)
     $uri = $null
     if (-not [Uri]::TryCreate($Code, [UriKind]::Absolute, [ref]$uri) -or
         $uri.Scheme -cne 'https' -or $uri.UserInfo -or $uri.Query -or
@@ -96,12 +96,25 @@ function Invoke-CodeActivation {
     if ($redeemed.contract_version -ne 1 -or $redeemed.activation_id -cne $attempt.activation_id) {
         throw 'Contrato ou identidade de ativacao divergente.'
     }
-    $delivery = Invoke-ActivationHttp $redeemed.delivery_url @{
-        activation_id = $attempt.activation_id; resume_secret = $secret
-    }
-    if ($delivery.state -eq 'awaiting_protection') {
-        return [pscustomobject]@{ State = 'pending' }
-    }
+    $wait=[Diagnostics.Stopwatch]::StartNew()
+    do {
+        try {
+            $delivery = Invoke-ActivationHttp $redeemed.delivery_url @{
+                activation_id = $attempt.activation_id; resume_secret = $secret
+            }
+        } catch {
+            # A tentativa e a chave ficam duraveis; nenhuma configuracao ativa e substituida.
+            if ($_.Exception.Message -like 'Falha de conexao*') {
+                return [pscustomobject]@{ State='pending'; Reason='connection' }
+            }
+            throw
+        }
+        if ($delivery.state -ne 'awaiting_protection') { break }
+        if ($wait.Elapsed.TotalSeconds -ge $WaitSeconds) {
+            return [pscustomobject]@{ State='pending'; Reason='preparation' }
+        }
+        Start-Sleep -Milliseconds ([int][Math]::Min($PollSeconds*1000, [Math]::Max(1,($WaitSeconds-$wait.Elapsed.TotalSeconds)*1000)))
+    } while ($true)
     if ($delivery.state -cne 'ready' -or $delivery.contract_version -ne 1 -or -not $delivery.restic_password) {
         throw 'Resposta de ativacao incompativel.'
     }

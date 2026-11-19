@@ -1,7 +1,7 @@
 #requires -Version 5.1
 # Telemetria Windows v1. Credencial DPAPI separada do perfil e da senha Restic.
 function Invoke-MonitorHttp {
-    param($Monitor, [string]$Path, $Body)
+    param($Monitor, [string]$Path, $Body, [ValidateRange(1,10)][int]$TimeoutSeconds=10)
     $uri = [Uri]$Monitor.central
     if ($uri.Scheme -cne 'https' -or $uri.UserInfo -or $uri.Query -or $uri.Fragment -or
         $uri.AbsolutePath -ne '/') { throw 'Central autorizada deve ser origem HTTPS.' }
@@ -11,7 +11,7 @@ function Invoke-MonitorHttp {
     finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }
     Add-Type -AssemblyName System.Net.Http
     $handler = [Net.Http.HttpClientHandler]::new(); $handler.AllowAutoRedirect = $false
-    $http = [Net.Http.HttpClient]::new($handler); $http.Timeout = [TimeSpan]::FromSeconds(10)
+    $http = [Net.Http.HttpClient]::new($handler); $http.Timeout = [TimeSpan]::FromSeconds($TimeoutSeconds)
     try {
         $http.DefaultRequestHeaders.Authorization = [Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer', $token)
         $content = [Net.Http.StringContent]::new(($Body | ConvertTo-Json -Depth 6 -Compress), [Text.Encoding]::UTF8, 'application/json')
@@ -80,15 +80,33 @@ function Set-MonitorSchedule {
     } finally { $lock.Dispose() }
 }
 
-function Sync-MonitorQueue {
+function Get-MonitorStatus {
     param([string]$Config)
+    $monitor=Read-Monitor $Config
+    if (-not $monitor) { return [pscustomobject]@{state='unconfigured';pending=0;last_success=$null} }
+    $pending=@(Get-ChildItem -LiteralPath $monitor.queue -File | Where-Object { $_.Name -match '^event-.*\.(json|running)$' -or $_.Name -match '^schedule-[0-9]{8}\.json$' }).Count
+    $path=Join-Path $monitor.queue 'monitor-status.json'
+    $last=$null
+    if (Test-Path -LiteralPath $path) { try { $last=Get-Content -LiteralPath $path -Raw | ConvertFrom-Json } catch { } }
+    return [pscustomobject]@{state=$(if ($pending -gt 0) {'pending'} elseif ($last -and $last.state -eq 'synchronized') {'synchronized'} else {'pending'});pending=$pending;last_success=$(if($last){$last.last_success}else{$null})}
+}
+
+function Sync-MonitorQueue {
+    param([string]$Config, [ValidateRange(1,50)][int]$MaxMessages=20, [ValidateRange(1,60)][int]$MaxSeconds=45)
     $monitor = Read-Monitor $Config
     if (-not $monitor) { return 'Monitoramento nao configurado' }
-    $lock = [IO.File]::Open((Join-Path $monitor.queue 'queue.lock'), 'OpenOrCreate', 'ReadWrite', 'None')
+    try { $lock = [IO.File]::Open((Join-Path $monitor.queue 'sync.lock'), 'OpenOrCreate', 'ReadWrite', 'None') }
+    catch [IO.IOException] { return 'Envio ja em andamento' }
+    $clock=[Diagnostics.Stopwatch]::StartNew(); $sent=0
+    $status=Get-MonitorStatus $Config
+    $success=$status.last_success
     try {
         $messages = @(Get-ChildItem -LiteralPath $monitor.queue -Filter 'schedule-*.json' | Where-Object Name -cmatch '^schedule-[0-9]{8}\.json$' | Sort-Object Name)
         foreach ($message in $messages) {
-            Invoke-MonitorHttp $monitor 'schedule' (Get-Content -LiteralPath $message.FullName -Raw | ConvertFrom-Json)
+            if ($sent -ge $MaxMessages -or $clock.Elapsed.TotalSeconds -ge $MaxSeconds) { return 'Envio pendente; limite da tentativa atingido' }
+            $timeout=[int][Math]::Max(1,[Math]::Min(10,[Math]::Ceiling($MaxSeconds-$clock.Elapsed.TotalSeconds)))
+            Invoke-MonitorHttp $monitor 'schedule' (Get-Content -LiteralPath $message.FullName -Raw | ConvertFrom-Json) -TimeoutSeconds $timeout
+            $sent++
             Remove-Item -LiteralPath $message.FullName
         }
         # Abandono confirmado por lock de execucao livre, nunca apenas por idade/PID.
@@ -109,12 +127,25 @@ function Sync-MonitorQueue {
         }
         $events = @(Get-ChildItem -LiteralPath $monitor.queue -Filter 'event-*.json' | Sort-Object Name | Select-Object -First 50)
         foreach ($event in $events) {
+            if ($sent -ge $MaxMessages -or $clock.Elapsed.TotalSeconds -ge $MaxSeconds) { return 'Envio pendente; limite da tentativa atingido' }
             # Resultados em andamento usam .running; somente terminais entram aqui.
-            Invoke-MonitorHttp $monitor 'executions' (Get-Content -LiteralPath $event.FullName -Raw | ConvertFrom-Json)
+            $timeout=[int][Math]::Max(1,[Math]::Min(10,[Math]::Ceiling($MaxSeconds-$clock.Elapsed.TotalSeconds)))
+            Invoke-MonitorHttp $monitor 'executions' (Get-Content -LiteralPath $event.FullName -Raw | ConvertFrom-Json) -TimeoutSeconds $timeout
+            $sent++
             Remove-Item -LiteralPath $event.FullName
         }
-        return 'Monitoramento sincronizado'
-    } finally { $lock.Dispose() }
+        $status=Get-MonitorStatus $Config
+        if ($status.pending -eq 0 -and $sent -gt 0) { $success=[DateTime]::UtcNow.ToString('o') }
+        return $(if($status.pending -eq 0){'Monitoramento sincronizado'}else{'Envio pendente'})
+    } finally {
+        try {
+            $status=Get-MonitorStatus $Config
+            Write-MonitorJson (Join-Path $monitor.queue 'monitor-status.json') @{
+                state=$(if($status.pending -eq 0 -and $success){'synchronized'}else{'pending'})
+                last_attempt=[DateTime]::UtcNow.ToString('o');last_success=$success;pending=$status.pending
+            }
+        } finally { $lock.Dispose() }
+    }
 }
 
 function Start-MonitorResult {

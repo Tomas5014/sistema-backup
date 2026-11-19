@@ -17,6 +17,7 @@ param(
     [string]$PsExeEsperado = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe',
     [string]$PrefixoAcao = '',          # $INSTDIR -- a acao precisa apontar p/ a instalacao
     $Svc = $null,                       # injetavel em teste; $null cria o COM real
+    [switch]$Monitoramento,
     [switch]$SomenteVerificar           # sem -SomenteVerificar age (desabilita/encerra)
 )
 $ErrorActionPreference = 'Stop'
@@ -68,6 +69,7 @@ function Get-PadraoAcaoApp {
     # -File capturado: ele e o PRIMEIRO parametro efetivo; nada antes nem
     # depois. -File citado dentro de -Command ou tokens extras nao casam.
     # A igualdade do caminho e conferida depois, normalizada.
+    if ($Monitoramento) { return '^-NoProfile -NonInteractive -File "([^"]+)" -Modo Sincronizar -Config "[^"]+"$' }
     return '^-NoProfile -NonInteractive -File "([^"]+)" -Modo Backup -Config "[^"]+" -DiretorioEstado "[^"]+"(?: -Disparo "\$\(Arg0\)")?$'
 }
 
