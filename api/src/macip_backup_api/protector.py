@@ -144,7 +144,7 @@ class LabProtector:
         if not self.restic:
             raise ProtectionError("Restic indisponível")
 
-    def check_volume(self, needed=0):
+    def check_volume_identity(self):
         if self.mount.resolve() != self.mount or not self.mount.is_mount():
             raise ProtectionError("montagem de B ausente")
         if self.volume == self.mount or not self.volume.is_relative_to(self.mount):
@@ -155,6 +155,9 @@ class LabProtector:
             or _private_file(self.volume / ".macip-volume").decode().strip() != self.volume_id
         ):
             raise ProtectionError("identidade do volume de B divergente")
+
+    def check_volume(self, needed=0):
+        self.check_volume_identity()
         if shutil.disk_usage(self.volume).free < self.reserve_bytes + needed:
             raise ProtectionError("espaço insuficiente em B")
 
@@ -175,6 +178,9 @@ class LabProtector:
                 source_key: Path | None = None, snapshot: str | None = None,
                 manifest: Path | None = None) -> dict:
         with self.lock(installation) as fd:
+            maintenance = self.state / f"{installation}.maintenance-a.json"
+            if maintenance.exists() or maintenance.is_symlink():
+                raise ProtectionError("manutenção A interrompida; preserve os pontos e inspecione o executor")
             self.check_volume()
             endpoint = f"/api/v1/protector/installations/{installation}"
             context = api.request(endpoint)

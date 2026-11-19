@@ -269,6 +269,8 @@ def register_provisioning(app, require_admin_identity):
     register_protection(app, _get_preparation, _profile_is_current)
     from .lab_automation_routes import register_automation, enabled
     register_automation(app, require_provisioner)
+    from .storage_routes import register_storage
+    register_storage(app, require_admin_identity, require_provisioner)
 
     @app.post(
         "/api/v1/clients/prepare",

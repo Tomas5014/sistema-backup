@@ -56,6 +56,7 @@ def api_env(cfg):
         environment.update({
             "MACIP_API_LAB_ACTIVATION": "1", "MACIP_API_LAB_ALERTS": "1",
             **({"MACIP_API_LAB_AUTOMATION": "1"} if cfg.get("automation") else {}),
+            **({"MACIP_API_LAB_STORAGE": "1"} if cfg.get("storage") else {}),
             "MACIP_API_SESSION_INSECURE_COOKIE": "0",
             "MACIP_API_ACTIVATION_PUBLIC_URL": cfg["activation_public"],
             "MACIP_API_ACTIVATION_DELIVERY_URL": cfg["activation_delivery"],
@@ -114,6 +115,7 @@ def main():
     parser.add_argument("--ca")
     parser.add_argument("--delivery-port", type=int, default=9447)
     parser.add_argument("--windows-commit")
+    parser.add_argument("--storage-lab", action="store_true", help="habilitar capacidade e retenção manual só nesta área NOVA")
     parser.add_argument("--smtp-port", type=int)
     parser.add_argument("--role", choices=("central","activation","primary","protection","alerts"))
     parser.add_argument("--mailpit-image", default="axllent/mailpit:v1.29.7")
@@ -140,7 +142,7 @@ def main():
         stamp = uuid.uuid4().hex[:12]
         cfg = {
             "api": f"http://127.0.0.1:{args.api_port}", "api_port": args.api_port,
-            "ip": args.sftp_ip, "sftp_image": args.sftp_image,
+            "ip": args.sftp_ip, "sftp_image": args.sftp_image, "storage": args.storage_lab,
             "pg": "macip-win-pg-" + stamp, "sshd": "macip-win-a-" + stamp,
             **{key: secrets.token_urlsafe(40) for key in ("admin", "a_token", "b_token")},
         }

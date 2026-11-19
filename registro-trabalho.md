@@ -4025,3 +4025,159 @@ O commit posterior fixa somente este registro e
 O par acima define o congelamento funcional experimental. A compilação da
 candidata 0.1.4-dev2-lab e o aceite integrado na VM continuam pendentes.
 Não é homologação de Windows nem autorização para usar dados reais.
+
+## 2026-11-19 — Capacidade e retenção manual no laboratório
+
+Branch `feature/backup-retention-capacity`, criada na base exata
+`7fb7bd823f8cd8b1b4c14cd16f87fa1696e0958c`, sem merge das linhas.
+Windows preservado em `feature/windows-backup-lab-automation`, HEAD
+`97de94ba563feeccb24fabea11d12abada67e247`, working tree limpa na conferência.
+Não houve modificação do aplicativo, instalador ou pacote congelado.
+As alterações preexistentes, inclusive ` D atualizações.txt`, `.claude/`,
+`.trail/`, `.impeccable/`, áreas `.test-*` e `tarefa-teste.json`, ficaram fora
+do commit desta entrega.
+
+### Inspeção e implementação
+
+O agente Linux já possuía retenção automática por destino: após backup,
+`orchestrator` chama `ResticAdapter.forget`, que também faz prune. Esse código
+não foi alterado nem usado pelo novo fluxo. O Windows candidato não chama
+forget/prune. Reutilizados: fila `provisioning_operations`, identidade dos
+executores A/B, reserva com expiração, supervisor, cofre explícito de
+laboratório, vínculo de proteção, inventário durável de correspondências e
+locks da preparação, ativação e cópia. Não foi criada outra fila.
+
+Migração expansiva **14**: novos tipos `storage_a`/`storage_b` na mesma fila,
+configuração/capacidade por instalação e auditoria. Prova de upgrade 13→14
+com dados preservados e reaplicação sem alterações. Código anterior a 14
+recusa o esquema futuro: retorno não deve apagar versões/tabelas para forçar
+compatibilidade.
+
+- Medição no repositório efetivo A dentro do contêiner, não na árvore inicial
+  do host. B confere montagem, dispositivo e marcador. Volume compartilhado
+  e uso individual do repositório são rotulados separadamente e não somados.
+  Última leitura boa e última tentativa são preservadas; erro, idade >120 s
+  ou heartbeat antigo mostram "Sem medição recente". Limite de espaço livre
+  por lado gera aviso visual, sem interferir no resultado do backup.
+- Política explícita por instalação/lado, sem exclusão automática. Contagens
+  positivas, nulos/ausência mantendo todos; rejeição de booleanos, zero,
+  negativos, fracionários, strings e campos livres. Pontos de recuperação
+  fixados, ensaio, prova, último copiado e mais recente são protegidos.
+- Simulação assíncrona somente lê catálogos (`--no-lock`), sem init/forget,
+  prune ou unlock. Mostra IDs completos, datas, decisão, motivo e repositório.
+  Administrador solicita/confirma; viewer consulta; CSRF preservado.
+- Execução reconfere política, vínculo, identidade e catálogo. Lista mudada
+  exige outra simulação. A exige cópia confirmada e inventário recente B;
+  confere novamente volume/marcador e hash da config cifrada B sem receber a
+  senha de escrita B. B mantém cópias de pontos ainda publicados em A.
+  Identidade clonada/ambígua entre instalações é recusada.
+- A suspende só o listener do contêiner próprio, confirma o estado parado e
+  starttime, recusa sessões vivas/paradas e retoma o listener ao concluir.
+  Forget usa lock exclusivo nativo e IDs completos, sem prune/unlock. B usa
+  o lock herdado pelos processos Restic. Journal precede efeitos e permite
+  reconciliar remoções parciais sem aceitar perda de pontos mantidos.
+  Código zero do comando não basta: todos os IDs removidos são conferidos.
+- Marcador durável de manutenção A interrompida bloqueia o par, inclusive
+  o executor B, até inspeção. Não se assume que matar um cliente Docker
+  encerra imediatamente o Restic dentro do contêiner. Não há remoção
+  automática de marcador/lock para fazer a manutenção passar.
+
+Roteiro executável em `docs/retencao-capacidade-laboratorio.md`, referenciado
+pelo roteiro automatizado e pelo ensaio Windows A/B. Habilitação apenas em
+área nova via `init --storage-lab`; workers existentes medem/processam,
+sem comandos por instalação. Limite conservador: 1000 pontos por inventário;
+catálogo maior recusa sem truncar nem excluir. Prune não é oferecido.
+
+### Verificações efetivamente executadas
+
+Versões observadas: PostgreSQL **16.14**, Restic **0.18.1**, Python **3.14.4**,
+Node **24.19.0**. Dados e credenciais eram exclusivamente fictícios.
+
+Da pasta `api`, usando `PYTHONPATH=src:../src`, venv API e URL de banco
+contendo `test`:
+
+```text
+pytest tests/test_storage.py tests/test_storage_api.py
+  tests/test_migrations.py tests/test_lab_automation.py tests/test_lab_supervisor.py
+  tests/test_provisioning.py tests/test_protected_copy.py tests/test_monitoring.py
+  tests/test_central_alerts.py -q --tb=short
+118 aprovados, 2 ignorados, 0 falhas na rodada — 353,57 s.
+```
+
+Skips dessa bateria: PowerShell indisponível para o teste legado `Read-Perfil`
+e variáveis SMTP/Mailpit não configuradas para aquela prova de envio e
+reconhecimento. Não são aprovações Windows nem de novo envio de e-mail.
+O Mailpit do fixture completo foi iniciado/encerrado; capacidade nova só
+produz aviso no painel.
+
+Fechamento dos testes novos: `tests/test_storage.py tests/test_storage_api.py`
+com **23 aprovados** antes da regressão adicional de repositório ambíguo;
+`tests/test_storage_api.py` novamente com **7 aprovados**, incluindo essa
+regressão. São **17 casos de política/locks/Restic e 7 de API**, com
+sobreposição às baterias anteriores; não somar como casos únicos de toda a
+suíte. Restic local real: simulação sem mudanças, duas instalações, falha
+parcial injetada após uma remoção, retomada, ponto histórico, check/read-data,
+restauração A e B e SHA-256. Lock nativo mantido por backup real bloqueou
+forget. Regressões de processo Z/T, intenção abandonada, volume físico B e
+confirmação de remoções também passaram. Um subset auxiliar no sandbox
+ignorou /dev/shm; repetido no namespace com montagem real: **4 aprovados**,
+sem skip. Isso não prova compatibilidade com todo arranjo de namespaces.
+
+Prova integrada, URL PostgreSQL exclusiva, imagem OpenSSH construída de
+`tests/sftp`, `DOCKER_HOST=unix:///var/run/docker.sock` e DOCKER_CONTEXT ausente:
+
+```text
+pytest tests/test_storage_real.py -q --tb=short
+MACIP_TEST_PROVISIONING_SFTP_IMAGE=macip-retention-sftp-fixture
+MACIP_TEST_STORAGE_BROWSER=1
+1 aprovado, 0 falhas, 0 skips — última rodada: 177,68 s.
+```
+
+Também passou uma rodada do mesmo fluxo sem navegador (192,22 s); não é
+outro caso de teste independente. Última rodada usou HTTPS, PostgreSQL,
+supervisor, A/SFTP, B, Restic e Chrome reais. Demonstrou dois clientes;
+cinco pontos extras, incluindo ponto antigo sem cópia preservado;
+simulação/IDs pela interface; confirmação obrigatória; sessão SFTP viva
+causando recusa sem remoções; nova solicitação explícita após concorrência;
+retenção A e B independentes; outro cliente intacto; check/read-data e
+restauração A; A parado; restauração somente por B com SHA-256; medição A
+indisponível e volume B sem marcador, com informação anterior preservada.
+Não houve aplicativo Windows, DPAPI/COM/WinForms ou tarefa sem sessão.
+
+As primeiras tentativas integradas falharam durante a construção da prova:
+a contagem SSH incluía zombies Z, o comando SSH da prova precisava de citação
+correta de known_hosts com espaços, processos de autenticação podiam sair
+durante a leitura de /proc, e uma recusa legítima de lock exigia nova simulação.
+Foram diagnosticadas e corrigidas sem ignorar sessão viva nem aceitar remoção
+sem confirmação. O navegador passou a aguardar o UUID da nova simulação,
+sem confundir o resultado anterior com a ação nova. Essas tentativas falhas
+não foram tratadas como homologação; os resultados acima são das rodadas de
+fechamento. Saída zero sem exclusão confirmada ganhou regressão específica.
+
+Portal: `npm run typecheck`, `npm test -- --reporter=dot`, `npm run build`:
+**111 aprovados**, typecheck/build aprovados. Fetch simulado nos testes React;
+Chrome real no ensaio acima. Capturas 1200 e 390 px inspecionadas, sem overflow
+horizontal, IDs completos e aviso sobre volumes compartilhados. AST/compileall,
+`bash -n` dos blocos documentados, ajuda do helper e `git diff --check` também
+passaram. Warnings existentes de Starlette/React Router não foram tratados
+como aprovação de compatibilidade futura dessas dependências.
+
+### Limpeza e limites
+
+Fixtures encerraram seus supervisores/processos e removeram os contêineres
+A/Mailpit e volumes B por identidade; nenhum `macip-auto-*` permaneceu em
+/dev/shm. PostgreSQL `macip-retention-test-pg` (dois bancos fictícios) foi
+encerrado pelo ID completo e removido por --rm. A tag de imagem SFTP exclusiva
+foi removida. Diretório restante da prova completa com TLS/configurações
+fictícias foi removido somente após conferir banco/imagem/estado encerrado.
+O contêiner preexistente `wiguard-captive-portal-gateway-1` e caches/arquivos
+preexistentes do repositório foram preservados. Capturas e logs auxiliares de
+/tmp foram removidos depois de registrar este resumo.
+
+Sem srvdev1, hosts/contas operacionais, destinatários ou clientes reais,
+instalações globais, timers antigos, merge, tag, deploy ou alteração Windows.
+O estado histórico dos timers antigos, confirmado pelo operador como
+disabled/inactive, permanece distinto destas provas e não foi alterado.
+**Retenção automática de produção não homologada**. Cofre/hosts definitivos,
+dimensionamento com volumes representativos, queda abrupta durante manutenção,
+prune operacional e aceite integrado na VM Windows continuam pendentes.

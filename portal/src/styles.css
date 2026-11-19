@@ -186,3 +186,6 @@ input, select {
 .central-alerts { padding-left: 1.25rem; }
 .central-alerts li { padding: 1rem 0; border-top: 1px solid var(--border, #d5dbe1); }
 .central-alerts dd, .preparation-meta code { overflow-wrap: anywhere; }
+
+/* IDs completos permanecem legíveis em telas estreitas. */
+.storage-id { overflow-wrap: anywhere; word-break: break-word; }

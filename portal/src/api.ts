@@ -729,3 +729,35 @@ export async function installationAlerts(id: string): Promise<InstallationAlerts
 export async function acknowledgeAlert(id: string): Promise<void> {
   await apiFetch(`/api/v1/alerts/${encodeURIComponent(id)}/ack`, { method: "POST", csrf: true });
 }
+
+export interface StoragePolicy {
+  keep_a: number | null; keep_b: number | null;
+  low_a: number | null; low_b: number | null;
+  pins_a: string[]; pins_b: string[];
+}
+export interface StoragePlan {
+  side: "a" | "b"; repository_id: string; fingerprint: string;
+  points: {id: string; time: string; action: "keep" | "remove"; reason: string | null}[];
+}
+export interface StorageOperation {
+  id: string; side: "a" | "b"; action: "simulate" | "execute";
+  state: string; requester: string; created_at: string; finished_at: string | null; error: string | null;
+  result: {plan: StoragePlan | null; removed: string[]; error: string | null} | null;
+}
+export interface InstallationStorage {
+  policy: StoragePolicy; automatic: false;
+  capacity: Record<"a" | "b", {stale: boolean; low: boolean; error: string | null; last_attempt: string | null;
+    last_good: {total: number; used: number; free: number; measured_at: string; volume: string;
+      scope: "shared-volume"; repository_bytes: number | null; repository_id: string} | null}>;
+  operations: StorageOperation[];
+  audit: {actor: string; kind: string; created_at: string}[];
+}
+export async function installationStorage(id: string): Promise<InstallationStorage> {
+  return (await (await apiFetch(`/api/v1/installations/${encodeURIComponent(id)}/storage`)).json()) as InstallationStorage;
+}
+export async function saveStoragePolicy(id: string, body: StoragePolicy): Promise<void> {
+  await apiFetch(`/api/v1/installations/${encodeURIComponent(id)}/storage/policy`, {method:"PUT",body,csrf:true});
+}
+export async function requestStorage(id: string, body: {id: string; side: "a" | "b"; action: "simulate" | "execute"; simulation?: string}): Promise<StorageOperation> {
+  return (await (await apiFetch(`/api/v1/installations/${encodeURIComponent(id)}/storage/operations`, {method:"POST",body,csrf:true})).json()) as StorageOperation;
+}

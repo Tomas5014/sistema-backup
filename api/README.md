@@ -435,3 +435,27 @@ por papel e heartbeats; `MACIP_API_LAB_AUTOMATION=1` é habilitado somente
 pela configuração explícita da área supervisionada. Não é serviço global
 nem adaptador de produção. Funcionalidades do piloto ficam congeladas para
 build e aceite integrado na VM.
+
+### Capacidade e retenção controlada (laboratório)
+
+A migração 14 acrescenta configuração/auditoria sem remover dados anteriores.
+O recurso exige `MACIP_API_LAB_STORAGE=1` e executores do fixture compatíveis;
+no helper, escolha `init --storage-lab` em área nova. Não há exclusão automática.
+
+- `GET /api/v1/installations/{id}/storage`: política, capacidade histórica/atual,
+  simulações, execuções e auditoria; viewer pode consultar.
+- `PUT .../storage/policy`: admin + CSRF de cookie. JSON estrito, por exemplo
+  `{"keep_a":7,"keep_b":14,"low_a":1073741824,"low_b":2147483648,"pins_a":[],"pins_b":[]}`.
+  `keep_a`/`keep_b` ausentes/nulos mantêm todos; `low_a`/`low_b`
+  ausentes/nulos desativam o aviso. `pins_a`/`pins_b` exigem listas, quando presentes.
+- `POST .../storage/operations`: admin + CSRF, `id` UUID idempotente, `side`
+  `a`/`b`, `action` `simulate`/`execute`; executar exige `simulation` UUID.
+  Retorna 202; Restic roda nos workers, nunca no HTTP.
+- Contratos fixos `/api/v1/provisioner/storage` e `/api/v1/protector/storage`
+  separam claim, resultado e medição por identidade do executor. Não recebem
+  caminhos, comandos ou segredos. Resultados duplicados idênticos são aceitos;
+  reservas antigas e resultados divergentes são recusados.
+
+Ver [fluxo visual, proteções, testes e limites](../docs/retencao-capacidade-laboratorio.md).
+Nenhum endpoint oferece prune ou força unlock. A retenção automática de produção
+continua não homologada; Windows, cofre e hosts operacionais não mudam aqui.

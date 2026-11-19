@@ -1,5 +1,7 @@
 # Operação automática do laboratório · candidata do piloto
 
+Incremento Central separado: [capacidade e retenção manual no laboratório](retencao-capacidade-laboratorio.md). A referência Windows permanece inalterada; exclusão automática não é habilitada.
+
 O laboratório continua limitado a clientes fictícios, Linux nos servidores,
 um aplicativo Windows por instalação, origem local, destino SFTP e Mailpit.
 Não é adaptador operacional, implantação em produção ou aceite Windows.

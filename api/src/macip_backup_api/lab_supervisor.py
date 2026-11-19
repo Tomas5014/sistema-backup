@@ -179,7 +179,14 @@ def worker(root,role):
                 heartbeat(db,'alerts',state['value']);db.commit()
     else:
         actor=PrimaryWorker(cfg) if role=='primary' else ProtectionWorker(cfg)
-        once=actor.run_once
+        if cfg.get('storage'):
+            from .storage_runtime import LabStorage
+            storage=LabStorage(actor,'a' if role=='primary' else 'b')
+            def once():
+                actor.run_once()
+                storage.tick()
+        else:
+            once=actor.run_once
         transport=ApiTransport(cfg['api'],cfg['token'],'heartbeat-'+role,allow_lab_http=cfg.get('allow_http',False),ca_file=cfg.get('ca'))
         prefix='/api/v1/provisioner' if role=='primary' else '/api/v1/protector'
         def pulse():transport.request(prefix+'/automation/heartbeat',{'state':state['value']})

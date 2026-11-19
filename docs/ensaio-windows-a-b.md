@@ -1,5 +1,7 @@
 # Ensaio Windows 0.1.3 → A → B
 
+Incremento Central separado: [capacidade e retenção manual no laboratório](retencao-capacidade-laboratorio.md). A referência Windows permanece inalterada; exclusão automática não é habilitada.
+
 O fluxo ativo da candidata com automação está em
 [Operação automática do laboratório](operacao-automatica-laboratorio.md):
 dois blocos, **Administrador** (uma preparação por área) e **Técnico**

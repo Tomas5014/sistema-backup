@@ -393,6 +393,21 @@ CREATE TABLE IF NOT EXISTS lab_worker_heartbeats (
 );
 '''))
 
+MIGRATIONS.append((14, "lab-retention-capacity", r'''
+ALTER TABLE provisioning_operations DROP CONSTRAINT IF EXISTS provisioning_operations_kind_check;
+ALTER TABLE provisioning_operations ADD CONSTRAINT provisioning_operations_kind_check
+ CHECK(kind IN ('prepare_primary','retry_primary','protect_installation','copy_points','storage_a','storage_b'));
+CREATE TABLE IF NOT EXISTS lab_storage_settings (
+ agent_id uuid PRIMARY KEY REFERENCES agents(id), policy jsonb NOT NULL DEFAULT '{}',
+ capacity_a jsonb, capacity_b jsonb
+);
+CREATE TABLE IF NOT EXISTS lab_storage_audit (
+ id uuid PRIMARY KEY, agent_id uuid NOT NULL REFERENCES agents(id),
+ actor varchar(240) NOT NULL, kind varchar(30) NOT NULL, detail jsonb NOT NULL,
+ created_at timestamptz NOT NULL DEFAULT now()
+);
+'''))
+
 _ADVISORY_KEY = 727_203_001
 
 

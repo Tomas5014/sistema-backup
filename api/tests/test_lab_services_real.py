@@ -48,7 +48,7 @@ def port():
 
 
 @contextmanager
-def laboratory(tmp_path):
+def laboratory(tmp_path, *, storage=False):
     image=os.environ.get('MACIP_TEST_PROVISIONING_SFTP_IMAGE')
     if not image:pytest.skip('imagem OpenSSH descartável não configurada')
     root=tmp_path/'laboratorio automático';root.mkdir(mode=0o700)
@@ -60,7 +60,7 @@ def laboratory(tmp_path):
     api_port,delivery=port(),port()
     cfg=dict(api=f'https://127.0.0.1:{api_port}',activation_public=f'https://127.0.0.1:{api_port}',
              activation_delivery=f'https://127.0.0.1:{delivery}/v1/activate',api_port=api_port,ip='127.0.0.1',
-             database=TEST_URL,admin=ADMIN_TOKEN,a_token='test-provisioner-token-1234567890abcdef',b_token=TOKEN,
+             database=TEST_URL,storage=storage,admin=ADMIN_TOKEN,a_token='test-provisioner-token-1234567890abcdef',b_token=TOKEN,
              sftp_image=image,sshd='unused-'+uuid.uuid4().hex,pg='external-test-pg')
     json_once(root/'private/config.json',cfg)
     settings=None
@@ -71,9 +71,9 @@ def laboratory(tmp_path):
         assert started['running']
         assert control(root,'start')['already_running']
         context=ssl.create_default_context(cafile=str(cert))
-        def request(path,body=None,headers=None):
+        def request(path,body=None,headers=None,method=None):
             with urlopen(Request(cfg['api']+path,data=json.dumps(body).encode() if body is not None else None,
-                headers={'Content-Type':'application/json',**(headers or ADMIN)},method='POST' if body is not None else 'GET'),context=context,timeout=15) as response:
+                headers={'Content-Type':'application/json',**(headers or ADMIN)},method=method or ('POST' if body is not None else 'GET')),context=context,timeout=15) as response:
                 return json.load(response)
         wait_for(lambda:request('/healthz'))
         wait_for(lambda:all(not w['stale'] for w in request('/api/v1/automation/health')))

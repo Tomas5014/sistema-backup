@@ -75,9 +75,9 @@ def configure_services(root, cfg, *, certificate, key, ca, delivery_port, mailpi
     json_once(services/'central.json',tls)
     json_once(services/'activation.json',{**tls,'port':delivery_port})
     json_once(services/'primary.json',{**common,'token':cfg['a_token'],'ip':cfg['ip'],
-              'prefix':'macip-auto-a-'+token,'image':cfg['sftp_image']})
+              'prefix':'macip-auto-a-'+token,'image':cfg['sftp_image'],'storage':cfg.get('storage',False)})
     json_once(services/'protection.json',{**common,'token':cfg['b_token'],'mount':'/dev/shm',
-              'volume':str(volume),'volume_id':volume_id})
+              'volume':str(volume),'volume_id':volume_id,'storage':cfg.get('storage',False)})
     json_once(services/'alerts.json',{'database':cfg['database'],'smtp_port':smtp_port,'interval_seconds':5})
     json_once(persisted,settings)
     return settings
