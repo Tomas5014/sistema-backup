@@ -1,9 +1,11 @@
 # Como gerar o instalador do MAC IP Backup
 
-A candidata desta entrega é **0.1.4-dev2-lab**. Use
-[LAB-AUTOMATION.md](../LAB-AUTOMATION.md), os SHAs compatíveis e o payload
-Windows aprovado. O build não foi executado sem NSIS/payload; preserve
-o instalador 0.1.3. Exemplos antigos abaixo não fixam a versão candidata.
+A candidata desta entrega é **0.1.4-dev3-lab**. Siga
+[UPDATE-ROLLBACK.md](../UPDATE-ROLLBACK.md) para congelar o payload por commit
+e compilar com MANIFEST_SHA256. A automação anterior 0.1.4-dev2-lab permanece
+referência em [LAB-AUTOMATION.md](../LAB-AUTOMATION.md). O build não foi
+executado sem NSIS/payload aprovado; preserve o instalador 0.1.3. Os exemplos
+legados abaixo não constituem o comando de build da candidata atual.
 
 O instalador é um `.exe` NSIS que instala o agente, a interface e o
 `restic.exe` aprovado pela MAC IP. **Não** instala chaves, senhas ou
