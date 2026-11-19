@@ -1,5 +1,11 @@
 # Ativação por código · contrato v1 de laboratório
 
+Na candidata de automação, siga
+[Operação automática do laboratório](operacao-automatica-laboratorio.md).
+A nova prova de B é automática e o aplicativo aguarda sem trocar a chave.
+Os comandos manuais por instalação deste documento descrevem o modo
+anterior, preservado como referência; não fazem parte do novo fluxo técnico.
+
 Central e Windows usam branches próprias. A central parte de
 `078efb86581640bcedc40b2d2fd59699709a434f` e o Windows parte de
 `7d62a800325146d1357f8832b1df5c4c3b2eff8d`. O instalador Windows 0.1.3

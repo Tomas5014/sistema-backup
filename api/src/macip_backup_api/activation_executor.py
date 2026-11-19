@@ -25,9 +25,10 @@ class DeliveryIn(BaseModel):
 
 
 class LabActivationExecutor:
-    def __init__(self, central, accounts: Path, vault, *, lab_container=None):
+    def __init__(self, central, accounts: Path, vault, *, lab_container=None, dynamic_containers=False):
         self.central, self.accounts, self.vault = central, accounts, vault
         self.lab_container = lab_container
+        self.dynamic_containers = dynamic_containers
 
     def container_command(self, *args):
         result = subprocess.run(["docker", *args], capture_output=True, timeout=30)
@@ -35,9 +36,9 @@ class LabActivationExecutor:
             raise RuntimeError("fixture A indisponível")
         return result.stdout
 
-    def check_container(self):
+    def check_container(self, container):
         label = self.container_command(
-            "inspect", "-f", '{{index .Config.Labels "macip.activation-accounts"}}', self.lab_container,
+            "inspect", "-f", '{{index .Config.Labels "macip.activation-accounts"}}', container,
         ).decode().strip()
         if label != str(self.accounts):
             raise RuntimeError("contêiner não pertence ao executor A")
@@ -49,16 +50,24 @@ class LabActivationExecutor:
         # Conta e caminho derivados exclusivamente da identidade conhecida de A.
         account = context["account_name"]
         path = self.accounts / account / ".ssh/authorized_keys"
+        container = self.lab_container
+        if self.dynamic_containers:
+            registry = self.accounts / account / "sftp-runtime.json"
+            LabPrimaryAdapter._validate_private_file(registry)
+            value = json.loads(registry.read_text())
+            if value.get("account") != account or value.get("installation_id") != installation:
+                raise RuntimeError("registro SFTP divergente")
+            container = value["container"]
         LabPrimaryAdapter._private_directory(self.accounts / account)
         LabPrimaryAdapter._private_directory(path.parent)
         LabPrimaryAdapter._validate_private_file(path)
         fd = os.open(self.accounts / account, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
-            if self.lab_container:
-                self.check_container()
+            if container:
+                self.check_container(container)
                 # Lê a política efetiva de A antes de acrescentar a chave Windows.
-                live = self.container_command("exec", self.lab_container, "cat",
+                live = self.container_command("exec", container, "cat",
                                               f"/home/{account}/.ssh/authorized_keys")
                 path.write_bytes(live)
             lines = path.read_text().splitlines()
@@ -72,11 +81,11 @@ class LabActivationExecutor:
                     stream.flush()
                     os.fsync(stream.fileno())
                 os.replace(temporary, path)
-            if self.lab_container:
+            if container:
                 target = f"/home/{account}/.ssh/authorized_keys"
-                self.container_command("cp", str(path), self.lab_container + ":" + target)
-                self.container_command("exec", self.lab_container, "chown", f"{account}:{account}", target)
-                self.container_command("exec", self.lab_container, "chmod", "600", target)
+                self.container_command("cp", str(path), container + ":" + target)
+                self.container_command("exec", container, "chown", f"{account}:{account}", target)
+                self.container_command("exec", container, "chmod", "600", target)
             if not context["registered"]:
                 self.central.request("/api/v1/activation-executor/registered", authorization)
                 return {"state": "awaiting_protection"}
@@ -138,7 +147,8 @@ def main():
                            allow_lab_http=os.environ.get("MACIP_PROVISIONER_LAB_ALLOW_HTTP") == "1")
     executor = LabActivationExecutor(central, Path(os.environ["MACIP_PROVISIONER_LAB_ROOT"]),
                                     LabFileVault(Path(os.environ["MACIP_PROVISIONER_LAB_VAULT"])),
-                                    lab_container=os.environ.get("MACIP_ACTIVATION_LAB_CONTAINER"))
+                                    lab_container=os.environ.get("MACIP_ACTIVATION_LAB_CONTAINER"),
+                                    dynamic_containers=os.environ.get("MACIP_ACTIVATION_LAB_DYNAMIC") == "1")
     import uvicorn
     uvicorn.run(create_app(executor), host=args.host, port=args.port,
                 ssl_certfile=args.certificate, ssl_keyfile=args.key, access_log=False)

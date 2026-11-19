@@ -130,7 +130,7 @@ function Read-ResticPassword([string]$Caminho) {
 function Get-SshExe { '/usr/bin/ssh' }
 $script:ResticExeNome='restic-real.ps1'
 $code=(Get-Content -LiteralPath $CodeFile -Raw | ConvertFrom-Json).activation_code
-$result=Invoke-CodeActivation -Code $code -Directory (Join-Path $Base 'activation-code')
+$result=Invoke-CodeActivation -Code $code -Directory (Join-Path $Base 'activation-code') -WaitSeconds 0
 [pscustomobject]@{state=$result.State} | ConvertTo-Json -Compress
 """)
 

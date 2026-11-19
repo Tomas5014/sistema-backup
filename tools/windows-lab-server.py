@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 from pathlib import PurePosixPath
 import secrets
+import re
 import socket
 import subprocess
 import sys
@@ -54,6 +55,7 @@ def api_env(cfg):
     if cfg.get("activation_public"):
         environment.update({
             "MACIP_API_LAB_ACTIVATION": "1", "MACIP_API_LAB_ALERTS": "1",
+            **({"MACIP_API_LAB_AUTOMATION": "1"} if cfg.get("automation") else {}),
             "MACIP_API_SESSION_INSECURE_COOKIE": "0",
             "MACIP_API_ACTIVATION_PUBLIC_URL": cfg["activation_public"],
             "MACIP_API_ACTIVATION_DELIVERY_URL": cfg["activation_delivery"],
@@ -94,7 +96,8 @@ def main():
     parser.add_argument("action", choices=(
         "init", "api", "operator", "prepare-a", "seed", "prepare-b", "copy-seed",
         "prove-seed", "export-credentials", "windows-point", "copy-windows", "stop-a", "prove-windows", "stop",
-        "configure-activation", "activation-api", "activation-a", "alerts", "refresh-b", "copy-activation", "prove-activation",
+        "configure-activation", "activation-api", "activation-a", "alerts",
+        "services-start", "services-status", "services-stop", "services-restart", "refresh-b", "copy-activation", "prove-activation",
     ))
     parser.add_argument("area", type=Path)
     parser.add_argument("--sftp-ip")
@@ -110,7 +113,10 @@ def main():
     parser.add_argument("--key")
     parser.add_argument("--ca")
     parser.add_argument("--delivery-port", type=int, default=9447)
+    parser.add_argument("--windows-commit")
     parser.add_argument("--smtp-port", type=int)
+    parser.add_argument("--role", choices=("central","activation","primary","protection","alerts"))
+    parser.add_argument("--mailpit-image", default="axllent/mailpit:v1.29.7")
     args = parser.parse_args()
     root = args.area
     global DIAGNOSTIC_ROOT
@@ -118,6 +124,8 @@ def main():
     if not root.is_absolute() or root.resolve() != root:
         parser.error("area deve ser absoluta e sem links")
     if args.action == "init":
+        if args.windows_commit and not re.fullmatch(r"[0-9a-f]{40}",args.windows_commit):
+            parser.error("informe o SHA completo da candidata Windows")
         if (
             not args.sftp_ip or ipaddress.ip_address(args.sftp_ip).version != 4
             or ipaddress.ip_address(args.sftp_ip).is_unspecified
@@ -154,7 +162,8 @@ def main():
         (root / "private/config.json").write_text(json.dumps(cfg))
         record(root, "base.json", {
             "central": run("git", "rev-parse", "HEAD").strip(),
-            "windows": "7d62a800325146d1357f8832b1df5c4c3b2eff8d",
+            "windows": args.windows_commit or "7d62a800325146d1357f8832b1df5c4c3b2eff8d",
+            "windows_reference": "7d62a800325146d1357f8832b1df5c4c3b2eff8d",
             "restic": run("restic", "version").strip(),
         })
         print("Laboratório criado. Inicie API e portal em terminais separados.")
@@ -162,6 +171,20 @@ def main():
     if root.stat().st_uid != os.getuid() or root.stat().st_mode & 0o077:
         raise RuntimeError("area privada com propriedade ou modo divergente")
     cfg = json.loads((root / "private/config.json").read_text())
+    if args.action.startswith("services-"):
+        from macip_backup_api.lab_services import configure_services
+        from macip_backup_api.lab_supervisor import control
+        if args.action == "services-start":
+            configure_services(root,cfg,certificate=args.certificate,key=args.key,ca=args.ca,
+                               delivery_port=args.delivery_port,mailpit_image=args.mailpit_image)
+        status=control(root,args.action.removeprefix("services-"),args.role)
+        public={"api":cfg["api"]}
+        installation=root/"private/services/installation.json"
+        if installation.exists():
+            public.update(json.loads(installation.read_text()))
+            public["mailpit_url"]="http://127.0.0.1:"+str(public["mailpit_web_port"])
+        print(json.dumps({**status,"laboratory":public}))
+        return
     if args.action == "alerts":
         if not args.smtp_port:
             raise RuntimeError("informe --smtp-port do capturador local descartável")
@@ -212,7 +235,8 @@ def main():
                 "MACIP_PROVISIONER_API_URL": cfg["api"], "MACIP_PROVISIONER_TOKEN": cfg["a_token"],
                 "MACIP_PROVISIONER_LAB_ROOT": str(root / "a"),
                 "MACIP_PROVISIONER_LAB_VAULT": str(root / "private/vault-a"),
-                "MACIP_ACTIVATION_LAB_CONTAINER": cfg["sshd"],
+                **({"MACIP_ACTIVATION_LAB_DYNAMIC": "1"} if cfg.get("automation")
+                   else {"MACIP_ACTIVATION_LAB_CONTAINER": cfg["sshd"]}),
             })
             command = [sys.executable, "-m", "macip_backup_api.activation_executor",
                        "--host", cfg["ip"], "--port", str(args.delivery_port),
@@ -227,7 +251,20 @@ def main():
                         "--role", "admin"], env=api_env(cfg), check=True)
         return
     if args.action == "stop":
-        for name in (cfg["sshd"], cfg["pg"]):
+        names=[cfg["sshd"],cfg["pg"]]
+        services=root/"private/services"
+        if services.exists():
+            from macip_backup_api.lab_supervisor import control
+            control(root,"stop")
+            installation=services/"installation.json"
+            if installation.exists():names.insert(0,json.loads(installation.read_text())["mailpit"])
+            registry=root/"private/primary"
+            if registry.exists():
+                for entry in registry.iterdir():
+                    uuid.UUID(entry.name)
+                    value=json.loads((entry/"container.json").read_text())
+                    names.insert(0,value["container"])
+        for name in names:
             exists = subprocess.run(["docker", "inspect", name], capture_output=True).returncode == 0
             if exists:
                 check_container(name, root)

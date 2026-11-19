@@ -3882,3 +3882,130 @@ registrados e removidos. Fixtures removeram os contêineres SFTP e volumes
 temporários próprios; o contêiner preexistente de outro projeto foi
 preservado. Capturas sintéticas e auxiliares locais foram descartados.
 Alterações preexistentes não relacionadas permanecem fora dos commits.
+
+## 2026-11-19 — Operação automática do laboratório e congelamento funcional
+
+Bases conferidas e preservadas: central
+`8c0c51d2899fbe9acf7ff5a516d96b4847fad03d` e Windows
+`7a5c3acf6b192c4e4cadad445c6ef90c0a02319a`. Branches próprias
+`feature/backup-lab-automation` e `feature/windows-backup-lab-automation`,
+sem merge das linhas. O Windows 0.1.3/commit
+`7d62a800325146d1357f8832b1df5c4c3b2eff8d` e seu instalador não foram
+substituídos. Alterações preexistentes permanecem fora da entrega.
+
+Migração expansiva 13 estende a fila `provisioning_operations` com
+`protect_installation` e `copy_points`, referência seed e chave pública
+de leitura de B. A e B só recebem seus tipos de trabalho. Preparação,
+resultado de backup e mudança da chave Windows criam intenções duráveis
+na mesma transação. Reserva antiga não pode confirmar resultado novo.
+Preservado também o hash de reenvio dos resultados terminais anteriores
+à adição do campo opcional seed. Não há segundo provisionador.
+
+Worker A reconcilia conta/repositório por instalação em contêiner exclusivo;
+nenhum usuário ou SSH do host foi modificado. A referência fictícia, com
+SHA-256 canônico, é produzida antes do backup e reaproveitada. B mantém
+seu próprio acesso de leitura de A e senha de escrita local distinta;
+prova por `check --read-data`, restauração sem rede e comparação SHA-256
+é necessária antes de liberar perfil e antes de entregar segredo à chave
+Windows nova. O operador não executa refresh/copy/prove por instalação.
+Cada snapshot confirmado é copiado, inclusive backlog com mais de um ponto.
+Falha não apaga última cópia, e uma instalação não bloqueia as demais.
+Sem retenção, prune ou exclusão automática de snapshots.
+
+Supervisor POSIX por área, iniciado pela entrada pública `services-start`,
+executa central/portal, endpoint A, workers A/B e avaliador. Processos não
+dependem do terminal; PID e starttime impedem sinalizar PID reutilizado.
+Durante parada/reinício, encerra os filhos originais registrados, inclusive
+SIGSTOP e comandos surgidos durante a parada graciosa, antes de liberar
+reservas. Worker órfão precisa de parada seletiva antes de iniciar outro
+supervisor. Não instala serviços globais/systemd nem inicia após reboot
+por conta própria. Estado sem heartbeat recente não é prova de falha de backup.
+
+Windows aguarda preparação automática de B com prazo e retoma a mesma
+ativação/chave. Publicação registra backup e `MACIP-Backup-Sync`, na conta
+confirmada nativamente, com repetição de 5 minutos, exclusão concorrente
+e limites de mensagens/duração. Gravação local de pausa não espera envio
+HTTP. A GUI distingue sincronizado e pendente; fila vazia não inventa
+novo contato. Falha do segundo registro faz rollback; configurações ainda
+referenciadas são preservadas. Desinstalação confere separadamente as duas
+tarefas. Importar perfil sem monitoramento continua funcionando.
+
+Defeitos encontrados nas provas e corrigidos sem reduzir critérios:
+comentário OpenSSH normalizado sem trocar chave; caminho SSH com espaço e
+acento preservado; inicialização interrompida não pode deixar repositório
+final incompleto. Inicialização nova passou a usar estágio privado e
+publicação atômica, sem reinicializar repositório publicado. Material
+inesperado ou snapshot no estágio é preservado para inspeção. Uso padrão
+de unlock remove apenas locks que o Restic reconhece como obsoletos.
+O harness Linux precisou chamar Restic real por shim PowerShell, conforme
+o mecanismo de consulta da GUI nesse ambiente; não se alterou o Windows
+para tratar ELF como executável Windows. Uma corrida de login no teste de
+navegador foi corrigida esperando a autenticação concluir.
+
+Verificações efetivas (dados exclusivamente fictícios):
+
+- Bateria API: `pytest tests/test_lab_automation.py tests/test_lab_repository.py
+  tests/test_migrations.py tests/test_provisioner.py tests/test_provisioning.py
+  tests/test_protected_copy.py tests/test_central_alerts.py tests/test_activation.py
+  tests/test_activation_real.py tests/test_monitoring.py -q --tb=short`:
+  **113 testes e 12 subtestes aprovados**, sem skips nessa bateria.
+  PostgreSQL, SFTP/OpenSSH, Restic, HTTPS e Mailpit reais onde configurados;
+  testes de contrato também usam executores/relógios simulados explicitamente.
+- Fechamento das regressões: `pytest tests/test_lab_automation.py
+  tests/test_lab_repository.py tests/test_lab_supervisor.py -q --tb=short`:
+  **14 testes aprovados**, incluindo compatibilidade do hash, estágio com
+  pontos preservado, PID reutilizado, filho parado e filho iniciado durante
+  parada. Há sobreposição com a bateria anterior; não somar como testes únicos.
+- Prova real: `pytest tests/test_lab_services_real.py -q --tb=short`, com
+  flags de navegador, PowerShell e fixture OpenSSH:
+  **1 teste integrado aprovado**, repetido após as correções. A rodada final
+  durou 250,54 segundos. Usou a entrada pública do supervisor; cadastro,
+  bloqueio inicial, preparação A/B e emissão de código pelo Chrome;
+  consumidor PowerShell real no Linux com nova prova automática B;
+  reinício de B durante operação; dois clientes; três snapshots diferentes
+  pendentes; espera real do prazo de cópia, alertas capturados no Mailpit
+  e reconhecimento por sessão/CSRF no painel; retorno de comunicação com
+  reenvio sem novo backup; uma execução por UUID e cópia automática também
+  desse quarto ponto. A interface foi inspecionada em 1200/390 pixels sem
+  overflow e sem código secreto nas capturas.
+- Portal: `npm run typecheck`, `npm test`, `npm run build`:
+  **107 testes aprovados**, build/typecheck aprovados. Fetch simulado nos
+  testes React; Chrome + central/PostgreSQL reais na prova acima.
+- PowerShell 7.4.6/Linux: **27 verificações novas de automação**, incluindo
+  entrada pública `Publish-Configuracao`, tarefas conjuntas, rollback,
+  identidade, colisão e pausa durante envio; **18 de ativação**, **30 de
+  fila**, **393 GUI** e **150 agente**, todas aprovadas. COM/DPAPI/WinForms
+  são simulados. **1 prova COM real ignorada**; grupo opcional Restic/SSH
+  registrador ignorado. Não substituem a prova de Restic/SFTP real acima.
+- `git diff --check`, importação/compilação Python, ajuda do helper,
+  sintaxe dos blocos Bash e referências conferidas contra comandos reais.
+  Versões observadas: Python 3.14.4, Node 24.19.0, Restic 0.18.1,
+  PowerShell 7.4.6 e Docker 29.1.3. NSIS e payload `restic.exe` Windows
+  aprovado ausentes: **build pendente**, sem instalador ficticiamente aprovado.
+
+Candidata proposta: **0.1.4-dev2-lab**. Funcionalidades do piloto ficam
+congeladas após esta entrega. Os SHAs compatíveis são fixados em documento
+posterior ao commit de código, sem referência circular. Roteiro ativo em
+`docs/operacao-automatica-laboratorio.md`: Administrador (uma preparação e
+início/parada da área) e Técnico (painel/aplicativo, sem comandos por
+instalação). Seções anteriores de comandos manuais ficam como evidência
+histórica, não como passos exigidos da candidata automatizada.
+
+Permanecem pendentes: compilação/assinatura/hash do instalador, confiança
+TLS e DPAPI/COM/WinForms na VM, disparo sem sessão, sincronização periódica
+real, restauração Windows e recuperação do ponto Windows somente por B.
+Não houve acesso a srvdev1, clientes, laboratórios congelados, piloto
+0.2.1, timers preexistentes, backup diário, credenciais ou dados reais.
+Timers Linux antigos continuam registrados como disabled/inactive segundo
+o operador; não foram acessados ou reativados. Sem deploy, merge ou tag.
+
+Limpeza confirmada: fixtures encerraram os supervisores e removeram seus
+contêineres A/Mailpit e volumes B após conferir a identidade. Os bancos
+`macip-auto-tests-pg`, `macip-auto-unit-pg` e o capturador
+`macip-auto-unit-mail` desta sessão foram removidos por seus IDs. Nenhum
+volume `macip-auto-*` permaneceu em /dev/shm. O contêiner preexistente de
+outro projeto foi preservado. PowerShell portátil, auxiliares e capturas
+foram removidos de /tmp após inspeção; o resumo das evidências fica neste
+registro. Windows congelado no commit
+`97de94ba563feeccb24fabea11d12abada67e247`; fonte central será identificada
+no pin documental após o commit, sem reescrever histórico.

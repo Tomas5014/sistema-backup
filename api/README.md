@@ -428,3 +428,10 @@ Alertas Windows de laboratório: [contrato, fila, SMTP capturado e retorno](../d
 Exigem migração 12 e `MACIP_API_LAB_ALERTS=1`. O avaliador é independente
 (`macip-backup-alerts --smtp-port PORTA_LOCAL`); o painel não o executa.
 Credenciais `windows-results` não autorizam os endpoints gerais de agentes.
+
+Operação automática de laboratório: [administrador, técnico e candidata](../docs/operacao-automatica-laboratorio.md).
+Migração 13 encadeia A/B na fila de provisionamento existente, com reservas
+por papel e heartbeats; `MACIP_API_LAB_AUTOMATION=1` é habilitado somente
+pela configuração explícita da área supervisionada. Não é serviço global
+nem adaptador de produção. Funcionalidades do piloto ficam congeladas para
+build e aceite integrado na VM.

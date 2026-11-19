@@ -54,6 +54,11 @@ export interface PreparationRow {
   error_code: string | null;
   profile_available: boolean;
   activation_available?: boolean;
+  automation?: {
+    workers: {role: "primary" | "protection" | "alerts"; stale: boolean; state: string; last_seen_at: string | null}[];
+    last_attempt: {id: string; kind: string; state: string; step: string; error_code: string | null; started_at: string | null; finished_at: string | null} | null;
+    last_error: {error_code: string; finished_at: string | null} | null;
+  };
   created_at: string;
   updated_at: string;
   operation: {

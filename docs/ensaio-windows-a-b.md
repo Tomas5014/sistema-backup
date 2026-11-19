@@ -1,5 +1,12 @@
 # Ensaio Windows 0.1.3 → A → B
 
+O fluxo ativo da candidata com automação está em
+[Operação automática do laboratório](operacao-automatica-laboratorio.md):
+dois blocos, **Administrador** (uma preparação por área) e **Técnico**
+(somente painel/aplicativo por instalação). Não execute as etapas manuais
+por instalação abaixo nessa candidata. Elas permanecem como referência
+histórica do 0.1.3 e das entregas anteriores. A homologação VM segue pendente.
+
 O caminho experimental por código está em
 [Ativação por código v1](activation-code-v1.md). Ele usa a branch Windows
 candidata derivada de 0.1.3. Para validar a referência 0.1.3, siga a

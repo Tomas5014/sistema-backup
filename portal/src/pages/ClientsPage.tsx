@@ -466,6 +466,17 @@ function PreparationStatus({
         <div><dt>Horário sugerido</dt><dd>{item.installation.suggested_time}</dd></div>
         <div><dt>Tentativa</dt><dd>{item.operation.attempt}</dd></div>
       </dl>
+      {item.automation ? <section aria-label="Operação automática do laboratório">
+        <h3>Preparação e cópia automáticas</h3>
+        <p>{item.profile_available ? "Ensaio de restauração em B confirmado para o vínculo atual." : "A liberação aguarda preparação, cópia e restauração comprovadas em B."}</p>
+        {item.automation.last_attempt ? <p>Última tentativa em B: {({pending:"Na fila",running:"Em processamento",succeeded:"Concluída",failed:"Falhou"} as Record<string,string>)[item.automation.last_attempt.state] ?? "Estado desconhecido"}
+          {" · "}{formatDate(item.automation.last_attempt.finished_at ?? item.automation.last_attempt.started_at)}
+          {item.automation.last_attempt.state === "failed" ? " · O worker tentará novamente; consulte o erro abaixo." : ""}</p> : <p>B aguarda a preparação do primário.</p>}
+        {item.automation.last_error ? <p>Última falha registrada em B: {formatDate(item.automation.last_error.finished_at)} · {item.automation.last_error.error_code === "identity_changed" ? "Identidade alterada; nova verificação necessária." : "Cópia ou verificação não concluída. O sucesso anterior foi preservado."}</p> : null}
+        <ul>{item.automation.workers.map(worker => <li key={worker.role}>
+          {({primary:"Executor A",protection:"Executor B",alerts:"Avaliador de alertas"})[worker.role]}: {worker.stale ? "Sem atualização recente — confira o serviço do laboratório. Isso não comprova falha do backup." : worker.state === "retry" ? "Ativo, aguardando nova tentativa." : worker.state === "busy" ? "Ativo, processando." : "Ativo."}
+        </li>)}</ul>
+      </section> : null}
       <div className="form-actions">
         {admin && item.activation_available && !code ? (
           <button type="button" className="btn" disabled={issuing} onClick={() => void issueCode()}>

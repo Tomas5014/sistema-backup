@@ -15,15 +15,28 @@ import os
 from pathlib import Path
 import re
 import secrets
+import ssl
 import stat
 import subprocess
 import tempfile
 from typing import Protocol
+from types import SimpleNamespace
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
-from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
 
 from .provisioning_sftp import HOST, REPOSITORY, matches_known_hosts, repository_url
+
+
+def _run_primary(args, **kwargs):
+    if os.environ.get("MACIP_LAB_PROCESS_DIRECTORY"):
+        from .lab_runtime import command,LabCommandError
+        try:
+            output=command(*args,env=kwargs.get("env"),timeout=kwargs.get("timeout",60))
+            return SimpleNamespace(returncode=0,stdout=output.decode() if kwargs.get("text") else output,stderr="")
+        except LabCommandError as error:
+            return SimpleNamespace(returncode=error.code,stdout="",stderr="comando recusado")
+    return subprocess.run(args,**kwargs)
 
 
 class ProvisioningFailure(RuntimeError):
@@ -211,16 +224,21 @@ class LabPrimaryAdapter:
             # Um repositório conhecido ou não vazio exige inspeção do operador.
             if identity_file.exists() or identity_file.is_symlink() or any(repository.iterdir()):
                 raise ProvisioningFailure("repository_mismatch")
-            try:
-                initialized = subprocess.run(
-                    [*base, "init"], env=environment, capture_output=True, text=True, timeout=60
-                )
-            except (OSError, subprocess.TimeoutExpired):
+            from .lab_repository import initialize_repository
+            def initialize(stage):
+                result=_run_primary([self.restic_bin,"--repo",str(stage),"init"],env=environment,
+                                    capture_output=True,text=True,timeout=60)
+                if result.returncode:raise _repository_failure(result.stderr)
+            def verify(stage):
+                result=_run_primary([self.restic_bin,"--repo",str(stage),"cat","config"],env=environment,
+                                    capture_output=True,text=True,timeout=60)
+                if result.returncode:raise _repository_failure(result.stderr)
+                return json.loads(result.stdout)["id"]
+            try:initialize_repository(repository,initialize,verify)
+            except (OSError,ValueError,RuntimeError,subprocess.TimeoutExpired):
                 raise ProvisioningFailure("repository_error") from None
-            if initialized.returncode != 0:
-                raise _repository_failure(initialized.stderr)
         try:
-            checked = subprocess.run(
+            checked = _run_primary(
                 [*base, "cat", "config"],
                 env=environment,
                 capture_output=True,
@@ -245,7 +263,7 @@ class LabPrimaryAdapter:
             identity_file.write_text(repository_id + "\n")
             identity_file.chmod(0o600)
         try:
-            fingerprint = subprocess.run(
+            fingerprint = _run_primary(
                 ["ssh-keygen", "-lf", str(authorized), "-E", "sha256"],
                 capture_output=True,
                 text=True,
@@ -271,7 +289,7 @@ def _create_bundle(installation_id: str) -> dict:
     with tempfile.TemporaryDirectory(prefix="macip-provision-key-") as directory:
         private = Path(directory) / "id_ed25519"
         try:
-            completed = subprocess.run(
+            completed = _run_primary(
                 [
                     "ssh-keygen",
                     "-q",
@@ -343,7 +361,7 @@ class _NoRedirect(HTTPRedirectHandler):
 
 
 class ApiTransport:
-    def __init__(self, url: str, token: str, executor_id: str, *, allow_lab_http=False):
+    def __init__(self, url: str, token: str, executor_id: str, *, allow_lab_http=False, ca_file=None):
         try:
             parsed = urlsplit(url)
             port = parsed.port
@@ -363,6 +381,8 @@ class ApiTransport:
         self.token = token
         self.executor_id = executor_id
         handlers = [ProxyHandler({})] if lab_http else []
+        if ca_file:
+            handlers.append(HTTPSHandler(context=ssl.create_default_context(cafile=ca_file)))
         self._opener = build_opener(*handlers, _NoRedirect())
 
     def request(self, path: str, body: dict | None = None) -> dict:

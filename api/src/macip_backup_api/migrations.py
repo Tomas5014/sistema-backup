@@ -377,6 +377,22 @@ CREATE TABLE IF NOT EXISTS central_alerts (
 );
 '''))
 
+MIGRATIONS.append((13, "supervised-lab-automation", r'''
+ALTER TABLE installation_preparations ADD COLUMN IF NOT EXISTS reader_public_key text;
+ALTER TABLE installation_preparations ADD COLUMN IF NOT EXISTS lab_seed jsonb;
+ALTER TABLE provisioning_operations ADD COLUMN IF NOT EXISTS work_key varchar(200);
+ALTER TABLE provisioning_operations ADD COLUMN IF NOT EXISTS work jsonb;
+ALTER TABLE provisioning_operations DROP CONSTRAINT IF EXISTS provisioning_operations_kind_check;
+ALTER TABLE provisioning_operations ADD CONSTRAINT provisioning_operations_kind_check
+ CHECK(kind IN ('prepare_primary','retry_primary','protect_installation','copy_points'));
+CREATE INDEX IF NOT EXISTS ix_provisioning_work ON provisioning_operations(agent_id,work_key,created_at);
+CREATE TABLE IF NOT EXISTS lab_worker_heartbeats (
+ role varchar(20) PRIMARY KEY CHECK(role IN ('primary','protection','alerts')),
+ last_seen_at timestamptz NOT NULL DEFAULT now(), state varchar(20) NOT NULL
+ CHECK(state IN ('ready','busy','retry'))
+);
+'''))
+
 _ADVISORY_KEY = 727_203_001
 
 

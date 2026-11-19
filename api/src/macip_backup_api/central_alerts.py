@@ -198,6 +198,10 @@ def register_alerts(app):
                 status=payload.status, started_at_utc=payload.started_at, finished_at_utc=payload.finished_at,
                 snapshot_id=payload.snapshot_id,
                 error=payload.result_code if payload.status != "success" else None))
+        from .lab_automation_routes import enabled, enqueue
+        if enabled():
+            # O INSERT do resultado e a intenção de copiar são uma transação.
+            enqueue(db, preparation)
         db.commit()
         return {"accepted": True, "execution_id": str(payload.execution_id)}
 

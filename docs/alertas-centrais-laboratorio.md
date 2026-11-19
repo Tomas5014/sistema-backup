@@ -1,5 +1,11 @@
 # Alertas centrais de laboratório · Windows v1
 
+A operação supervisionada atual está em
+[Operação automática do laboratório](operacao-automatica-laboratorio.md).
+Use `services-start`/`services-stop`; o loop de terminal abaixo pertence
+à entrega anterior. A candidata Windows cria a tarefa periódica de envio
+pelo aplicativo. O contrato e as evidências históricas abaixo são preservados.
+
 Esta entrega é experimental. Use clientes fictícios e infraestrutura descartável.
 Central e Windows continuam em linhas separadas:
 `feature/backup-central-alerts` parte de `0a25d30149ba43beaf598d652831384736eccaef`;

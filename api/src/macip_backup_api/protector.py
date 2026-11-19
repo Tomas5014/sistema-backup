@@ -65,6 +65,16 @@ def _run(args: list[str], env: dict[str, str], *, operation: str, lock_fd: int) 
         args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         env=env, start_new_session=True, pass_fds=(lock_fd,),
     ) as process:
+        registry = None
+        if os.environ.get("MACIP_LAB_PROCESS_DIRECTORY"):
+            from .lab_supervisor import identity
+            from .lab_runtime import write_once
+            directory = Path(os.environ["MACIP_LAB_PROCESS_DIRECTORY"])
+            _directory(directory)
+            registry = directory / str(process.pid)
+            token = identity(process.pid)
+            if token:
+                write_once(registry, token.encode())
         try:
             output, _ = process.communicate(timeout=600)
         except subprocess.TimeoutExpired:
@@ -74,6 +84,9 @@ def _run(args: list[str], env: dict[str, str], *, operation: str, lock_fd: int) 
                 pass
             process.communicate()
             raise ProtectionError(f"{operation}: prazo excedido") from None
+        finally:
+            if registry:
+                registry.unlink(missing_ok=True)
         if process.returncode:
             raise ProtectionError(f"{operation}: falhou (código {process.returncode})")
         return output
@@ -196,7 +209,9 @@ class LabProtector:
                 raise ProtectionError("repositório de B ausente ou incompleto")
             _directory(repository, create=action == "prepare")
             if password is None:
-                if has_config or any(repository.iterdir()):
+                if (has_config or any(repository.iterdir())
+                    or (repository.parent / ('.'+repository.name+'-initializing')).exists()
+                    or (repository.parent / ('.'+repository.name+'-initializing.json')).exists()):
                     invalidate()
                     raise ProtectionError("senha original de B ausente")
                 password = secrets.token_urlsafe(48).encode()
@@ -217,7 +232,13 @@ class LabProtector:
             if not has_config:
                 if any(repository.iterdir()):
                     raise ProtectionError("repositório de B incompleto requer inspeção")
-                local("init")
+                from .lab_repository import initialize_repository
+                def initialize(stage):
+                    _run([self.restic,"--no-cache","-r",str(stage),"init"],env_b,operation="init",lock_fd=fd)
+                def verify(stage):
+                    output=_run([self.restic,"--no-cache","-r",str(stage),"cat","config"],env_b,operation="cat",lock_fd=fd)
+                    return _digest(json.loads(output)["id"])
+                initialize_repository(repository,initialize,verify)
             try:
                 repository_id = _digest(json.loads(local("cat", "config"))["id"])
             except ProtectionError:
@@ -225,6 +246,9 @@ class LabProtector:
                     invalidate()
                 raise
             self.check_volume()
+            # A exclusão local já está mantida e a identidade foi conferida.
+            # Retomadas não removem locks ativos: usa somente unlock padrão.
+            local("unlock")
             bound = api.request(endpoint + "/binding", {
                 "source": context["source"],
                 "previous_binding": context["binding_id"],

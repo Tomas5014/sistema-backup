@@ -205,6 +205,9 @@ def register_activation(app, admin_identity, provisioner):
         installation.protection_state = "pending"
         db.execute(text("UPDATE activation_codes SET registered_source=:source,state='awaiting_protection' WHERE id=:id"),
                    {"source": source_fingerprint(installation), "id": row["id"]})
+        from .lab_automation_routes import enabled, enqueue
+        if enabled():
+            enqueue(db, installation)
         db.commit()
         return {"state": "awaiting_protection"}
 

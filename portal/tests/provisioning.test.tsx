@@ -562,3 +562,23 @@ describe("agente além da primeira página", () => {
     );
   });
 });
+
+describe("operação automática do laboratório", () => {
+  it("mostra fila, última falha e executor sem atualização sem inventar falha de backup", async () => {
+    calls = stubFetch({
+      ...baseRoutes(),
+      "GET /api/v1/clients/cli-1/preparations": () => json([{...PREP,state:"primary_ready",automation:{
+        workers:[{role:"primary",stale:false,state:"ready",last_seen_at:"2026-11-19T10:00:00Z"},{role:"protection",stale:true,state:"busy",last_seen_at:null}],
+        last_attempt:{id:"b-work",kind:"copy_points",state:"pending",step:"queued",error_code:null,started_at:null,finished_at:null},
+        last_error:{error_code:"protection_failed",finished_at:"2026-11-19T09:00:00Z"}
+      }}]),
+    });
+    portal("/clients/cli-1");
+    expect(await screen.findByText("Preparação e cópia automáticas")).toBeInTheDocument();
+    expect(screen.getByText(/Última tentativa em B: Na fila/)).toBeInTheDocument();
+    expect(screen.getByText(/O sucesso anterior foi preservado/)).toBeInTheDocument();
+    expect(screen.getByText(/Sem atualização recente/)).toHaveTextContent("Isso não comprova falha do backup");
+    expect(screen.getByRole("button",{name:"Baixar perfil"})).toBeDisabled();
+    expect(screen.queryByRole("button",{name:"Gerar código de ativação"})).toBeNull();
+  });
+});

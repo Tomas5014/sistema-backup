@@ -91,9 +91,17 @@ class WindowsProfile(BaseModel):
         return self
 
 
+class LabSeed(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    repository_id: str = Field(pattern=_REPOSITORY_ID)
+    snapshot_a: str = Field(pattern=_REPOSITORY_ID)
+    manifest_sha256: str = Field(pattern=_REPOSITORY_ID)
+
+
 class SuccessResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    lab_seed: LabSeed | None = None
     account_name: str = Field(pattern=_ACCOUNT)
     repository_id: str = Field(pattern=_REPOSITORY_ID)
     public_key_fingerprint: str = Field(
@@ -194,7 +202,13 @@ def _preparation(db: Session, row: InstallationPreparation) -> dict:
         "created_at": row.created_at.isoformat(),
         "updated_at": row.updated_at.isoformat(),
         "operation": _operation(operation),
+        **_automation_summary(db, row),
     }
+
+
+def _automation_summary(db, row):
+    from .lab_automation_routes import enabled, summary
+    return {"automation": summary(db, row)} if enabled() else {}
 
 
 def _get_preparation(db: Session, agent_id: uuid.UUID, *, lock=False):
@@ -253,6 +267,8 @@ def register_provisioning(app, require_admin_identity):
     from .activation_routes import register_activation
     register_activation(app, require_admin_identity, require_provisioner)
     register_protection(app, _get_preparation, _profile_is_current)
+    from .lab_automation_routes import register_automation, enabled
+    register_automation(app, require_provisioner)
 
     @app.post(
         "/api/v1/clients/prepare",
@@ -423,6 +439,7 @@ def register_provisioning(app, require_admin_identity):
     def claim_operation(payload: ClaimIn, db: Session = Depends(session)):
         operation = db.execute(
             select(ProvisioningOperation)
+            .where(ProvisioningOperation.kind.in_(("prepare_primary", "retry_primary")))
             .where(or_(
                 ProvisioningOperation.state == "pending",
                 and_(
@@ -441,6 +458,8 @@ def register_provisioning(app, require_admin_identity):
         if operation is None:
             return {"operation": None}
         preparation = _get_preparation(db, operation.agent_id, lock=True)
+        if enabled() and not preparation.reader_public_key:
+            return {"operation": None}
         claim_id = uuid.uuid4()
         now = db.scalar(select(func.clock_timestamp()))
         expires = now + _CLAIM_DURATION
@@ -470,6 +489,7 @@ def register_provisioning(app, require_admin_identity):
                 "machine_name": agent.name,
                 "suggested_time": agent.suggested_time,
                 "account_name": account_name(client.id, agent.installation_identifier),
+                "reader_public_key": preparation.reader_public_key,
             }
         }
 
@@ -487,12 +507,14 @@ def register_provisioning(app, require_admin_identity):
             .where(ProvisioningOperation.id == operation_id)
             .with_for_update()
         ).scalar_one_or_none()
-        if operation is None:
+        if operation is None or operation.kind not in {"prepare_primary", "retry_primary"}:
             raise HTTPException(404, "operação inexistente")
+        normalized = payload.model_dump(mode="json")
+        # Campo aditivo ausente não muda o hash de resultados terminais pré-migração 13.
+        if normalized["result"] is not None and normalized["result"].get("lab_seed") is None:
+            normalized["result"].pop("lab_seed", None)
         digest = hashlib.sha256(
-            json.dumps(
-                payload.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
-            ).encode()
+            json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
         preparation = _get_preparation(db, operation.agent_id, lock=True)
         if operation.state in {"succeeded", "failed"}:
@@ -520,6 +542,10 @@ def register_provisioning(app, require_admin_identity):
         else:
             _validate_success(db, operation, payload.result)
             result = payload.result
+            if enabled() and (not result.lab_seed or result.lab_seed.repository_id != result.repository_id):
+                raise HTTPException(422, "automação exige referência de ensaio vinculada ao primário")
+            if result.lab_seed:
+                preparation.lab_seed = result.lab_seed.model_dump()
             operation.step = "verified"
             preparation.state = "primary_ready"
             preparation.step = "verified"
@@ -533,6 +559,9 @@ def register_provisioning(app, require_admin_identity):
             if not binding or binding["source"] != source_fingerprint(preparation):
                 preparation.protected_copy = None
                 preparation.protection_state = "pending"
+        if enabled() and preparation.state == "primary_ready":
+            from .lab_automation_routes import enqueue
+            enqueue(db, preparation)
         db.commit()
         return _preparation(db, preparation)
 
