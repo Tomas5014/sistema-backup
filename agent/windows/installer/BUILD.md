@@ -100,3 +100,11 @@ deve ser distribuído como tal. Quando o build acontecer no Windows,
 registrar aqui: versão (`/DVERSAO`), comando exato, caminho do `.exe`
 gerado e o SHA-256 — um pacote só é homologável com o `restic.exe`
 aprovado e a validação da VM documentada no roteiro do piloto.
+
+## Candidata com atualização/reversão controladas
+
+A candidata nova é **0.1.4-dev3-lab**. Os exemplos anteriores são históricos.
+Siga [UPDATE-ROLLBACK.md](../UPDATE-ROLLBACK.md): gere payload por commit,
+compile com MANIFEST_SHA256 e registre o SHA-256 real do exe. NSIS agora
+recusa `/S` e delega a troca ao helper transacional. Não distribua sem
+NSIS/payload aprovado e aceite na VM. Preserve o instalador 0.1.3.

@@ -2404,3 +2404,40 @@ diff --check limpo; BOM EF BB BF; Tokenize 0 erros; detector [].
 Pendente de VM: aceite visual/interacao (4b.11) — ~960 px, 100/125/150%,
 so teclado, Remmina, Enter/Tab no editor, exclusoes persistidas e
 aplicadas, Carregar pontos visivel, queda SFTP + nova tentativa.
+
+## 2026-11-19 — Atualização/reversão Windows em laboratório
+
+Branch `feature/windows-backup-update-rollback`, base preservada
+`97de94ba563feeccb24fabea11d12abada67e247`, sem merge da linha Central.
+Candidata proposta 0.1.4-dev3-lab; instalador 0.1.3 permanece referência.
+
+NSIS passa a consumir payload congelado por Git archive e manifesto com
+hashes reais dos módulos/Restic, fornecido explicitamente ao build. `/S` é
+recusado e a confirmação interativa precede alterações. Dados persistentes
+ficam em ProgramData; código muda por staging e rename, mantendo versão
+anterior, controlador e journal na área protegida irmã de Program Files.
+Tarefas backup/sync são identificadas por marcador/ação exatos, consultadas
+antes e depois de desabilitar, sem alterar conta/XML ou senha. Cada Enabled
+anterior é preservado, inclusive pausa. Arquivo/processo em uso, tarefa
+alheia/ativa, leitor incompatível ou integridade divergente recusam a troca.
+
+Rollback revalida manifesto/recibo, mantém fila/configuração/DPAPI/chave,
+preserva desinstalador e confere a versão registrada. Mesmo pacote já
+instalado não troca novamente a pasta nem perde a referência anterior.
+Leitor sem resultados não pode substituir instalação monitorada; formatos
+futuros exigem marcador explícito antes da escrita. Sem limpeza automática
+de código antigo ou dados. Atalho de reversão exige administrador.
+
+PowerShell portátil 7.4.6/Linux: run-update-tests **24 verificações aprovadas**;
+run-lab-automation-tests **27**; run-central-alerts-tests **30**;
+run-gui-tests **393**, **1 COM real ignorado**; run-windows-agent-tests
+**150**, grupo opcional Restic/SSH registrador ignorado. Filesystem/locks
+.NET reais em áreas temporárias; COM, DPAPI e processos Windows simulados.
+Cobertura inclui configuração/fila/pausa, tarefa alheia/ativa, arquivos em
+uso, corrupção, falha no segundo rename, retorno automático e retomada.
+Essas provas não homologam NTFS/FILE_SHARE_DELETE, ACL, UAC ou tarefa sem sessão.
+
+Roteiro em `agent/windows/UPDATE-ROLLBACK.md`; referências de build anteriores
+identificadas como históricas. NSIS e Restic Windows aprovado ausentes:
+build, assinatura e SHA-256 do instalador **pendentes**, sem hash inventado.
+Não houve infraestrutura operacional, dados reais, merge, tag ou deploy.

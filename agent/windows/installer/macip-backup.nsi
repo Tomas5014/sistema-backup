@@ -14,7 +14,13 @@
 ; mesmo quando outro administrador autorizou a instalacao.
 
 !ifndef VERSAO
-  !define VERSAO "0.1.4-dev2-lab"
+  !define VERSAO "0.1.4-dev3-lab"
+!endif
+!ifndef MANIFEST_SHA256
+  !error "Forneca /DMANIFEST_SHA256 do payload congelado"
+!endif
+!ifndef LEGACY_SHA256
+  !define LEGACY_SHA256 ""
 !endif
 !define NOME "MAC IP Backup"
 !define PASTA "$PROGRAMFILES64\MACIP-Backup"
@@ -35,6 +41,14 @@ SetCompressor /SOLID lzma
 !insertmacro MUI_LANGUAGE "PortugueseBR"
 
 Function .onInit
+  IfSilent refuse_silent interactive
+  refuse_silent:
+    SetErrorLevel 1
+    Abort
+  interactive:
+  MessageBox MB_YESNO|MB_DEFBUTTON2|MB_ICONQUESTION "Instalar ou atualizar este laboratorio? Feche o aplicativo e aguarde as tarefas. Configuracao, credenciais e fila serao preservadas." IDYES approved
+    Abort
+  approved:
   ; /D= na linha de comando nao pode contornar a pasta fixa do piloto.
   StrCmp "$INSTDIR" "${PASTA}" instdir_ok
     MessageBox MB_ICONSTOP|MB_OK "O piloto instala somente em ${PASTA}.$\n$\nO diretorio informado ($INSTDIR) nao e aceito -- rode o instalador sem /D=."
@@ -44,7 +58,8 @@ FunctionEnd
 
 Section "Instalar"
   SetShellVarContext all             ; $APPDATA = %ProgramData%, $SMPROGRAMS = todos os usuarios
-  SetOutPath "$INSTDIR"
+  InitPluginsDir
+  SetOutPath "$PLUGINSDIR\payload"
 
   ; Pre-verificacao de existencia do Cliente OpenSSH -- CONSULTA
   ; INCONCLUSIVA por natureza: este instalador e um processo de 32
@@ -64,15 +79,25 @@ Section "Instalar"
       "O Cliente OpenSSH nao foi encontrado nos locais verificados.$\n$\nSe ele ja estiver instalado, a ativacao do aplicativo confirmara na conta do backup. Se nao estiver, ative em: Configuracoes > Aplicativos > Recursos opcionais > Adicionar recurso > Cliente OpenSSH.$\nA instalacao continua; o backup so funciona depois que a ativacao confirmar o OpenSSH."
   ssh_ok:
 
-  File "..\Backup-MacipCliente.ps1"
-  File "..\Central-Alerts.ps1"
-  File "..\gui\MacipBackup-Gui.ps1"
-  File "..\gui\Activation-Code.ps1"
-  File "..\gui\Monitoring-Task.ps1"
-  File "..\gui\perfil.example.json"
-  File "Desinstalar-Tarefa.ps1"      ; verificacao estruturada da tarefa no uninstall
-  File "payload\restic.exe"          ; binario aprovado pela MAC IP (nao versionado)
-  File /nonfatal "payload\instalar-como-conta.txt"
+  ; Somente bytes do commit congelado pelo gerador de manifesto.
+  File "payload\Backup-MacipCliente.ps1"
+  File "payload\Central-Alerts.ps1"
+  File "payload\MacipBackup-Gui.ps1"
+  File "payload\Activation-Code.ps1"
+  File "payload\Monitoring-Task.ps1"
+  File "payload\Update-Installation.ps1"
+  File "payload\perfil.example.json"
+  File "payload\Desinstalar-Tarefa.ps1"
+  File "payload\restic.exe"
+  File "payload\MANIFEST.json"
+  File /nonfatal "payload\LEGACY-MANIFEST.json"
+  nsExec::ExecToStack '"$WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$PLUGINSDIR\payload\Update-Installation.ps1" -Action Apply -InstallRoot "$INSTDIR" -DataRoot "$APPDATA\MacipBackup" -Payload "$PLUGINSDIR\payload" -ManifestHash "${MANIFEST_SHA256}" -LegacyManifest "$PLUGINSDIR\payload\LEGACY-MANIFEST.json" -LegacyManifestHash "${LEGACY_SHA256}"'
+  Pop $0
+  Pop $1
+  ${If} $0 != 0
+    MessageBox MB_ICONSTOP|MB_OK "Atualizacao recusada ou incompleta. Dados e codigo anterior preservados. Feche o aplicativo, aguarde tarefas e confira o roteiro de recuperacao.$\n$1"
+    Abort
+  ${EndIf}
 
   ; Pasta de dados SEM espacos no caminho (limite do sftp.command do Restic).
   ; MESMO caminho da interface: %ProgramData%\MacipBackup. As subpastas de
@@ -86,6 +111,10 @@ Section "Instalar"
   CreateShortcut "$SMPROGRAMS\MAC IP Backup\MAC IP Backup.lnk" \
     "$WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" \
     '-NoProfile -ExecutionPolicy RemoteSigned -File "$INSTDIR\MacipBackup-Gui.ps1"'
+
+  CreateShortcut "$SMPROGRAMS\MAC IP Backup\Reverter atualizacao.lnk" \
+    "$WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" \
+    '-NoProfile -ExecutionPolicy RemoteSigned -File "$PROGRAMFILES64\.MACIP-Backup-update\Update-Installation.ps1" -Action Rollback -InstallRoot "$INSTDIR" -DataRoot "$APPDATA\MacipBackup"'
 
   WriteUninstaller "$INSTDIR\desinstalar.exe"
 
@@ -146,6 +175,7 @@ remover_arquivos:
     Goto fim_uninstall
   ${EndIf}
   Delete "$SMPROGRAMS\MAC IP Backup\MAC IP Backup.lnk"
+  Delete "$SMPROGRAMS\MAC IP Backup\Reverter atualizacao.lnk"
   RMDir "$SMPROGRAMS\MAC IP Backup"
   ; somente os arquivos instalados pelo pacote, por nome -- nada de curinga
   Delete "$INSTDIR\Backup-MacipCliente.ps1"
@@ -157,6 +187,8 @@ remover_arquivos:
   Delete "$INSTDIR\perfil.example.json"
   Delete "$INSTDIR\instalar-como-conta.txt"
   Delete "$INSTDIR\restic.exe"
+  Delete "$INSTDIR\MANIFEST.json"
+  Delete "$INSTDIR\Update-Installation.ps1"
   Delete "$INSTDIR\desinstalar.exe"
   RMDir "$INSTDIR"
   DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\MACIP-Backup"
