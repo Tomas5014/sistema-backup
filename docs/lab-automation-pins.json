@@ -9,5 +9,6 @@
   "activation_contract": 1,
   "windows_results_contract": 1,
   "installer_build": "pending: NSIS and approved Windows restic.exe unavailable",
-  "windows_vm_acceptance": "pending"
+  "windows_vm_acceptance": "pending",
+  "central_code": "01da90b69a5ea0a0bf45ac3df611368999a7025b"
 }

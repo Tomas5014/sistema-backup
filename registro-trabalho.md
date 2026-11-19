@@ -4009,3 +4009,19 @@ foram removidos de /tmp após inspeção; o resumo das evidências fica neste
 registro. Windows congelado no commit
 `97de94ba563feeccb24fabea11d12abada67e247`; fonte central será identificada
 no pin documental após o commit, sem reescrever histórico.
+
+
+### Fixação das fontes compatíveis da candidata automatizada
+
+- Central: `01da90b69a5ea0a0bf45ac3df611368999a7025b`, branch
+  `feature/backup-lab-automation`.
+- Windows: `97de94ba563feeccb24fabea11d12abada67e247`, branch
+  `feature/windows-backup-lab-automation`.
+- Referência preservada Windows 0.1.3:
+  `7d62a800325146d1357f8832b1df5c4c3b2eff8d`.
+
+O commit posterior fixa somente este registro e
+`docs/lab-automation-pins.json`; não muda as fontes funcionais validadas.
+O par acima define o congelamento funcional experimental. A compilação da
+candidata 0.1.4-dev2-lab e o aceite integrado na VM continuam pendentes.
+Não é homologação de Windows nem autorização para usar dados reais.
