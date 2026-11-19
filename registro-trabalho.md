@@ -4317,3 +4317,11 @@ Payload Windows sintético e PowerShell portátil são recursos auxiliares,
 removidos após os checks; não integram o artefato distribuível. Pacote final
 é mantido separado em dist, com manifesto externo e SHA-256, após o pin dos
 commits, sem substituir pacotes congelados anteriores.
+
+Pin final compatível: implementação Central
+`07c0dfe7afff3e80d596328a4cbf6f629ed99e34`, Windows
+`01f84a2b1db469e65cb562cfe73bcb5145e6d96c` (código Windows
+`493a5651fb5bf19869a87c925c8f946bbad6d71b` e ajuste documental posterior).
+O commit documental deste pin será a origem exata do pacote Central e será
+registrado pelo manifesto externo gerado depois dele. Esquema 14 e contratos
+v1; nenhum SHA circular nem hash de instalador não compilado.

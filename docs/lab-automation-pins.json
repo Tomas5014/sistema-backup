@@ -10,7 +10,7 @@
   "windows_results_contract": 1,
   "installer_build": "pending: NSIS and approved Windows restic.exe unavailable",
   "windows_vm_acceptance": "pending",
-  "central_code": "fd9a82adc295ec66a652a3d28dc69fe6842be11b",
+  "central_code": "07c0dfe7afff3e80d596328a4cbf6f629ed99e34",
   "controller_protocol": 1,
   "windows_data_format": 1,
   "windows_outbox_format": 1,
@@ -19,5 +19,6 @@
     "portal": "0.1.0"
   },
   "installer_sha256": null,
-  "central_artifact": "manifest and checksum generated externally after the final commit; no circular SHA"
+  "central_artifact": "manifest and checksum generated externally after the final commit; no circular SHA",
+  "central_code_role": "functional commit; final source commit is recorded in the external artifact manifest"
 }
