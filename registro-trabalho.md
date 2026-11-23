@@ -4325,3 +4325,172 @@ Pin final compatível: implementação Central
 O commit documental deste pin será a origem exata do pacote Central e será
 registrado pelo manifesto externo gerado depois dele. Esquema 14 e contratos
 v1; nenhum SHA circular nem hash de instalador não compilado.
+
+## 2026-11-23 — Operação e recuperação assistidas em laboratório
+
+### Base, escopo e contratos
+
+Branches separadas, sem merge: Central `feature/backup-assisted-operations`,
+base `5cb0dfa7f146606fdfacaf38ca335c615d5696ae`; Windows
+`feature/windows-backup-assisted-operations`, base
+`01f84a2b1db469e65cb562cfe73bcb5145e6d96c`. Implementação Windows fixada em
+`0381ba7b7695125655c437912119fc7579dd2e09`. Versão candidata
+**0.1.4-dev4-lab**; API/portal 0.1.0; migração PostgreSQL **15**, expansiva.
+Ativação/resultados, dados/fila Windows e controlador mantêm v1. Operações
+assistidas e transporte ZIP têm contrato v1. Referência Windows 0.1.3 preservada.
+
+Antes da alteração foram inspecionados histórico/working tree, preparação,
+ativação, leitor B, fila/reservas, monitoramento, retenção, manutenção, restauração,
+supervisão e atualização. Reutilizados esses mecanismos: nenhum executor remoto
+genérico, nova infraestrutura operacional ou nova tarefa Windows foi criado.
+Alterações preexistentes, incluindo a exclusão de atualizações.txt, permanecem
+fora dos commits. Não houve acesso a ambientes operacionais.
+
+### Implementação e correções necessárias
+
+- Painel oferece substituir computador, encerrar/reabrir instalação e recuperar
+  usando B, com resumo, confirmação explícita, estado, detalhes e retomada.
+  Admin/CSRF e identidades A/B existentes continuam obrigatórios; viewer consulta.
+- Migração registra geração e dispositivo, ciclo da instalação e evidências na
+  fila existente. Substituição/encerramento revogam códigos/tokens centrais;
+  remoção SSH só fica confirmada após executor verificar listener/sessões,
+  identidades e inventário. Falha/indisponibilidade fica pendente ou falhou.
+- Registro da nova chave exige nova prova B antes da entrega. Resultados e
+  agenda do dispositivo antigo são recusados, com histórico separado por geração.
+  Reabertura não aceita repositório vazio, ID, chave ou endereço divergentes.
+- Recuperação consulta pontos reais B cruzados com pares A/B confirmados.
+  Restic offline, bloqueado por seccomp, confere identidade, `check --read-data`,
+  `restore --verify` e SHA-256 do conteúdo do snapshot. Não depende de A/Windows;
+  nunca inicializa ou altera B. Exportação privada autenticada/revogável expira
+  em 24 h. Limites de laboratório: 1 GiB, 1.000 arquivos, manifesto de 2 MiB.
+- Resultado terminal é persistido antes do envio; reenvio não repete efeito.
+  Pasta parcial permanece incompleta e não é reutilizada. ZIP só é publicado
+  depois das verificações. Fechamento preserva contas com dados, histórico,
+  pontos e segredos necessários à recuperação. Não há exclusão definitiva.
+- App importa ZIP em pasta nova com verificação estrita de caminhos, arquivos,
+  tamanho e SHA-256, sem receber senha/chave B. Configuração, DPAPI, fila e
+  pausas permanecem inalteradas. Erro não sobrescreve destino ou instalação.
+- Prova real encontrou escrita repetida de authorized_keys durante polling de
+  ativação: `docker cp` podia expor dono incorreto até chown/chmod e provocar
+  falha SSH transitória na cópia. Publicação agora prepara dono/modo em arquivo
+  temporário e troca atomicamente; polling sem nova chave não regrava. Regressão
+  controlada e repetições reais confirmaram o ajuste, preservando a leitura B.
+- Expansão 14→15 exigiu comparar valores das colunas anteriores na verificação
+  de preservação do atualizador. Projeção explícita mantém a detecção de mudança
+  real; leitor 14 continua recusado. Instalações encerradas não são reabertas
+  implicitamente pela reconciliação da atualização.
+
+### Verificações executadas nesta sessão
+
+Ambiente observado: Python 3.14.4, Node 24.19.0, Restic 0.18.1, PostgreSQL
+16.14, PowerShell portátil 7.4.6. Infraestrutura Docker exclusivamente descartável;
+nenhum teste usa servidor/cliente operacional.
+
+API, executada a partir de `api`, com `PYTHONPATH=src:../src`, PostgreSQL
+exclusivo, imagem SFTP exclusiva, PowerShell e Mailpit de captura:
+
+```bash
+../.venv-api/bin/python -m pytest \
+  tests/test_assisted_operations.py tests/test_assisted_runtime.py \
+  tests/test_activation.py tests/test_provisioning.py tests/test_central_alerts.py \
+  tests/test_protected_copy.py tests/test_storage_api.py tests/test_lab_automation.py \
+  tests/test_lab_supervisor.py tests/test_migrations.py tests/test_recovery.py \
+  tests/test_lab_updates.py -q --tb=short
+```
+
+**89 aprovados, 0 falhas, 0 skips**, 416,90 s. Gate final focalizado em
+assisted_operations, assisted_runtime, activation e lab_updates: **27 aprovados,
+0 falhas, 0 skips**, 71,54 s. São subconjuntos/repetições, não somar como casos novos.
+PostgreSQL/concorrência reais; resultados de executor nos testes unitários da API
+são controlados. Interrupção, indisponibilidade após conclusão, reservas antigas,
+reenvio sem segunda restauração e sessão SSH ativa têm provas controladas.
+
+Na raiz, com `MACIP_TEST_ASSISTED_REAL=1`, `MACIP_TEST_ASSISTED_BROWSER=1`,
+`MACIP_TEST_PROVISIONING_SFTP_IMAGE`, `MACIP_TEST_POWERSHELL`,
+`MACIP_TEST_WINDOWS_WORKTREE` e banco descartável configurados:
+
+```bash
+PYTHONPATH=src:api/src .venv-api/bin/python -m pytest \
+  api/tests/test_assisted_real.py -q --tb=short
+```
+
+**1 cenário integrado aprovado, 0 falhas, 0 skips**, rodada final **244,72 s**.
+Duas instalações, SFTP/Restic/HTTPS/PostgreSQL/Chrome reais, nova ativação simulada
+pelo consumidor Python, chave local exclusiva, backup/exclusão, revogação real,
+B novamente comprovado, A desligado, origem inacessível, catálogo/download pelo
+painel e recuperação histórica com SHA independente anterior ao backup. Importação
+ZIP pelo módulo PowerShell Windows fixado, em Linux. Falha por volume ausente
+preservou identidade/inventário B e não publicou ZIP. Encerramento com A desligado
+ficou não confirmado; retomada preservou pontos. Reabertura de outra instalação
+com endereço estável passou; porta efêmera Docker alterada foi recusada.
+Rodadas finais anteriores também passaram (270,78 s e 281,42 s), como repetição
+do mesmo gate. Capturas desktop/mobile inspecionadas; não são prova WinForms.
+
+```bash
+PYTHONPATH=src:api/src .venv-api/bin/python -m pytest \
+  api/tests/test_lab_updates_real.py -q --tb=short
+```
+
+Com opt-in `MACIP_TEST_LAB_UPDATE_REAL=1` e imagens locais de teste:
+**1 cenário integrado aprovado, 0 falhas, 0 skips**, 286,80 s. Atualização
+14→15 preservando duas identidades, código compatível, recusa de leitor 14,
+falha/retomada de migração sintética, dump restaurável e saúde/versão no Chrome.
+Não se executou downgrade destrutivo nem atualização operacional.
+
+Portal: `npm --prefix portal test -- --reporter=dot`: **122 aprovados**;
+`npm --prefix portal run typecheck` e `npm --prefix portal run build` aprovados.
+Fetch controlado nos testes React; Chrome real na integração acima. Cobertos
+confirmação, viewer, perda de resposta, callbacks antigos, troca de rota e
+revogação ainda não confirmada. Houve ajuste de largura de controles após a
+primeira prova mobile detectar overflow; nova prova visual passou.
+
+PowerShell, na branch Windows, pelo interpretador portátil e módulos versionados:
+
+- `run-assisted-tests.ps1`: **28 verificações aprovadas**, incluindo ZIP real,
+  binário em múltiplos blocos, corrupção/extra/ausente, caminhos e recusa de
+  sobreposição, destino existente, parcial e configuração/filas preservadas.
+- `run-gui-tests.ps1`: **393 aprovadas**, **1 skip de COM real**.
+- `run-update-tests.ps1`: **24**; `run-activation-tests.ps1`: **18**;
+  `run-lab-automation-tests.ps1`: **27**; `run-central-alerts-tests.ps1`: **30**.
+- `run-windows-agent-tests.ps1`: **150 aprovadas**; grupo opcional do registrador
+  Restic/SSH não configurado e ignorado. Não contabilizado como prova real.
+
+Filesystem/ZIP/locks .NET reais; DPAPI, COM, WinForms/processos nativos simulados.
+`New-ReleaseManifest.ps1` exercitado pelo commit Windows exato com **restic.exe
+sintético**: seleção do módulo novo e todos os hashes conferidos. Isso não é
+build de instalador nem aprovação desse executável. NSIS e payload Restic Windows
+aprovado ausentes; não foi inventado SHA-256 de instalador.
+
+Compileall, sintaxe JS, JSON, ajuda da entrada pública e `git diff --check`
+conferidos. Warnings existentes de Starlette/React não representam falha nem
+aprovação de versões futuras. Tentativas iniciais falharam por fixtures de
+agenda/CSRF, projeção de migrações nos testes, overflow mobile e a publicação
+SSH descrita acima; corrigidas e repetidas. Uma rodada foi interrompida ao
+identificar porta efêmera realocada. Não são provas aprovadas ou ensaios Windows.
+
+### Congelamento, roteiro e limites
+
+Guia curto: `docs/operacao-recuperacao-assistidas.md`. Roteiro **único** final:
+`docs/homologacao-candidata-windows-a-b.md`, com Administrador, Técnico e
+Recuperação de emergência; referências antigas ficam históricas. Matriz:
+`docs/lab-automation-pins.json`. Commit funcional Central será fixado após
+seu fechamento, sem referência circular no próprio commit.
+
+Implementação congelada para compilar/aceitar a candidata. Build NSIS, Restic
+Windows aprovado, assinatura/hash, DPAPI/COM/UAC/NTFS nativos, agendamento sem
+sessão, atualização/reversão na VM e recuperação do ponto Windows por B ainda
+**pendentes**. Decisões de produção: cofre, hosts/volumes, TLS/rede, assinatura,
+capacidade/retenção representativa e responsáveis/destinatários reais. Revogação
+não apaga segredos ou arquivos já copiados. Não há aceite de produção, conclusão
+do MVP ou piloto iniciado. Não houve acesso a srvdev1, laboratórios congelados,
+PC operacional ou dados reais. Timers antigos confirmados pelo operador como
+**disabled/inactive** não foram tocados. Nenhum merge, tag ou deploy.
+
+Limpeza verificada: fixtures integradas removeram seus contêineres, processos e
+volumes privados; removidos por IDs/marcadores **3 contêineres parados** da prova
+de atualização, **1 PostgreSQL e 1 Mailpit** de testes e a tag SFTP exclusiva.
+Nenhum volume `macip-auto-*` permaneceu em /dev/shm. Removidos PowerShell portátil,
+payload/manifesto sintéticos, capturas e logs temporários desta entrega. Recursos
+preexistentes foram preservados. O pacote Central final será gerado em diretório
+novo após o commit exato, com hashes e manifestos externos; artefatos congelados
+anteriores não serão substituídos.

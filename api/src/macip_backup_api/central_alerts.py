@@ -108,7 +108,10 @@ def result_agent(request: Request, db: Session = Depends(session),
     row = db.scalar(select(AgentCredential).where(AgentCredential.token_hash == token_hash(credential.credentials)))
     if not row or row.revoked_at or row.scope != "windows-results":
         raise HTTPException(403, "credencial da instalação inválida")
+    from .assisted_routes import assert_device
+    assert_device(db, row.agent_id, row.id)
     agent = db.get(Agent, row.agent_id)
+    agent._result_credential_id = row.id
     agent.last_seen_at = datetime.now(UTC)
     db.commit()
     return agent
@@ -121,21 +124,26 @@ def register_alerts(app):
     def enroll(payload: Enrollment, request: Request, response: Response, db: Session = Depends(session)):
         if request.url.scheme != "https":
             raise HTTPException(400, "monitoramento exige HTTPS")
-        row = db.execute(text("SELECT * FROM activation_codes WHERE activation_id=:id FOR UPDATE"),
+        row = db.execute(text("SELECT * FROM activation_codes WHERE activation_id=:id"),
                          {"id": payload.activation_id}).mappings().one_or_none()
+        if row is not None:
+            from .assisted_routes import installation
+            installation(db, row["agent_id"])
+            row = db.execute(text("SELECT * FROM activation_codes WHERE activation_id=:id FOR UPDATE"),
+                             {"id":payload.activation_id}).mappings().one()
         if (not row or row["revoked_at"] or row["state"] != "delivered" or
             not hmac.compare_digest(row["resume_hash"], token_hash(payload.resume_secret)) or
             row["used_at"] + timedelta(hours=24) <= datetime.now(UTC)):
             raise HTTPException(403, "ativação não autorizada")
         preparation = db.get(InstallationPreparation, row["agent_id"])
-        if not public_protection(preparation)[2]:
+        if preparation.lifecycle != "active" or row["device_epoch"] != preparation.device_epoch or not public_protection(preparation)[2]:
             raise HTTPException(409, "prova vigente de B pendente")
         # A retomada recebe exatamente a mesma credencial. Somente seu hash é persistido.
         token = hmac.new(payload.resume_secret.encode(),
                          ("windows-results-v1:" + str(payload.activation_id)).encode(), hashlib.sha256).hexdigest()
         credential_id = uuid.uuid5(payload.activation_id, "windows-results-v1")
         db.execute(insert(AgentCredential).values(id=credential_id, agent_id=row["agent_id"],
-                   token_hash=token_hash(token), label="Windows laboratório · resultados", scope="windows-results")
+                   token_hash=token_hash(token), label="Windows laboratório · resultados", scope="windows-results", device_epoch=preparation.device_epoch)
                    .on_conflict_do_nothing(index_elements=["id"]))
         credential = db.get(AgentCredential, credential_id)
         if credential.revoked_at:
@@ -146,26 +154,32 @@ def register_alerts(app):
 
     @app.post("/api/v1/windows-results/schedule", dependencies=gate)
     def schedule(payload: ScheduleIn, agent=Depends(result_agent), db: Session = Depends(session)):
+        from .assisted_routes import assert_device
+        prep = assert_device(db, agent.id, agent._result_credential_id)
         # Identidade é sempre a do Bearer; não há agent_id livre no contrato.
         db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:id))"), {"id": str(agent.id)})
-        old = db.execute(text("SELECT * FROM windows_monitors WHERE agent_id=:id FOR UPDATE"),
+        old = db.execute(text("SELECT m.* FROM windows_monitors m JOIN installation_preparations p ON p.agent_id=m.agent_id WHERE m.agent_id=:id AND m.device_epoch=p.device_epoch FOR UPDATE"),
                          {"id": agent.id}).mappings().one_or_none()
         values = payload.model_dump(mode="json")
+        if old and old["device_epoch"] != prep.device_epoch:
+            old = None
         if old and str(old["schedule_id"]) == values["schedule_id"]:
             if old["schedule"] != values["schedule"] or old["paused"] != payload.paused:
                 raise HTTPException(409, "identidade de agenda já usada com outro conteúdo")
         else:
             if (str(old["schedule_id"]) if old else None) != (str(payload.previous_schedule_id) if payload.previous_schedule_id else None):
                 raise HTTPException(409, "agenda mudou; atualização atrasada recusada")
-            db.execute(text("INSERT INTO windows_monitors(agent_id,schedule_id,schedule,paused) "
-                "VALUES(:id,:sid,CAST(:schedule AS jsonb),:paused) ON CONFLICT(agent_id) DO UPDATE SET "
-                "schedule_id=excluded.schedule_id,schedule=excluded.schedule,paused=excluded.paused,effective_at=now()"),
-                {"id": agent.id, "sid": payload.schedule_id, "schedule": json.dumps(values["schedule"]), "paused": payload.paused})
+            db.execute(text("INSERT INTO windows_monitors(agent_id,schedule_id,schedule,paused,device_epoch) "
+                "VALUES(:id,:sid,CAST(:schedule AS jsonb),:paused,:epoch) ON CONFLICT(agent_id) DO UPDATE SET "
+                "schedule_id=excluded.schedule_id,schedule=excluded.schedule,paused=excluded.paused,device_epoch=excluded.device_epoch,effective_at=now()"),
+                {"id": agent.id, "sid": payload.schedule_id, "schedule": json.dumps(values["schedule"]), "paused": payload.paused, "epoch": prep.device_epoch})
         db.commit()
         return {"accepted": True}
 
     @app.post("/api/v1/windows-results/executions", dependencies=gate)
     def receive(payload: ResultIn, agent=Depends(result_agent), db: Session = Depends(session)):
+        from .assisted_routes import assert_device
+        current_device = assert_device(db, agent.id, agent._result_credential_id)
         if payload.finished_at > datetime.now(UTC) + timedelta(seconds=120):
             raise HTTPException(422, "relógio da execução no futuro")
         preparation = db.get(InstallationPreparation, agent.id)
@@ -174,9 +188,9 @@ def register_alerts(app):
         data = payload.model_dump(mode="json")
         encoded = json.dumps(data, sort_keys=True, separators=(",", ":"))
         digest = token_hash(encoded)
-        db.execute(text("INSERT INTO windows_results(agent_id,execution_id,started_at,finished_at,payload,payload_hash) "
-            "VALUES(:id,:exec,:start,:end,CAST(:payload AS jsonb),:hash) ON CONFLICT DO NOTHING"),
-            dict(id=agent.id, exec=payload.execution_id, start=payload.started_at, end=payload.finished_at, payload=encoded, hash=digest))
+        db.execute(text("INSERT INTO windows_results(agent_id,execution_id,started_at,finished_at,payload,payload_hash,device_epoch) "
+            "VALUES(:id,:exec,:start,:end,CAST(:payload AS jsonb),:hash,:epoch) ON CONFLICT DO NOTHING"),
+            dict(id=agent.id, exec=payload.execution_id, start=payload.started_at, end=payload.finished_at, payload=encoded, hash=digest, epoch=current_device.device_epoch))
         stored = db.scalar(text("SELECT payload_hash FROM windows_results WHERE agent_id=:id AND execution_id=:exec"),
                            {"id": agent.id, "exec": payload.execution_id})
         if stored != digest:
@@ -185,7 +199,7 @@ def register_alerts(app):
         execution_row = uuid.uuid5(agent.id, "windows:" + str(payload.execution_id))
         created = db.execute(insert(Execution).values(
             id=execution_row, agent_id=agent.id, execution_id=str(payload.execution_id),
-            task_id="windows:" + str(agent.id), status=payload.status,
+            task_id="windows:" + str(agent.id) + (":device-"+str(current_device.device_epoch) if current_device.device_epoch>1 else ""), status=payload.status,
             started_at_utc=payload.started_at, finished_at_utc=payload.finished_at,
             payload_hash=digest,
         ).on_conflict_do_nothing(index_elements=["agent_id", "execution_id"]).returning(Execution.id)).scalar()
@@ -229,12 +243,12 @@ def instant(value):
 
 
 def records(db, agent_id):
-    return list(db.execute(text("SELECT * FROM windows_results WHERE agent_id=:id ORDER BY started_at DESC,execution_id"),
+    return list(db.execute(text("SELECT w.* FROM windows_results w JOIN installation_preparations p ON p.agent_id=w.agent_id WHERE w.agent_id=:id AND w.device_epoch=p.device_epoch ORDER BY w.started_at DESC,w.execution_id"),
                            {"id": agent_id}).mappings())
 
 
 def monitor(db, agent_id):
-    return db.execute(text("SELECT * FROM windows_monitors WHERE agent_id=:id"), {"id": agent_id}).mappings().one_or_none()
+    return db.execute(text("SELECT m.* FROM windows_monitors m JOIN installation_preparations p ON p.agent_id=m.agent_id WHERE m.agent_id=:id AND m.device_epoch=p.device_epoch"), {"id": agent_id}).mappings().one_or_none()
 
 
 def status(db, agent_id, now):
@@ -266,6 +280,8 @@ def evaluate(db: Session, now: datetime):
     """Relógio central. Materializa cada ocorrência uma vez, inclusive sem agente ligado."""
     db.execute(text("SELECT pg_advisory_xact_lock(727203013)"))
     for prep in db.query(InstallationPreparation).all():
+        if prep.lifecycle != "active":
+            continue
         events = records(db, prep.agent_id)
         setting = monitor(db, prep.agent_id)
         wanted = {}

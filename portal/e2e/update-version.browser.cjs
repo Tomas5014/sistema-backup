@@ -10,7 +10,7 @@ async function main(){
   await expect(page.getByRole('link',{name:'Clientes',exact:true})).toBeVisible();
   const version=page.getByRole('region',{name:'Versão e atualização do laboratório'});
   await expect(version).toBeVisible();await version.getByText('Versão e situação da atualização',{exact:true}).click();
-  await expect(version.getByText(/esquema 14/)).toBeVisible();await expect(version.getByRole('button')).toHaveCount(0);
+  await expect(version.getByText(new RegExp('esquema '+Number(process.env.MACIP_TEST_UPDATE_EXPECTED_SCHEMA||14)))).toBeVisible();await expect(version.getByRole('button')).toHaveCount(0);
   for(const [name,width,height] of [['desktop',1200,800],['mobile',390,844]]){
    await page.setViewportSize({width,height});
    if(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth))throw Error('overflow');

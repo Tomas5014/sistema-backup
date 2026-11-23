@@ -1,5 +1,13 @@
 # Atualização e reversão controladas · laboratório
 
+A entrega histórica abaixo fixou esquema 14/Windows dev3. A candidata atual
+em [lab-automation-pins.json](lab-automation-pins.json) usa esquema **15**/Windows
+**0.1.4-dev4-lab**. A migração expansiva preserva as colunas anteriores,
+acrescenta geração/ciclo e exige leitor 15; volta simples ao leitor 14 é recusada.
+Use o helper da candidata atual para conferir as colunas anteriores durante a
+expansão. Instalações encerradas não são reabertas pela reconciliação do restore.
+Escopo e restrições do procedimento continuam válidos.
+
 Este procedimento atende **somente áreas descartáveis** criadas pelo helper
 `tools/windows-lab-server.py`, PostgreSQL local exclusivo e Mailpit. Não é um
 atualizador da central operacional/Compose, do laboratório congelado ou de

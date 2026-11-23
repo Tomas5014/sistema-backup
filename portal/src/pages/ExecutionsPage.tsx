@@ -12,7 +12,7 @@ import {
   type ClientRow,
   type ExecutionSummary,
 } from "../api";
-import { formatDate, statusLabel } from "../format";
+import { executionTaskLabel, formatDate, statusLabel } from "../format";
 import { EmptyState, ErrorState, Loading, Pagination, StatusBadge } from "../components/common";
 
 const PAGE = 25;
@@ -196,7 +196,7 @@ export function ExecutionsPage() {
                   <td>{formatDate(row.started_at_utc)}</td>
                   <td>{clientName(row.client_id)}</td>
                   <td>{agentName(row.agent_id)}</td>
-                  <td>{row.task_id}</td>
+                  <td title={row.task_id}>{executionTaskLabel(row.task_id)}</td>
                   <td>
                     <StatusBadge status={row.status} />
                   </td>

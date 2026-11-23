@@ -2,7 +2,7 @@
 
 Atualização/reversão controlada do laboratório: veja
 [roteiro](../docs/atualizacao-reversao-laboratorio.md) e
-[matriz compatível](../docs/lab-automation-pins.json). Esquema atual: **14**,
+[matriz compatível](../docs/lab-automation-pins.json). Esquema atual: **15**,
 contratos de ativação/resultados v1. O painel consulta versão/estado; somente
 o administrador local escolhe artefatos aprovados pelo helper. A API não
 aceita comandos, branches ou URLs de atualização do navegador.
@@ -466,3 +466,9 @@ no helper, escolha `init --storage-lab` em área nova. Não há exclusão autom�
 Ver [fluxo visual, proteções, testes e limites](../docs/retencao-capacidade-laboratorio.md).
 Nenhum endpoint oferece prune ou força unlock. A retenção automática de produção
 continua não homologada; Windows, cofre e hosts operacionais não mudam aqui.
+
+
+Operação assistida de laboratório: [guia](../docs/operacao-recuperacao-assistidas.md).
+Substituição/encerramento, geração do dispositivo e recuperação B offline usam
+a fila de provisionamento existente e a migração expansiva 15. Nenhum comando
+ou caminho livre é aceito do navegador; A/B mantêm autenticação separada.

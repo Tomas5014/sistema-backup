@@ -196,9 +196,10 @@ def _preparation(db: Session, row: InstallationPreparation) -> dict:
         "last_protected_copy": last_copy,
         "repository_id": row.repository_id,
         "error_code": row.error_code,
-        "profile_available": profile_available and _profile_is_current(row),
+        "profile_available": profile_available and _profile_is_current(row) and row.lifecycle == "active",
         "activation_available": profile_available and _profile_is_current(row)
-            and os.environ.get("MACIP_API_LAB_ACTIVATION") == "1",
+            and os.environ.get("MACIP_API_LAB_ACTIVATION") == "1"
+            and row.lifecycle in ("active", "awaiting_device") and row.current_device is None,
         "created_at": row.created_at.isoformat(),
         "updated_at": row.updated_at.isoformat(),
         "operation": _operation(operation),
@@ -271,6 +272,8 @@ def register_provisioning(app, require_admin_identity):
     register_automation(app, require_provisioner)
     from .storage_routes import register_storage
     register_storage(app, require_admin_identity, require_provisioner)
+    from .assisted_routes import register_assisted
+    register_assisted(app, require_admin_identity, require_provisioner)
 
     @app.post(
         "/api/v1/clients/prepare",
@@ -398,6 +401,8 @@ def register_provisioning(app, require_admin_identity):
                 raise HTTPException(409, "identificador já usado em outra preparação")
             return _preparation(db, _get_preparation(db, agent_id))
         preparation = _get_preparation(db, agent_id, lock=True)
+        if preparation.lifecycle != "active":
+            raise HTTPException(409, "instalação em atendimento ou encerrada")
         if preparation.state in {"pending", "running", "primary_ready"}:
             return _preparation(db, preparation)
         attempt = db.execute(
@@ -427,7 +432,7 @@ def register_provisioning(app, require_admin_identity):
     )
     def download_profile(agent_id: uuid.UUID, response: Response, db: Session = Depends(session)):
         preparation = _get_preparation(db, agent_id)
-        if not public_protection(preparation)[2]:
+        if preparation.lifecycle != "active" or not public_protection(preparation)[2]:
             raise HTTPException(409, "perfil bloqueado: prova de cópia protegida pendente")
         if not _profile_is_current(preparation):
             raise HTTPException(409, "perfil legado requer nova verificação")
@@ -575,7 +580,7 @@ def register_provisioning(app, require_admin_identity):
         if not config.lab_profile_export_enabled():
             raise HTTPException(404, "exportação de laboratório desabilitada")
         preparation = _get_preparation(db, agent_id)
-        if preparation.state != "primary_ready" or preparation.profile is None:
+        if preparation.lifecycle != "active" or preparation.state != "primary_ready" or preparation.profile is None:
             raise HTTPException(409, "estrutura primária ainda não verificada")
         if not _profile_is_current(preparation):
             raise HTTPException(409, "perfil legado requer nova verificação")

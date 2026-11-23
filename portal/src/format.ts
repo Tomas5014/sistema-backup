@@ -47,3 +47,9 @@ export const STATUS_LABELS: Record<string, string> = {
 export function statusLabel(status: string): string {
   return STATUS_LABELS[status] ?? status;
 }
+
+/** Geração do dispositivo no contrato Windows; histórico antigo permanece distinto. */
+export function executionTaskLabel(taskId: string): string {
+  const match=/^windows:[a-f0-9-]{36}(?::device-([1-9][0-9]*))?$/.exec(taskId);
+  return match ? `Backup Windows · geração ${match[1] ?? "1"}` : taskId;
+}

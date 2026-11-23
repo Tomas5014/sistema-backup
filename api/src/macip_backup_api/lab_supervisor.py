@@ -124,7 +124,7 @@ def stop_child(root,role,process,token):
                                   allow_lab_http=cfg.get('allow_http',False),ca_file=cfg.get('ca'))
             prefix='provisioner' if role=='primary' else 'protector'
             try:
-                transport.request(f'/api/v1/{prefix}/operations/{reservation["id"]}/release',{'claim_id':reservation['claim_id']})
+                transport.request(f'/api/v1/{prefix}'+('/assisted' if reservation.get('assisted') else '')+f'/operations/{reservation["id"]}/release',{'claim_id':reservation['claim_id']})
                 active.unlink(missing_ok=True)
             except RuntimeError:pass # a reserva durável ainda expira normalmente se a API estiver fora
 
@@ -193,14 +193,17 @@ def worker(root,role):
                 heartbeat(db,'alerts',state['value']);db.commit()
     else:
         actor=PrimaryWorker(cfg) if role=='primary' else ProtectionWorker(cfg)
+        from .assisted_runtime import AssistedWorker
+        assisted=(AssistedWorker(actor,'a' if role=='primary' else 'b')
+                  if json.loads(_private_file(root/'private/config.json')).get('assisted_exports') else None)
+        storage=None
         if cfg.get('storage'):
             from .storage_runtime import LabStorage
             storage=LabStorage(actor,'a' if role=='primary' else 'b')
-            def once():
-                actor.run_once()
-                storage.tick()
-        else:
-            once=actor.run_once
+        def once():
+            if assisted:assisted.tick()
+            actor.run_once()
+            if storage:storage.tick()
         transport=ApiTransport(cfg['api'],cfg['token'],'heartbeat-'+role,allow_lab_http=cfg.get('allow_http',False),ca_file=cfg.get('ca'))
         prefix='/api/v1/provisioner' if role=='primary' else '/api/v1/protector'
         def pulse():transport.request(prefix+'/automation/heartbeat',{'state':state['value']})

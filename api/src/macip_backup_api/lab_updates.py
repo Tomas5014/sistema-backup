@@ -212,7 +212,7 @@ class LaboratoryUpdate:
         if not re.fullmatch('[a-zA-Z][a-zA-Z0-9_]{0,62}',value):raise UpdateError('nome de banco não suportado')
         return value
 
-    def fingerprint(self,url=None):
+    def fingerprint(self,url=None,reference=None):
         self.validate_database()
         engine=create_engine(url) if url else self.engine
         try:
@@ -222,8 +222,11 @@ class LaboratoryUpdate:
                 result={}
                 for t in tables:
                     quote=db.dialect.identifier_preparer.quote
-                    values=sorted(db.scalars(text('SELECT row_to_json(t)::text FROM public.'+quote(t)+' AS t')).all())
-                    result[t]=dict(count=len(values),sha256=hashlib.sha256(json.dumps(values).encode()).hexdigest())
+                    columns=(reference.get(t,{}).get('columns') if reference else None) or list(db.scalars(text(
+                        "SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name=:table ORDER BY ordinal_position"),dict(table=t)))
+                    selection=','.join(quote(c) for c in columns)
+                    values=sorted(db.scalars(text('SELECT row_to_json(t)::text FROM (SELECT '+selection+' FROM public.'+quote(t)+') AS t')).all())
+                    result[t]=dict(count=len(values),sha256=hashlib.sha256(json.dumps(values).encode()).hexdigest(),columns=columns)
                 return result
         finally:
             if url:engine.dispose()
@@ -315,7 +318,7 @@ class LaboratoryUpdate:
                     # Dados históricos devem permanecer: apenas schema_migrations
                     # pode crescer durante uma migração expansiva.
                     manifest=json.loads(_private_file(self.directory/'backups'/self.tx['backup']/'MANIFEST.json'))
-                    current=self.fingerprint()
+                    current=self.fingerprint(reference=manifest['fingerprint'])
                     if any(current.get(t)!=v for t,v in manifest['fingerprint'].items() if t!='schema_migrations'):
                         raise UpdateError('conferência de preservação dos dados falhou')
                     self.event('running','workers',active=active,error=None)
@@ -371,7 +374,10 @@ class LaboratoryUpdate:
                 rescue_backup=self.backup()
                 self.event('running','restore',restore_source=bid,rescue_backup=rescue_backup)
                 name,url=self.restored_database((directory/'database.dump').read_bytes())
-                if self.fingerprint(url)!=m['fingerprint']:raise UpdateError('restore não corresponde ao backup')
+                restored=self.fingerprint(url)
+                if set(restored)!=set(m['fingerprint']) or any(
+                    any(restored[t].get(k)!=v for k,v in saved.items()) for t,saved in m['fingerprint'].items()):
+                    raise UpdateError('restore não corresponde ao backup')
                 staging=self.directory/('restore-'+uuid.uuid4().hex);staging.mkdir(mode=0o700)
                 with tarfile.open(directory/'state.tar') as tar:
                     for member in tar.getmembers():
@@ -406,7 +412,7 @@ class LaboratoryUpdate:
                 from .protection_routes import public_protection
                 from sqlalchemy.orm import Session
                 with Session(self.engine) as db:
-                    rows=db.query(InstallationPreparation).filter_by(state='primary_ready').all()
+                    rows=db.query(InstallationPreparation).filter_by(state='primary_ready',lifecycle='active').all()
                     if self.pending() or not all(public_protection(p)[0]=='proven' for p in rows):
                         return dict(state='reconciling',maintenance='blocked')
                 self.gate('open');self.event('recovered','reconciled',error=None)
@@ -422,7 +428,7 @@ class LaboratoryUpdate:
             os.environ['MACIP_API_LAB_AUTOMATION']='1'
             absent_summary=[]
             with Session(self.engine) as db:
-                for prep in db.query(InstallationPreparation).filter_by(state='primary_ready').all():
+                for prep in db.query(InstallationPreparation).filter_by(state='primary_ready',lifecycle='active').all():
                     ctx=context(db,prep)
                     with a.guarded(ctx) as fd:
                         ar,_,_=a.backend(ctx,fd);br,_,_=b.backend(ctx,fd)

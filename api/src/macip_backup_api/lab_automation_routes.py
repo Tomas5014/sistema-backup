@@ -59,7 +59,7 @@ def summary(db, preparation):
 
 def enqueue(db, preparation, *, force=False):
     """Chamada dentro da transação dona do resultado/identidade. Não executa Restic."""
-    if not enabled() or preparation.state != 'primary_ready' or not preparation.lab_seed:
+    if not enabled() or preparation.state != 'primary_ready' or not preparation.lab_seed or preparation.lifecycle not in ('active','awaiting_device'):
         return
     db.flush()
     db.refresh(preparation, with_for_update=True)

@@ -1,5 +1,10 @@
 # Ensaio Windows 0.1.3 → A → B
 
+> Referência técnica histórica. O roteiro único vigente da candidata está em
+> [homologacao-candidata-windows-a-b.md](homologacao-candidata-windows-a-b.md).
+> Para os novos fluxos use [operação assistida](operacao-recuperacao-assistidas.md).
+> Preserve as evidências antigas; não execute dois roteiros em paralelo.
+
 Incremento Central separado: [capacidade e retenção manual no laboratório](retencao-capacidade-laboratorio.md). A referência Windows permanece inalterada; exclusão automática não é habilitada.
 
 O fluxo ativo da candidata com automação está em

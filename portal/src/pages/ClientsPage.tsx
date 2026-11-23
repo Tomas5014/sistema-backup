@@ -18,6 +18,7 @@ import {
   type ClientRow,
   type PreparationRow,
 } from "../api";
+import { AssistedOperations } from "../components/AssistedOperations";
 import { InstallationStorage } from "../components/InstallationStorage";
 import { InstallationAlerts } from "../components/InstallationAlerts";
 import { useAuth } from "../auth";
@@ -358,6 +359,8 @@ function PreparationStatus({
   const [retrying, setRetrying] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [code, setCode] = useState<ActivationCode | null>(null);
+  const activationGeneration = useRef(0);
+  useEffect(() => { ++activationGeneration.current; setCode(null); }, [item.activation_available]);
   const [issuing, setIssuing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const alive = useRef(true);
@@ -405,8 +408,9 @@ function PreparationStatus({
     setIssuing(true);
     setError(null);
     try {
+      const generation = activationGeneration.current;
       const value = await issueActivationCode(item.installation.id);
-      if (alive.current) setCode(value);
+      if (alive.current && generation === activationGeneration.current) setCode(value);
     } catch (err) {
       if (alive.current) setError(err instanceof ApiError ? err.message : "Falha ao gerar código.");
     } finally {
@@ -499,6 +503,7 @@ function PreparationStatus({
           {downloading ? "Baixando…" : "Baixar perfil"}
         </button>
       </div>
+      <AssistedOperations id={item.installation.id} admin={admin} onChanged={onChanged} />
       <InstallationAlerts id={item.installation.id} admin={admin} />
       <InstallationStorage id={item.installation.id} admin={admin} />
       {code ? (

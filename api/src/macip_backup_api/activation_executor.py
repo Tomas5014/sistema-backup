@@ -24,6 +24,18 @@ class DeliveryIn(BaseModel):
     resume_secret: str = Field(min_length=43, max_length=128)
 
 
+def install_authorized_keys(command, container, account, path):
+    """Nunca publica authorized_keys com UID/modo transitórios do docker cp."""
+    target=f"/home/{account}/.ssh/authorized_keys"
+    temporary=target+'.activation-'+secrets.token_hex(12)
+    command('cp',str(path),container+':'+temporary)
+    command('exec',container,'chown',f'{account}:{account}',temporary)
+    command('exec',container,'chmod','600',temporary)
+    command('exec',container,'mv','-T','--',temporary,target)
+    if command('exec',container,'cat',target)!=path.read_bytes():
+        raise RuntimeError('política SSH não confirmada')
+
+
 class LabActivationExecutor:
     def __init__(self, central, accounts: Path, vault, *, lab_container=None, dynamic_containers=False):
         self.central, self.accounts, self.vault = central, accounts, vault
@@ -64,6 +76,8 @@ class LabActivationExecutor:
         fd = os.open(self.accounts / account, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
+            # A revogação pode ter ocorrido enquanto esperávamos o lock físico.
+            context = self.central.request("/api/v1/activation-executor/authorize", authorization)
             if container:
                 self.check_container(container)
                 # Lê a política efetiva de A antes de acrescentar a chave Windows.
@@ -73,7 +87,8 @@ class LabActivationExecutor:
             lines = path.read_text().splitlines()
             public = context["public_key"]
             # Preserve todas as regras existentes, incluindo a chave de leitura de B.
-            if not any(line.split()[-2:] == public.split() for line in lines):
+            changed = not any(line.split()[-2:] == public.split() for line in lines)
+            if changed:
                 temporary = path.with_name("authorized_keys." + secrets.token_hex(12))
                 with temporary.open("x") as stream:
                     temporary.chmod(0o600)
@@ -81,11 +96,8 @@ class LabActivationExecutor:
                     stream.flush()
                     os.fsync(stream.fileno())
                 os.replace(temporary, path)
-            if container:
-                target = f"/home/{account}/.ssh/authorized_keys"
-                self.container_command("cp", str(path), container + ":" + target)
-                self.container_command("exec", container, "chown", f"{account}:{account}", target)
-                self.container_command("exec", container, "chmod", "600", target)
+            if container and changed:
+                install_authorized_keys(self.container_command,container,account,path)
             if not context["registered"]:
                 self.central.request("/api/v1/activation-executor/registered", authorization)
                 return {"state": "awaiting_protection"}

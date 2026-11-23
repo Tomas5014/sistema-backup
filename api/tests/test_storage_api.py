@@ -134,7 +134,7 @@ def test_permissions_viewer_read_only_admin_csrf_and_audit(client,storage,monkey
 def test_migration_13_to_14_preserves_rows_and_repeats(client,monkeypatch):
     from macip_backup_api import migrations
     name='retention_test_'+uuid.uuid4().hex
-    versions=migrations.MIGRATIONS
+    versions=[migration for migration in migrations.MIGRATIONS if migration[0]<=14]
     with engine().begin() as db:
         db.execute(text('CREATE SCHEMA '+name))
         db.execute(text('SET LOCAL search_path TO '+name))

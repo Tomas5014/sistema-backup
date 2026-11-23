@@ -158,6 +158,8 @@ def require_agent(
         raise HTTPException(403, "token inválido ou revogado")
     if credential.scope != "agent":
         raise HTTPException(403, "credencial limitada ao envio de resultados")
+    from .assisted_routes import assert_device
+    assert_device(db, credential.agent_id, credential.id, allow_unregistered=True)
     agent = db.get(Agent, credential.agent_id)
     if agent is None:
         raise HTTPException(403, "agente inexistente")

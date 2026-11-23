@@ -37,7 +37,10 @@ def sftp_args_option(arguments: list[str]) -> str:
 
 
 class ProtectionError(RuntimeError):
-    pass
+    def __init__(self,message,*,code="protection_failed",operation=None,returncode=None,transport_error=None):
+        super().__init__(message)
+        self.code,self.operation,self.returncode=code,operation,returncode
+        self.transport_error=transport_error
 
 
 def _directory(path: Path, *, create=False) -> None:
@@ -76,19 +79,24 @@ def _run(args: list[str], env: dict[str, str], *, operation: str, lock_fd: int) 
             if token:
                 write_once(registry, token.encode())
         try:
-            output, _ = process.communicate(timeout=600)
+            output, error_output = process.communicate(timeout=600)
         except subprocess.TimeoutExpired:
             try:
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
             process.communicate()
-            raise ProtectionError(f"{operation}: prazo excedido") from None
+            raise ProtectionError(f"{operation}: prazo excedido",code="timeout",operation=operation) from None
         finally:
             if registry:
                 registry.unlink(missing_ok=True)
         if process.returncode:
-            raise ProtectionError(f"{operation}: falhou (código {process.returncode})")
+            # Categorias fechadas; nunca devolve stderr, senha, chave ou caminho.
+            lowered=error_output.lower()
+            category=next((name for marker,name in ((b'permission denied (publickey)','ssh_denied'),
+                (b'connection refused','connection_refused'),(b'connection timed out','connection_timeout'),
+                (b'wrong password','repository_password'),(b'repository is already locked','repository_locked')) if marker in lowered),None)
+            raise ProtectionError(f"{operation}: falhou (código {process.returncode})",code="restic_failed",operation=operation,returncode=process.returncode,transport_error=category)
         return output
 
 
@@ -168,7 +176,7 @@ class LabProtector:
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
-                raise ProtectionError("operação de B já em execução") from None
+                raise ProtectionError("operação de B já em execução",code="busy") from None
             yield fd
         finally:
             os.close(fd)

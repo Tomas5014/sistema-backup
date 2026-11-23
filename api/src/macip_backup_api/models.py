@@ -79,6 +79,7 @@ class ProvisioningOperation(Base):
     error_code: Mapped[str | None] = mapped_column(String(50), nullable=True)
     work_key: Mapped[str | None] = mapped_column(String(200), nullable=True)
     work = mapped_column(JSONB, nullable=True)
+    result = mapped_column(JSONB, nullable=True)
     created_at = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -113,6 +114,10 @@ class InstallationPreparation(Base):
     protected_copy = mapped_column(JSONB, nullable=True)
     reader_public_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     lab_seed = mapped_column(JSONB, nullable=True)
+    lifecycle: Mapped[str] = mapped_column(String(20), nullable=False, default="active", server_default="active")
+    device_epoch: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    current_device: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    access_state: Mapped[str] = mapped_column(String(20), nullable=False, default="none", server_default="none")
     error_code: Mapped[str | None] = mapped_column(String(50), nullable=True)
     created_at = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -131,6 +136,7 @@ class AgentCredential(Base):
     )
     token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
     label: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    device_epoch: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     created_at = mapped_column(DateTime(timezone=True), server_default=func.now())
     revoked_at = mapped_column(DateTime(timezone=True), nullable=True)
 

@@ -67,7 +67,9 @@ def configure_services(root, cfg, *, certificate, key, ca, delivery_port, mailpi
     web_port=int(command('docker','port',name,'8025/tcp').decode().strip().rsplit(':',1)[1])
     settings=dict(volume=str(volume),volume_id=volume_id,mailpit=name,mailpit_web_port=web_port)
     # Configuração local do administrador: somente a central recebe todos os tokens.
-    cfg={**cfg,'automation':True}
+    exports=root/'private/recovery-exports'
+    exports.mkdir(mode=0o700,exist_ok=True);_directory(exports)
+    cfg={**cfg,'automation':True,'assisted_exports':str(exports)}
     from .lab_supervisor import atomic_json
     atomic_json(root/'private/config.json',cfg)
     common={'root':str(root),'api':cfg['api'],'ca':ca}

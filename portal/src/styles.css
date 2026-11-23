@@ -189,3 +189,14 @@ input, select {
 
 /* IDs completos permanecem legíveis em telas estreitas. */
 .storage-id { overflow-wrap: anywhere; word-break: break-word; }
+
+.assisted-operations { margin-top: 2rem; padding-top: 1.25rem; border-top: 1px solid var(--border); }
+.assisted-operations code { overflow-wrap: anywhere; }
+.assisted-operations select { max-width: 100%; margin-bottom: .75rem; }
+.assisted-history { padding-left: 1.25rem; }
+.assisted-history > li { margin-bottom: 1.25rem; }
+.assisted-history p { margin: .4rem 0; }
+/* O select não deve impor sua largura intrínseca à coluna de instalações. */
+.preparation-status { min-width: 0; }
+.assisted-operations { min-width: 0; }
+.assisted-operations select { width: 100%; max-width: 36rem; }

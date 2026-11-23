@@ -57,6 +57,8 @@ def api_env(cfg):
             "MACIP_API_LAB_ACTIVATION": "1", "MACIP_API_LAB_ALERTS": "1",
             **({"MACIP_API_LAB_AUTOMATION": "1"} if cfg.get("automation") else {}),
             **({"MACIP_API_LAB_STORAGE": "1"} if cfg.get("storage") else {}),
+            **({"MACIP_API_LAB_ASSISTED": "1", "MACIP_LAB_RECOVERY_EXPORT_ROOT": cfg["assisted_exports"]}
+               if cfg.get("assisted_exports") else {}),
             "MACIP_API_SESSION_INSECURE_COOKIE": "0",
             "MACIP_API_ACTIVATION_PUBLIC_URL": cfg["activation_public"],
             "MACIP_API_ACTIVATION_DELIVERY_URL": cfg["activation_delivery"],
@@ -97,7 +99,7 @@ def main():
     parser.add_argument("action", choices=(
         "init", "api", "operator", "prepare-a", "seed", "prepare-b", "copy-seed",
         "prove-seed", "export-credentials", "windows-point", "copy-windows", "stop-a", "prove-windows", "stop",
-        "configure-activation", "activation-api", "activation-a", "alerts",
+        "enable-assisted", "configure-activation", "activation-api", "activation-a", "alerts",
         "services-start", "services-status", "services-stop", "services-restart", "refresh-b", "copy-activation", "prove-activation",
     ))
     parser.add_argument("area", type=Path)
@@ -193,6 +195,17 @@ def main():
         environment = {key: value for key, value in os.environ.items() if not key.startswith("MACIP_")}
         environment.update(MACIP_API_DATABASE_URL=cfg["database"], MACIP_API_LAB_ALERTS="1")
         os.execve(sys.executable, [sys.executable, "-m", "macip_backup_api.central_alerts", "--smtp-port", str(args.smtp_port)], environment)
+
+    if args.action == "enable-assisted":
+        if not cfg.get("automation"):
+            raise RuntimeError("configure primeiro os serviços exclusivos do laboratório")
+        from macip_backup_api.protector import _directory
+        from macip_backup_api.lab_supervisor import atomic_json
+        exports = root / "private/recovery-exports"
+        exports.mkdir(mode=0o700, exist_ok=True); _directory(exports)
+        atomic_json(root / "private/config.json", {**cfg, "assisted_exports": str(exports)})
+        print("Atendimento habilitado nesta área; reinicie somente os serviços do laboratório.")
+        return
 
     if args.action == "configure-activation":
         from urllib.parse import urlsplit

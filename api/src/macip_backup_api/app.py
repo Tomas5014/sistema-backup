@@ -426,12 +426,17 @@ def create_app() -> FastAPI:
     ) -> CredentialOut:
         if db.get(Agent, agent_id) is None:
             raise HTTPException(404, "agente inexistente")
+        from .models import InstallationPreparation
+        preparation = db.scalar(select(InstallationPreparation).where(InstallationPreparation.agent_id == agent_id).with_for_update())
+        if preparation and preparation.lifecycle != "active":
+            raise HTTPException(409, "instalação em atendimento ou encerrada")
         token = new_agent_token()
         credential = AgentCredential(
             id=uuid.uuid4(),
             agent_id=agent_id,
             token_hash=token_hash(token),
             label=payload.label,
+            device_epoch=preparation.device_epoch if preparation else 1,
         )
         db.add(credential)
         db.commit()

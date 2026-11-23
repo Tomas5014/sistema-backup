@@ -109,8 +109,10 @@ def register_activation(app, admin_identity, provisioner):
     @app.post("/api/v1/activation-codes", dependencies=[*gate, Depends(csrf_guard)], status_code=201)
     def issue(payload: IssueIn, response: Response, identity=Depends(admin_identity), db: Session = Depends(session)):
         row = lock_installation(db, payload.installation_id)
-        if not public_protection(row)[2]:
+        if row.lifecycle not in ("active", "awaiting_device") or not public_protection(row)[2]:
             raise HTTPException(409, "prova vigente de B pendente")
+        if row.current_device:
+            raise HTTPException(409, "computador já vinculado; retome a ativação ou use Substituir computador")
         delivery_url()
         public = os.environ.get("MACIP_API_ACTIVATION_PUBLIC_URL", "").rstrip("/")
         if urlsplit(public).scheme != "https" or not urlsplit(public).hostname or "#" in public or "?" in public or "@" in public:
@@ -119,10 +121,10 @@ def register_activation(app, admin_identity, provisioner):
         code = secrets.token_urlsafe(32)
         code_id = uuid.uuid4()
         db.execute(text(
-            "INSERT INTO activation_codes(id,agent_id,code_hash,requester_kind,requester_ref,expires_at,issued_source) "
-            "VALUES(:id,:agent,:hash,:kind,:ref,:expires,:source)"
+            "INSERT INTO activation_codes(id,agent_id,code_hash,requester_kind,requester_ref,expires_at,issued_source,device_epoch) "
+            "VALUES(:id,:agent,:hash,:kind,:ref,:expires,:source,:epoch)"
         ), dict(id=code_id, agent=row.agent_id, hash=digest(code), kind=identity.kind,
-                ref=identity.ref, expires=now + timedelta(minutes=10), source=source_fingerprint(row)))
+                ref=identity.ref, expires=now + timedelta(minutes=10), source=source_fingerprint(row),epoch=row.device_epoch))
         db.commit()
         response.headers["Cache-Control"] = "no-store"
         return {"id": str(code_id), "activation_code": public + "#macip-activation=" + code,
@@ -137,10 +139,19 @@ def register_activation(app, admin_identity, provisioner):
 
     @app.post("/api/v1/activations/redeem", dependencies=[*gate, Depends(rate_redeem)])
     def redeem(payload: RedeemIn, request: Request, response: Response, db: Session = Depends(session)):
-        row = db.execute(text("SELECT * FROM activation_codes WHERE code_hash=:hash FOR UPDATE"),
+        row = db.execute(text("SELECT * FROM activation_codes WHERE code_hash=:hash"),
                          {"hash": digest(payload.activation_code)}).mappings().one_or_none()
+        if row is not None:
+            lock_installation(db, row["agent_id"])
+            row = db.execute(text("SELECT * FROM activation_codes WHERE id=:id FOR UPDATE"),
+                             {"id":row["id"]}).mappings().one()
         if row is None or row["revoked_at"]:
             raise HTTPException(403, "código inválido ou revogado")
+        installation = lock_installation(db, row["agent_id"])
+        if installation.lifecycle not in ("active", "awaiting_device") or row["device_epoch"] != installation.device_epoch:
+            raise HTTPException(403, "dispositivo anterior revogado ou instalação encerrada")
+        if installation.lifecycle == "awaiting_device" and fingerprint(payload.public_key) == installation.public_key_fingerprint:
+            raise HTTPException(409, "gere uma chave nova no computador substituto")
         now = db.scalar(text("SELECT clock_timestamp()"))
         if row["used_at"]:
             same = (row["activation_id"] == payload.activation_id and row["device_id"] == payload.device_id
@@ -172,13 +183,21 @@ def register_activation(app, admin_identity, provisioner):
 
     @app.post("/api/v1/activation-executor/authorize", dependencies=[*gate, Depends(provisioner)])
     def authorize(payload: AuthorizeIn, db: Session = Depends(session)):
-        row = db.execute(text("SELECT * FROM activation_codes WHERE activation_id=:id FOR UPDATE"),
+        row = db.execute(text("SELECT * FROM activation_codes WHERE activation_id=:id"),
                          {"id": payload.activation_id}).mappings().one_or_none()
+        if row is not None:
+            lock_installation(db, row["agent_id"])
+            row = db.execute(text("SELECT * FROM activation_codes WHERE activation_id=:id FOR UPDATE"),
+                             {"id":payload.activation_id}).mappings().one()
         now = db.scalar(text("SELECT clock_timestamp()"))
         if (not row or row["revoked_at"] or not hmac.compare_digest(row["resume_hash"], payload.resume_hash)
                 or row["used_at"] + timedelta(hours=24) <= now):
             raise HTTPException(403, "ativação recusada")
         installation = lock_installation(db, row["agent_id"])
+        if installation.lifecycle not in ("active", "awaiting_device") or row["device_epoch"] != installation.device_epoch:
+            raise HTTPException(403, "dispositivo anterior revogado ou instalação encerrada")
+        if installation.current_device and installation.current_device != row["device_id"]:
+            raise HTTPException(403, "ativação de outro computador recusada")
         expected = row["registered_source"] or row["issued_source"]
         if source_fingerprint(installation) != expected:
             raise HTTPException(409, "identidade da instalação mudou")
@@ -201,6 +220,7 @@ def register_activation(app, admin_identity, provisioner):
         row = db.execute(text("SELECT * FROM activation_codes WHERE activation_id=:id"),
                          {"id": payload.activation_id}).mappings().one()
         installation = lock_installation(db, row["agent_id"])
+        installation.current_device = row["device_id"]
         installation.public_key_fingerprint = fingerprint(row["public_key"])
         installation.protection_state = "pending"
         db.execute(text("UPDATE activation_codes SET registered_source=:source,state='awaiting_protection' WHERE id=:id"),
@@ -218,5 +238,7 @@ def register_activation(app, admin_identity, provisioner):
             raise HTTPException(409, "nova prova de B pendente")
         db.execute(text("UPDATE activation_codes SET state='delivered',delivered_at=coalesce(delivered_at,now()) WHERE activation_id=:id"),
                    {"id": payload.activation_id})
+        installation = lock_installation(db, uuid.UUID(context["installation_id"]))
+        installation.lifecycle = "active"
         db.commit()
         return context

@@ -32,6 +32,8 @@ from test_lab_services_real import wait_for,port
 REPO=Path(__file__).resolve().parents[2]
 BASE='fd9a82adc295ec66a652a3d28dc69fe6842be11b'
 WINDOWS='97de94ba563feeccb24fabea11d12abada67e247'
+from macip_backup_api.migrations import MIGRATIONS
+CURRENT=MIGRATIONS[-1][0]
 
 
 def fixture_bundle(directory,commit,migration=None):
@@ -43,10 +45,10 @@ def fixture_bundle(directory,commit,migration=None):
         shutil.copyfile(REPO/'tools'/name,source/'tools'/name)
     if migration:
         p=source/'api/src/macip_backup_api/migrations.py'
-        with p.open('a') as out:out.write("\nMIGRATIONS.append((15,'update-fixture',"+repr(migration)+"))\n")
+        with p.open('a') as out:out.write("\nMIGRATIONS.append(("+str(CURRENT+1)+",'update-fixture',"+repr(migration)+"))\n")
     files={p.relative_to(source).as_posix():hashlib.sha256(p.read_bytes()).hexdigest() for p in source.rglob('*') if p.is_file()}
     m=dict(reconciliation=True,format=1,origin='Tomas5014/sistema-backup',commit=commit,windows='493a5651fb5bf19869a87c925c8f946bbad6d71b',activation_contract=1,results_contract=1,
-           controller_protocol=1,postgres_min=15 if migration else 14,postgres_max=15 if migration else 14,files=files)
+           controller_protocol=1,postgres_min=CURRENT+1 if migration else CURRENT,postgres_max=CURRENT+1 if migration else CURRENT,files=files)
     (directory/'MANIFEST.json').write_text(json.dumps(m))
     package=directory/'package.tgz'
     with tarfile.open(package,'w:gz') as tar:
@@ -126,10 +128,16 @@ def test_real_update_rollback_failed_migration_restore_and_reconciliation(tmp_pa
             assert db.scalar(text('SELECT count(DISTINCT agent_id) FROM executions'))==2
         result=json.loads(command(sys.executable,str(cli),'apply',str(root),'--artifact',controller,'--confirm','--wait','60',timeout=180))
         assert result['state']=='succeeded';backup=result['backup']
-        version=request('/api/v1/lab/version');assert version['commit']=='2'*40 and version['schema']==14
+        version=request('/api/v1/lab/version');assert version['commit']=='2'*40 and version['schema']==CURRENT
+        # A expansão para 15 não autoriza voltar ao leitor 14. O rollback
+        # compatível usa outro artefato capaz de ler o esquema corrente.
+        with pytest.raises(UpdateError):update.preflight(old,rollback=True)
+        compatible,ch=fixture_bundle(tmp_path/'compatible','5'*40)
+        compatible_id=stage(root,compatible,ch,'5'*40)
+        backup=update.apply(compatible_id,wait=60)['backup']
         # Escrita posterior: reversão compatível não a perde.
         later=request('/api/v1/clients',{'name':'Escrita posterior preservada'})
-        rolled=subprocess.run([sys.executable,str(cli),'rollback',str(root),'--artifact',old,'--confirm','--wait','60'],capture_output=True,timeout=180)
+        rolled=subprocess.run([sys.executable,str(cli),'rollback',str(root),'--artifact',controller,'--confirm','--wait','60'],capture_output=True,timeout=180)
         diagnostic=json.loads((root/'updates/transaction.json').read_text())
         assert rolled.returncode==0,(rolled.stderr.decode(),{k:diagnostic.get(k) for k in ('state','step','error')})
         result=json.loads(rolled.stdout)
@@ -139,7 +147,7 @@ def test_real_update_rollback_failed_migration_restore_and_reconciliation(tmp_pa
         bad,dh=fixture_bundle(tmp_path/'migration-failure','3'*40,'CREATE TABLE migration_probe(id int); SELECT 1/0;')
         bad_id=stage(root,bad,dh,'3'*40)
         with pytest.raises(UpdateError):update.apply(bad_id,wait=60)
-        assert update.schema()==14
+        assert update.schema()==CURRENT
         with update.engine.connect() as db:assert db.scalar(text("SELECT to_regclass('public.migration_probe')")) is None
         assert update.read('transaction.json')['step']=='migration'
         assert update.recover()['state']=='recovered'
@@ -148,10 +156,10 @@ def test_real_update_rollback_failed_migration_restore_and_reconciliation(tmp_pa
         for aid,cid,repo,last in identities:
             current=request(f'/api/v1/installations/{aid}/preparation')
             assert (current['client_id'],current['repository_id'],current['last_protected_copy'])==(cid,repo,last)
-        # Migração expansiva real 15; voltar ao leitor 14 fica proibido.
+        # Migração seguinte de fixture; voltar ao leitor corrente fica proibido.
         future,fh=fixture_bundle(tmp_path/'future','4'*40,'CREATE TABLE update_future_probe(id int);')
         future_id=stage(root,future,fh,'4'*40)
-        assert update.apply(future_id,wait=60)['state']=='succeeded';assert update.schema()==15
+        assert update.apply(future_id,wait=60)['state']=='succeeded';assert update.schema()==CURRENT+1
         with pytest.raises(UpdateError,match='esquema incompatível'):update.preflight(controller,rollback=True)
         preview=update.restore_preview(backup);assert 'clients' in preview['changed_tables']
         retained_url=update.cfg['database']
@@ -175,5 +183,5 @@ def test_real_update_rollback_failed_migration_restore_and_reconciliation(tmp_pa
             login='update-visual';password=secrets.token_urlsafe(24)
             request('/api/v1/operators',dict(login=login,name='Operador fictício',password=password,role='admin'))
             visual=subprocess.run(['node',str(REPO/'portal/e2e/update-version.browser.cjs'),cfg['api']],
-                env={**os.environ,'MACIP_TEST_BROWSER_LOGIN':login,'MACIP_TEST_BROWSER_PASSWORD':password},capture_output=True,timeout=60)
+                env={**os.environ,'MACIP_TEST_BROWSER_LOGIN':login,'MACIP_TEST_BROWSER_PASSWORD':password,'MACIP_TEST_UPDATE_EXPECTED_SCHEMA':str(CURRENT)},capture_output=True,timeout=60)
             assert visual.returncode==0,visual.stderr.decode()

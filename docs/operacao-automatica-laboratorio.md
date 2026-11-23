@@ -1,5 +1,11 @@
 # Operação automática do laboratório · candidata do piloto
 
+A preparação técnica abaixo continua aplicável. Para a candidata atual, use
+[operação assistida](operacao-recuperacao-assistidas.md) e o
+[roteiro único de homologação](homologacao-candidata-windows-a-b.md).
+A matriz vigente inclui migração 15 e Windows 0.1.4-dev4-lab. Referências de
+branches/versões antigas a seguir identificam a entrega histórica.
+
 Incremento Central separado: [capacidade e retenção manual no laboratório](retencao-capacidade-laboratorio.md). A referência Windows permanece inalterada; exclusão automática não é habilitada.
 
 O laboratório continua limitado a clientes fictícios, Linux nos servidores,

@@ -771,3 +771,33 @@ export interface LabVersion {
 export async function labVersion(): Promise<LabVersion> {
   return (await (await apiFetch('/api/v1/lab/version')).json()) as LabVersion;
 }
+
+export type AssistedAction = "replace" | "close" | "reopen" | "catalog" | "restore";
+export interface ProtectedPoint {snapshot_a:string; snapshot_b:string; time:string}
+export interface AssistedOperation {
+  id:string; kind:"lifecycle_a"|"recovery_b"; action:AssistedAction;
+  state:"pending"|"running"|"succeeded"|"failed"; step:string; attempt:number;
+  device_epoch:number; error_code:string|null; created_at:string; started_at?:string|null; finished_at:string|null;
+  result:null|{points:ProtectedPoint[]|null;files:number|null;expires_at:string|null;
+    archive_sha256:string|null;export_revoked?:boolean;snapshot_b:string|null};
+}
+export interface AssistedSummary {
+ lifecycle:"active"|"replacing"|"awaiting_device"|"closing"|"closed"|"reopening";
+ device_epoch:number; access_state:"none"|"requested"|"confirmed"|"failed";
+ current_device:string|null; operations:AssistedOperation[];
+}
+export async function assistedSummary(id:string):Promise<AssistedSummary>{
+ return await (await apiFetch(`/api/v1/installations/${encodeURIComponent(id)}/assisted`)).json() as AssistedSummary;
+}
+export async function requestAssisted(id:string,body:{id:string;action:AssistedAction;expected_epoch:number;confirmed:true;catalog_id?:string;snapshot_b?:string}):Promise<AssistedOperation>{
+ return await (await apiFetch(`/api/v1/installations/${encodeURIComponent(id)}/assisted`,{method:"POST",body,csrf:true})).json() as AssistedOperation;
+}
+export async function retryAssisted(id:string,operation:string):Promise<unknown>{
+ return (await apiFetch(`/api/v1/installations/${encodeURIComponent(id)}/assisted/operations/${encodeURIComponent(operation)}/retry`,{method:"POST",csrf:true})).json();
+}
+export async function revokeRecoveryExport(id:string,operation:string):Promise<unknown>{
+ return (await apiFetch(`/api/v1/installations/${encodeURIComponent(id)}/assisted/operations/${encodeURIComponent(operation)}/revoke-export`,{method:"POST",csrf:true})).json();
+}
+export async function downloadRecoveryExport(id:string,operation:string):Promise<Blob>{
+ return (await apiFetch(`/api/v1/installations/${encodeURIComponent(id)}/assisted/operations/${encodeURIComponent(operation)}/download`)).blob();
+}

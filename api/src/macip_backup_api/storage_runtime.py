@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import shutil
 import time
+import sys
 import uuid
 
 from .lab_runtime import command
@@ -56,7 +57,7 @@ class LabStorage:
                 stack.enter_context(exclusive(self.root/'a'/ctx['account'],directory=True))
             yield fd
 
-    def backend(self, ctx, fd):
+    def backend(self, ctx, fd, *, offline=False):
         aid=ctx['installation_id']
         if self.side=='a':
             runtime=json.loads(_private_file(self.root/'a'/ctx['account']/'sftp-runtime.json'))
@@ -99,8 +100,12 @@ class LabStorage:
         if password is None:raise StorageFailure('unavailable')
         def run(*args):
             executor.check_volume_identity()
-            return _run([executor.restic,'--no-cache','-r',str(repo),*args],
-                {'PATH':os.environ['PATH'],'RESTIC_PASSWORD':password.decode()},operation='armazenamento B',lock_fd=fd)
+            command=[executor.restic,'--no-cache','-r',str(repo),*args]
+            environment={'PATH':os.environ['PATH'],'RESTIC_PASSWORD':password.decode()}
+            if offline:
+                command=[sys.executable,'-m','macip_backup_api.protection_offline',*command]
+                environment['PYTHONPATH']=str(Path(__file__).resolve().parents[1])
+            return _run(command,environment,operation='armazenamento B',lock_fd=fd)
         def capacity():
             executor.check_volume_identity()
             usage=shutil.disk_usage(executor.volume)

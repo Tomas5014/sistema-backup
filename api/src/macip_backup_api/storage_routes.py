@@ -26,16 +26,22 @@ def settings(db, aid):
     return dict(row) if row else dict(policy={},capacity_a=None,capacity_b=None)
 
 
-def context(db, prep):
-    binding=current_protection(prep)
-    if prep.state!='primary_ready' or not prep.profile or not binding or binding.get('invalid'):
-        raise HTTPException(409,'identidades A/B não verificadas; preserve os pontos e conclua a preparação')
+def assert_isolated(db,prep,binding):
     identities=(prep.repository_id,binding['repository_id'])
     ambiguous=db.scalar(select(InstallationPreparation.agent_id).where(InstallationPreparation.agent_id!=prep.agent_id,
         or_(InstallationPreparation.repository_id.in_(identities),
             InstallationPreparation.protected_copy['repository_id'].as_string().in_(identities))).limit(1))
     if ambiguous:
-        raise HTTPException(409,'identidade de repositório compartilhada ou ambígua; retenção recusada')
+        raise HTTPException(409,'identidade de repositório compartilhada ou ambígua; operação recusada')
+
+
+def context(db, prep):
+    if prep.lifecycle != "active":
+        raise HTTPException(409,"instalação em atendimento ou encerrada; manutenção suspensa")
+    binding=current_protection(prep)
+    if prep.state!='primary_ready' or not prep.profile or not binding or binding.get('invalid'):
+        raise HTTPException(409,'identidades A/B não verificadas; preserve os pontos e conclua a preparação')
+    assert_isolated(db,prep,binding)
     return dict(installation_id=str(prep.agent_id),account=prep.account_name,source=source_fingerprint(prep),
         repository_a=prep.repository_id,repository_b=binding['repository_id'],protection=binding,
         seed=prep.lab_seed,policy=Policy.model_validate(settings(db,prep.agent_id)['policy']).model_dump(),

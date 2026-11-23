@@ -408,6 +408,30 @@ CREATE TABLE IF NOT EXISTS lab_storage_audit (
 );
 '''))
 
+MIGRATIONS.append((15, "assisted-installation-operations", r'''
+ALTER TABLE installation_preparations ADD COLUMN IF NOT EXISTS lifecycle varchar(20) NOT NULL DEFAULT 'active';
+ALTER TABLE installation_preparations ADD COLUMN IF NOT EXISTS device_epoch integer NOT NULL DEFAULT 1 CHECK(device_epoch>0);
+ALTER TABLE installation_preparations ADD COLUMN IF NOT EXISTS current_device uuid;
+ALTER TABLE installation_preparations ADD COLUMN IF NOT EXISTS access_state varchar(20) NOT NULL DEFAULT 'none';
+ALTER TABLE installation_preparations DROP CONSTRAINT IF EXISTS installation_lifecycle_check;
+ALTER TABLE installation_preparations ADD CONSTRAINT installation_lifecycle_check CHECK(lifecycle IN ('active','replacing','awaiting_device','closing','closed','reopening'));
+ALTER TABLE installation_preparations DROP CONSTRAINT IF EXISTS installation_access_check;
+ALTER TABLE installation_preparations ADD CONSTRAINT installation_access_check CHECK(access_state IN ('none','requested','confirmed','failed'));
+ALTER TABLE agent_credentials ADD COLUMN IF NOT EXISTS device_epoch integer NOT NULL DEFAULT 1;
+ALTER TABLE activation_codes ADD COLUMN IF NOT EXISTS device_epoch integer NOT NULL DEFAULT 1;
+UPDATE installation_preparations p SET current_device=(SELECT c.device_id FROM activation_codes c
+ WHERE c.agent_id=p.agent_id AND c.state='delivered' AND c.revoked_at IS NULL
+ ORDER BY c.delivered_at DESC NULLS LAST,c.created_at DESC LIMIT 1) WHERE p.current_device IS NULL;
+ALTER TABLE windows_results ADD COLUMN IF NOT EXISTS device_epoch integer NOT NULL DEFAULT 1;
+ALTER TABLE windows_monitors ADD COLUMN IF NOT EXISTS device_epoch integer NOT NULL DEFAULT 1;
+ALTER TABLE provisioning_operations ADD COLUMN IF NOT EXISTS result jsonb;
+ALTER TABLE provisioning_operations DROP CONSTRAINT IF EXISTS provisioning_operations_kind_check;
+ALTER TABLE provisioning_operations ADD CONSTRAINT provisioning_operations_kind_check
+ CHECK(kind IN ('prepare_primary','retry_primary','protect_installation','copy_points','storage_a','storage_b','lifecycle_a','recovery_b'));
+CREATE UNIQUE INDEX IF NOT EXISTS uq_assisted_request ON provisioning_operations(agent_id,work_key)
+ WHERE kind IN ('lifecycle_a','recovery_b');
+'''))
+
 _ADVISORY_KEY = 727_203_001
 
 

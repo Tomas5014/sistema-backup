@@ -307,19 +307,25 @@ class ProtectionWorker:
         work=operation['work']; key=self.root/'b-state'/'readers'/str(installation)/'id_ed25519'
         handoff=self.root/'reader-channel'/str(installation)
         credentials=dict(source_key=key,source_password_file=handoff/'restic-password')
+        stage='context'
         try:
             context=self.api.request(f'/api/v1/protector/installations/{installation}')
             if context['source']!=work['source']: raise ProtectionError('identidade mudou')
             expected=json.loads(_private_file(handoff/'seed-manifest.json'))
             if _manifest_digest(expected)!=work['seed']['manifest_sha256']:
                 raise ProtectionError('referência inválida')
+            stage='prepare'
             self.executor.execute(self.api,installation,'prepare',**credentials)
             for snapshot in work['snapshots']:
+                stage='copy'
                 self.executor.execute(self.api,installation,'copy',snapshot=snapshot,**credentials)
             if operation['kind']=='protect_installation':
+                stage='prove'
                 self.executor.execute(self.api,installation,'prove',manifest=handoff/'seed-manifest.json')
             body=dict(claim_id=operation['claim_id'],state='succeeded')
-        except (ProtectionError,RuntimeError,OSError,ValueError,KeyError,subprocess.SubprocessError):
+        except (ProtectionError,RuntimeError,OSError,ValueError,KeyError,subprocess.SubprocessError) as error:
+            atomic_json(self.root/'private/services/last-protection-error.json',
+                        dict(stage=stage,category=type(error).__name__,operation=operation['id'],reason=getattr(error,'code',None),command=getattr(error,'operation',None),exit_code=getattr(error,'returncode',None),transport_error=getattr(error,'transport_error',None)))
             body=dict(claim_id=operation['claim_id'],state='failed',error_code='protection_failed')
         self.api.request(f'/api/v1/protector/operations/{operation["id"]}/result',body)
         active.unlink(missing_ok=True)

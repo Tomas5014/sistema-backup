@@ -4,7 +4,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useLocation, useParams } from "react-router-dom";
 import { ApiError, getExecution, type ExecutionDetail } from "../api";
-import { formatBytes, formatDate, formatDuration } from "../format";
+import { executionTaskLabel, formatBytes, formatDate, formatDuration } from "../format";
 import { EmptyState, ErrorState, Loading, StatusBadge } from "../components/common";
 
 function Cell({ value }: { value: string | number | null | undefined }) {
@@ -58,7 +58,7 @@ export function ExecutionDetailPage() {
             <dt>Agente</dt>
             <dd className="mono">{detail.agent_id}</dd>
             <dt>Tarefa</dt>
-            <dd>{detail.task_id}</dd>
+            <dd title={detail.task_id}>{executionTaskLabel(detail.task_id)}</dd>
             <dt>Início</dt>
             <dd>{formatDate(detail.started_at_utc)}</dd>
             <dt>Fim</dt>
