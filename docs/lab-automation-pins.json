@@ -19,8 +19,9 @@
   },
   "installer_sha256": null,
   "central_artifact": "manifest and checksum generated externally after the final commit; no circular SHA",
-  "central_code_role": "functional commit pinned after implementation; exact final source commit recorded in external artifact manifest",
+  "central_code_role": "functional commit; final source commit recorded in external artifact manifest",
   "assisted_operations_contract": 1,
   "recovery_zip_contract": 1,
-  "functional_scope_frozen": true
+  "functional_scope_frozen": true,
+  "central_code": "47463e342bb7e0aed8d053da667e3574e46ce11d"
 }

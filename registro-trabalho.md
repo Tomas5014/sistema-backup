@@ -4494,3 +4494,5 @@ payload/manifesto sintéticos, capturas e logs temporários desta entrega. Recur
 preexistentes foram preservados. O pacote Central final será gerado em diretório
 novo após o commit exato, com hashes e manifestos externos; artefatos congelados
 anteriores não serão substituídos.
+
+Pin funcional Central: `47463e342bb7e0aed8d053da667e3574e46ce11d`. Windows: `0381ba7b7695125655c437912119fc7579dd2e09`. O commit documental deste pin será registrado externamente como origem exata do pacote; não há SHA circular.
