@@ -1,6 +1,7 @@
 # Como gerar o instalador do MAC IP Backup
 
-A candidata desta entrega é **0.1.4-dev3-lab**. Siga
+A candidata desta entrega é **0.1.4-dev4-lab**. A importação de arquivos de B
+está descrita em [ASSISTED-OPERATIONS.md](../ASSISTED-OPERATIONS.md). Siga
 [UPDATE-ROLLBACK.md](../UPDATE-ROLLBACK.md) para congelar o payload por commit
 e compilar com MANIFEST_SHA256. A automação anterior 0.1.4-dev2-lab permanece
 referência em [LAB-AUTOMATION.md](../LAB-AUTOMATION.md). O build não foi
@@ -110,3 +111,12 @@ Siga [UPDATE-ROLLBACK.md](../UPDATE-ROLLBACK.md): gere payload por commit,
 compile com MANIFEST_SHA256 e registre o SHA-256 real do exe. NSIS agora
 recusa `/S` e delega a troca ao helper transacional. Não distribua sem
 NSIS/payload aprovado e aceite na VM. Preserve o instalador 0.1.3.
+
+
+## Build atual com recuperação assistida
+
+Use 0.1.4-dev4-lab e o commit Windows fixado pela matriz Central. O payload
+precisa incluir `Assisted-Recovery.ps1`, produzido pelo gerador Git da candidata.
+Comandos/hashes: [ASSISTED-OPERATIONS.md](../ASSISTED-OPERATIONS.md). Exemplos
+dev3 abaixo/acima pertencem à entrega anterior. NSIS/payload aprovado continuam
+pendentes neste ambiente; nenhum instalador novo foi compilado ou homologado.

@@ -19,7 +19,7 @@ try{
  New-Item -ItemType Directory -Path $Output|Out-Null
  $base=Join-Path $temp 'source/agent/windows'
  $files=@('Backup-MacipCliente.ps1','Central-Alerts.ps1','gui/MacipBackup-Gui.ps1','gui/Activation-Code.ps1','gui/Monitoring-Task.ps1','gui/perfil.example.json','installer/Desinstalar-Tarefa.ps1')
- if(-not $Legacy){$files+=,'installer/Update-Installation.ps1'}
+ if(-not $Legacy){$files+=@('installer/Update-Installation.ps1','gui/Assisted-Recovery.ps1')}
  $hashes=[ordered]@{}
  foreach($relative in $files){
   $from=Join-Path $base $relative

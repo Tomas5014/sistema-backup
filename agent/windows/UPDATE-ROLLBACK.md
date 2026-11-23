@@ -1,5 +1,10 @@
 # Atualização e reversão do Windows · laboratório
 
+A candidata atual é **0.1.4-dev4-lab**, com importação assistida por B. Use
+[ASSISTED-OPERATIONS.md](ASSISTED-OPERATIONS.md) para a versão/payload atuais.
+As referências dev3 a seguir são históricas; o formato persistente/fila continua
+v1, sem migração ou troca automática de pausa/configuração.
+
 Candidata: **0.1.4-dev3-lab**. Base preservada:
 `97de94ba563feeccb24fabea11d12abada67e247`. O instalador 0.1.3 e o commit
 `7d62a800325146d1357f8832b1df5c4c3b2eff8d` continuam referências anteriores.

@@ -2441,3 +2441,48 @@ Roteiro em `agent/windows/UPDATE-ROLLBACK.md`; referências de build anteriores
 identificadas como históricas. NSIS e Restic Windows aprovado ausentes:
 build, assinatura e SHA-256 do instalador **pendentes**, sem hash inventado.
 Não houve infraestrutura operacional, dados reais, merge, tag ou deploy.
+
+## 2026-11-23 — operação assistida e recuperação de B no Windows
+
+Branch própria `feature/windows-backup-assisted-operations`, base exata
+`01f84a2b1db469e65cb562cfe73bcb5145e6d96c`. Sem merge da Central.
+Candidata 0.1.4-dev4-lab; 0.1.3 e os commits anteriores preservados.
+
+Nova ação na aba Restaurar: **Abrir recuperação de B**. O técnico escolhe
+ZIP e pasta pai, confirma e recebe subpasta nova. Não recebe credencial B,
+não troca configuração/identidade/fila e não modifica Enabled das tarefas.
+Manifesto/identidades, caminhos, ausência de links, nomes/case Windows,
+inventário e SHA-256 são conferidos antes e depois da escrita. Leitura
+streaming limitada ao tamanho real, até 1 GiB/1.000 arquivos; não depende
+somente do tamanho declarado no ZIP. Pasta existente é recusada sem marcador
+ou alteração; falha nova preserva apenas a própria pasta parcial como incompleta.
+
+Ativação/substituição continua pelo contrato v1, chave gerada localmente e
+prova B automática. Dados/fila continuam v1. Instalador e gerador Git incluem
+o novo módulo; remoção seletiva também conhece o arquivo. Nenhum serviço novo,
+atualização silenciosa ou mudança da confirmação nativa da conta.
+
+PowerShell portátil oficial 7.4.6/Linux:
+- `run-assisted-tests.ps1`: **28 verificações aprovadas**, filesystem/ZIP/hash/
+  locks reais, inclusive binário multi-bloco e nomes com espaços/acentos;
+- `run-gui-tests.ps1`: **393 aprovadas**, **1 COM nativo ignorado**;
+- `run-update-tests.ps1`: **24 aprovadas**;
+- `run-activation-tests.ps1`: **18 aprovadas**;
+- `run-lab-automation-tests.ps1`: **27 aprovadas**;
+- `run-central-alerts-tests.ps1`: **30 aprovadas**;
+- `run-windows-agent-tests.ps1`: **150 aprovadas**, grupo opcional de registrador
+  Restic/SSH ignorado por não configurado.
+
+COM/DPAPI/processos/WinForms foram simulados conforme cada suíte. Um ZIP produzido
+por restauração Restic real em B, com A desligado e origem Linux sem leitura,
+foi consumido por PowerShell/Linux na prova integrada da Central, comparando
+SHA-256 com referência anterior ao backup e preservando a exclusão. Isso não
+homologa Windows: DPAPI/COM/UAC/NTFS, GUI nativa, agendamento sem sessão e recuperação
+do snapshot efetivamente criado pela VM permanecem pendentes.
+
+Guias: `agent/windows/ASSISTED-OPERATIONS.md`, BUILD e UPDATE-ROLLBACK. O roteiro
+único da matriz Central é `docs/homologacao-candidata-windows-a-b.md`. NSIS e
+Restic Windows aprovado ausentes: build, assinatura e SHA-256 do instalador
+pendentes, sem hash inventado. Recursos locais de teste foram temporários;
+nenhum equipamento operacional, dado real, timer antigo ou instalação global
+foi acessado. Escopo funcional congelado para build e aceite integrado.

@@ -68,6 +68,8 @@ try {
 
 # ---------- dados do app ----------
 
+$assistedModule = Join-Path $PSScriptRoot 'Assisted-Recovery.ps1'
+if(Test-Path -LiteralPath $assistedModule){. $assistedModule}
 $activationModule = Join-Path $PSScriptRoot 'Activation-Code.ps1'
 . $activationModule
 . (Join-Path $PSScriptRoot 'Monitoring-Task.ps1')
@@ -2579,6 +2581,40 @@ function Show-Gui {
     $t4 = New-Aba '4. Restaurar'
     Add-Linha $t4 (New-Titulo 'Restaurar backup') -1 -margemTopo 0 | Out-Null
     Add-Linha $t4 (New-Rotulo 'Restaure um arquivo ou a pasta protegida inteira de um ponto — o original nunca é sobrescrito.') -1 | Out-Null
+    Add-Linha $t4 (New-Secao 'Recuperação de emergência por B') -1 -margemTopo 12 | Out-Null
+    Add-Linha $t4 (New-Rotulo 'Se A estiver indisponível, a MAC IP prepara os arquivos no painel. Abra o pacote recebido aqui; nenhuma chave ou senha de B é necessária. Uma pasta nova será criada, sem trocar sua configuração ou retomar a agenda.') -1 | Out-Null
+    $btRecuperacaoB = New-Botao 'Abrir recuperação de B...' 0
+    Add-Linha $t4 (New-LinhaBotoes @($btRecuperacaoB)) -1 | Out-Null
+    $lblRecuperacaoB = New-Rotulo ''
+    Add-Linha $t4 $lblRecuperacaoB -1 | Out-Null
+    $btRecuperacaoB.Add_Click({
+        $package = New-Object System.Windows.Forms.OpenFileDialog
+        $package.Filter = 'Recuperação MAC IP (*.zip)|*.zip'
+        if($package.ShowDialog() -ne 'OK'){return}
+        $parent = New-Object System.Windows.Forms.FolderBrowserDialog
+        $parent.Description = 'Escolha onde criar a pasta nova da recuperação; não escolha a origem nem os dados do aplicativo.'
+        if($parent.ShowDialog() -ne 'OK'){return}
+        $confirmation = [System.Windows.Forms.MessageBox]::Show($form,
+            'Conferir e recuperar os arquivos em uma pasta nova? A configuração, a fila e as pausas das tarefas serão preservadas.',
+            'Recuperação por B', 'OKCancel', 'Question')
+        if($confirmation -ne 'OK'){return}
+        $btRecuperacaoB.Enabled = $false
+        $lblRecuperacaoB.ForeColor = 'DarkBlue';$lblRecuperacaoB.Text = 'Conferindo o pacote e os arquivos...'
+        $form.Refresh()
+        try {
+            if(-not(Get-Command Import-AssistedRecovery -ErrorAction SilentlyContinue)){throw 'Módulo de recuperação ausente; reinstale a candidata aprovada.'}
+            $protected = @($script:BaseDir)
+            $active = Get-ConfigAtual
+            if($active){$protected += [string](Read-AgenteConfig -Caminho $active).origem}
+            $recovered = Import-AssistedRecovery -Archive $package.FileName -Parent $parent.SelectedPath -ProtectedRoots $protected
+            $lblRecuperacaoB.ForeColor = 'DarkGreen'
+            $lblRecuperacaoB.Text = "$($recovered.Files) arquivos conferidos. Pasta: $($recovered.Destination). Isso não reconstrói A nem reativa o backup."
+        } catch {
+            $lblRecuperacaoB.ForeColor = 'DarkRed'
+            $lblRecuperacaoB.Text = 'Recuperação não concluída. A instalação ativa foi preservada. ' + $_.Exception.Message
+        } finally {$btRecuperacaoB.Enabled = $true}
+    })
+
     Add-Linha $t4 (New-Rotulo '1. Data do backup (ponto de restauração):') -1 -margemTopo 8 | Out-Null
     $cbSnap = New-Object "$W.ComboBox"
     $cbSnap.DropDownStyle = 'DropDownList'

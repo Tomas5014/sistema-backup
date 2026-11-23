@@ -14,7 +14,7 @@
 ; mesmo quando outro administrador autorizou a instalacao.
 
 !ifndef VERSAO
-  !define VERSAO "0.1.4-dev3-lab"
+  !define VERSAO "0.1.4-dev4-lab"
 !endif
 !ifndef MANIFEST_SHA256
   !error "Forneca /DMANIFEST_SHA256 do payload congelado"
@@ -84,6 +84,7 @@ Section "Instalar"
   File "payload\Central-Alerts.ps1"
   File "payload\MacipBackup-Gui.ps1"
   File "payload\Activation-Code.ps1"
+  File "payload\Assisted-Recovery.ps1"
   File "payload\Monitoring-Task.ps1"
   File "payload\Update-Installation.ps1"
   File "payload\perfil.example.json"
@@ -182,6 +183,7 @@ remover_arquivos:
   Delete "$INSTDIR\Central-Alerts.ps1"
   Delete "$INSTDIR\MacipBackup-Gui.ps1"
   Delete "$INSTDIR\Activation-Code.ps1"
+  Delete "$INSTDIR\Assisted-Recovery.ps1"
   Delete "$INSTDIR\Monitoring-Task.ps1"
   Delete "$INSTDIR\Desinstalar-Tarefa.ps1"
   Delete "$INSTDIR\perfil.example.json"
