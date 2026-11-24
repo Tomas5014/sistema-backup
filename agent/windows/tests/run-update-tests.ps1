@@ -36,8 +36,10 @@ $folder|Add-Member ScriptMethod GetTask {param($name)if(-not $this.Tasks.Contain
 $svc=[pscustomobject]@{Folder=$folder};$svc|Add-Member ScriptMethod GetFolder {param($name)$this.Folder}
 try{
  $one=Package 'one' ('1'*40);$two=Package 'two' ('2'*40)
- $r=Invoke-CodeUpdate Apply $code $data $one.Path $one.Hash $null $svc {$false}
+ $r=Invoke-CodeUpdate Apply $code $data $one.Path $one.Hash.ToUpperInvariant() $null $svc {$false}
  Assert ($r.state -eq 'updated') 'instalacao nova'
+ $work=Join-Path (Split-Path $code) '.MACIP-Backup-update';$receiptPath=Join-Path $work 'current.json';$journalPath=Join-Path $work 'transaction.json'
+ Assert ((Get-Content $receiptPath -Raw|ConvertFrom-Json).manifest_hash -ceq $one.Hash) 'recibo grava hash normalizado'
  [IO.File]::WriteAllText((Join-Path $code 'desinstalar.exe'),'synthetic NSIS binary')
  $tasks['MACIP-Backup']=Task 'MACIP-Backup' $code $config $false
  $tasks['MACIP-Backup-Sync']=Task 'MACIP-Backup-Sync' $code $config $true
@@ -47,13 +49,21 @@ try{
  Assert (-not $tasks['MACIP-Backup'].Enabled -and $tasks['MACIP-Backup-Sync'].Enabled) 'pausa e sincronizacao preservadas independentemente'
  Assert ((Get-DataShape $data) -ceq $shape) 'configuracao e fila intactas'
  Assert ([Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $data 'restic.dpapi'))) -ceq [Convert]::ToBase64String($bytes)) 'DPAPI sintetico preservado byte a byte'
+ $receipt=Get-Content $receiptPath -Raw|ConvertFrom-Json;$receipt.manifest_hash=$receipt.manifest_hash.ToUpperInvariant();Write-UpdateJson $receiptPath $receipt
+ $verified=Invoke-CodeUpdate Verify $code $data $two.Path $two.Hash.ToLowerInvariant() $null $svc {$false}
+ Assert ($verified.state -eq 'verified') 'verify aceita recibo maiusculo e argumento minusculo'
+ $same=Invoke-CodeUpdate Apply $code $data $two.Path $two.Hash.ToUpperInvariant() $null $svc {$false}
+ Assert ($same.already_current) 'apply reconhece hashes equivalentes sem nova troca'
+ $prior=Get-Content $journalPath -Raw|ConvertFrom-Json
+ $prior.previous_manifest_hash=$prior.previous_manifest_hash.ToUpperInvariant();$prior.previous_uninstaller_hash=$prior.previous_uninstaller_hash.ToUpperInvariant();Write-UpdateJson $journalPath $prior
  $noQueue=Package 'no-queue' ('5'*40)
  $old=Get-Content (Join-Path $noQueue.Path 'MANIFEST.json') -Raw|ConvertFrom-Json;$old.results_contract=0
  Write-UpdateJson (Join-Path $noQueue.Path 'MANIFEST.json') $old
  $oldHash=(Get-FileHash (Join-Path $noQueue.Path 'MANIFEST.json') -Algorithm SHA256).Hash.ToLowerInvariant()
  try{Invoke-CodeUpdate Apply $code $data $noQueue.Path $oldHash $null $svc {$false};throw 'aceitou leitor sem fila'}catch{Assert ($_.Exception.Message -like 'Versao incapaz*') 'leitor sem resultados recusado'}
  $r=Invoke-CodeUpdate Rollback $code $data $null $null $null $svc {$false}
- Assert ($r.commit -ceq ('1'*40)) 'reversao compatível'
+ Assert ($r.commit -ceq ('1'*40)) 'reversao compativel com hashes maiusculos'
+ Assert ((Get-Content $receiptPath -Raw|ConvertFrom-Json).manifest_hash -ceq $one.Hash) 'rollback grava recibo normalizado'
  Assert ((Get-Content (Join-Path $code 'desinstalar.exe') -Raw) -ceq 'synthetic NSIS binary') 'desinstalador preservado na reversao'
  Assert ((Get-DataShape $data) -ceq $shape) 'fila preservada na reversao'
  Write-UpdateJson (Join-Path $data 'format.json') @{version=2}
@@ -73,10 +83,23 @@ try{
  $tasks['MACIP-Backup'].State=3
  $script:moves=0
  function Move-CodeDirectory([string]$From,[string]$To){$script:moves++;if($script:moves -eq 2){throw 'falha sintetica antes de publicar'};[IO.Directory]::Move($From,$To)}
- try{Invoke-CodeUpdate Apply $code $data $two.Path $two.Hash $null $svc {$false};throw 'aceitou falha'}catch{Assert ($_.Exception.Message -like 'falha sintetica*') 'falha durante troca propagada'}
+ try{Invoke-CodeUpdate Apply $code $data $two.Path $two.Hash $null $svc {$false};throw 'aceitou falha'}catch{Assert ($_.Exception.Message -like 'falha sintetica*') 'falha durante troca propagada';Assert ((Get-CurrentUpdateDiagnostic $_) -ceq $journalPath) 'somente journal da tentativa atual e indicado'}
  Assert ((Get-Content (Join-Path $code 'MANIFEST.json') -Raw|ConvertFrom-Json).commit -ceq ('1'*40)) 'retorno automatico do codigo anterior'
  Assert (-not $tasks['MACIP-Backup'].Enabled -and $tasks['MACIP-Backup-Sync'].Enabled) 'pausa preservada apos falha parcial'
  Assert ((Get-DataShape $data) -ceq $shape) 'dados preservados apos falha parcial'
+ $failureRecord=Get-Content $journalPath -Raw|ConvertFrom-Json
+ Assert ($failureRecord.attempt_id -ceq $script:UpdateAttemptId -and $failureRecord.failure.code -ceq 'unconfirmed') 'journal contem diagnostico sanitizado da tentativa atual'
+ $oldJournal=[IO.File]::ReadAllText($journalPath)
+ try{Invoke-CodeUpdate Apply $code $data $two.Path ('0'*64) $null $svc {$false};throw 'aceitou hash divergente'}catch{
+  Assert ($_.Exception.Message -like 'Integridade do manifesto*') 'hash divergente recusado antes dos efeitos'
+  Assert (-not (Get-CurrentUpdateDiagnostic $_)) 'falha inicial nao reutiliza diagnostico antigo'
+ }
+ Assert ([IO.File]::ReadAllText($journalPath) -ceq $oldJournal) 'falha inicial preserva journal de recuperacao anterior'
+ try{Invoke-CodeUpdate Apply $code $data $null $two.Hash $null $svc {$false};throw 'aceitou pacote ausente'}catch{
+  Assert ((Get-UpdateFailureInfo $_).code -ceq $failureRecord.failure.code) 'nova falha pode ter a mesma categoria do diagnostico anterior'
+  Assert (-not (Get-CurrentUpdateDiagnostic $_)) 'mesma categoria nunca reutiliza tentativa antiga'
+ }
+ Assert ([IO.File]::ReadAllText($journalPath) -ceq $oldJournal) 'journal preservado tambem em erro inicial de mesma categoria'
  function Move-CodeDirectory([string]$From,[string]$To){[IO.Directory]::Move($From,$To)}
  $r=Invoke-CodeUpdate Apply $code $data $two.Path $two.Hash $null $svc {$false}
  Assert ($r.state -eq 'updated') 'retomada apos falha parcial'

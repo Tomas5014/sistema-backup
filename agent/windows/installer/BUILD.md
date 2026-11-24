@@ -1,5 +1,7 @@
 # Como gerar o instalador do MAC IP Backup
 
+**Recompilação corrigida da dev4:** siga [o procedimento completo](REBUILD-dev4.md), incluindo referência 0.1.3, hashes e bytes Git. Exemplos de build anteriores são históricos.
+
 A candidata desta entrega é **0.1.4-dev4-lab**. A importação de arquivos de B
 está descrita em [ASSISTED-OPERATIONS.md](../ASSISTED-OPERATIONS.md). Siga
 [UPDATE-ROLLBACK.md](../UPDATE-ROLLBACK.md) para congelar o payload por commit

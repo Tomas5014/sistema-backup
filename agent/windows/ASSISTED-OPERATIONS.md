@@ -1,5 +1,7 @@
 # Operação e recuperação assistidas · Windows
 
+**Recompilação corrigida da dev4:** siga [o procedimento completo](installer/REBUILD-dev4.md), incluindo referência 0.1.3, hashes e bytes Git. Exemplos de build anteriores são históricos.
+
 Candidata **0.1.4-dev4-lab**, em branch separada da Central. Preserve o
 instalador 0.1.3. Contratos ativação/resultados v1; ZIP de recuperação v1;
 dados/fila Windows v1, sem migração. Aceite nativo da VM ainda pendente.

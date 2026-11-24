@@ -5,13 +5,71 @@ param([ValidateSet('Preflight','Apply','Rollback','Recover','Verify')][string]$A
  $Service=$null,[scriptblock]$ProcessProbe=$null)
 $ErrorActionPreference='Stop'
 
+function ConvertTo-ReleaseHash($Value) {
+ if($Value -isnot [string] -or $Value.Length -ne 64 -or $Value -cnotmatch '^[a-fA-F0-9]{64}$'){throw 'Formato SHA-256 invalido.'}
+ return $Value.ToLowerInvariant()
+}
+function Get-ReleaseFiles {
+ # Contrato unico do gerador e leitor. NSIS deve instalar/remover os mesmos nomes.
+ return [ordered]@{
+  'Backup-MacipCliente.ps1'='Backup-MacipCliente.ps1'
+  'Central-Alerts.ps1'='Central-Alerts.ps1'
+  'MacipBackup-Gui.ps1'='gui/MacipBackup-Gui.ps1'
+  'Activation-Code.ps1'='gui/Activation-Code.ps1'
+  'Assisted-Recovery.ps1'='gui/Assisted-Recovery.ps1'
+  'Monitoring-Task.ps1'='gui/Monitoring-Task.ps1'
+  'Update-Installation.ps1'='installer/Update-Installation.ps1'
+  'Desinstalar-Tarefa.ps1'='installer/Desinstalar-Tarefa.ps1'
+  'perfil.example.json'='gui/perfil.example.json'
+  'restic.exe'=$null
+ }
+}
+function Get-UpdateFailureInfo($Failure) {
+ # Nunca devolve Exception.Message, caminhos de entrada ou dados do pacote.
+ $code='unconfirmed';$cause='Nao foi possivel confirmar a atualizacao.';$action='Confira acesso ao pacote e aos diretorios protegidos; preserve os arquivos e solicite suporte.'
+ switch -Regex ($Failure.Exception.Message) {
+  '^Formato SHA-256' {$code='hash-format';$cause='SHA-256 invalido.';$action='Use exatamente 64 caracteres hexadecimais do artefato aprovado.';break}
+  '^Integridade do manifesto' {$code='manifest-integrity';$cause='O manifesto nao corresponde ao SHA-256 aprovado.';$action='Confira o hash informado e obtenha novamente o mesmo pacote aprovado.';break}
+  '^Arquivo de pacote' {$code='package-file';$cause='Manifesto contem arquivo nao permitido.';$action='Recompile pelo gerador e NSIS da mesma versao aprovada, sem arquivos adicionais.';break}
+  '^Modulo obrigatorio|^Modulo PowerShell|^Integridade de modulo|^Origem/contrato' {$code='package-integrity';$cause='Contrato ou conteudo do pacote recusado.';$action='Confira commit, bytes Git e hashes; nao gere referencia a partir da instalacao desconhecida.';break}
+  '^Instalacao sem manifesto' {$code='legacy-reference';$cause='Falta a referencia legada aprovada.';$action='Recompile com LEGACY-MANIFEST.json e seu SHA-256, gerados do commit e Restic originais aprovados.';break}
+  '^Tarefa ativa|^Arquivos/processos|^Executavel em uso|^Aplicativo/agente em uso' {$code='in-use';$cause='Aplicativo ou tarefa ainda em uso.';$action='Feche a interface, aguarde as tarefas terminarem e repita; nao force o encerramento.';break}
+  '^Tarefa alheia|^Tarefa mudou|^Propriedade da tarefa|^XML de tarefa|^Referencia de configuracao|^Configuracao fora' {$code='task-identity';$cause='Propriedade ou configuracao da tarefa nao confirmada.';$action='Preserve a tarefa e confira sua instalacao com o administrador.';break}
+  '^Versao incapaz|^Versao de dados|^Versao instalada' {$code='incompatible';$cause='Versao, dados ou fila incompativeis.';$action='Use um pacote compativel; nao altere dados ou numeros de versao para forcar a troca.';break}
+  '^Agenda nao foi confirmada' {$code='schedule-unconfirmed';$cause='Retomada da agenda nao confirmada.';$action='Preserve os arquivos e confira a recuperacao antes de retomar a agenda.';break}
+  '^Codigo anterior indisponivel|^Caminho de recuperacao|^Integridade do desinstalador' {$code='recovery-reference';$cause='Referencia de recuperacao indisponivel ou divergente.';$action='Preserve as pastas de codigo e o journal; solicite recuperacao assistida.';break}
+  '^Codigo e dados|^Identidade dos diretorios|^Registro pertence|^Link de codigo|^Link nos dados|^Dados mudaram' {$code='layout-unconfirmed';$cause='Layout ou estado da instalacao nao confirmado.';$action='Preserve codigo e dados; confira diretorios, links e operacoes em andamento com o administrador.';break}
+ }
+ if($code -eq 'unconfirmed' -and $Failure.Exception -is [IO.IOException]){$code='file-access';$cause='Arquivo ausente, bloqueado ou acesso inconclusivo.';$action='Confira o pacote, permissoes e arquivos em uso; nao apague dados ou tarefas.'}
+ return [pscustomobject]@{code=$code;cause=$cause;action=$action}
+}
+function Save-UpdateFailure([string]$Path,$Record,$Failure) {
+ if(-not $Record){return}
+ try {
+  $Record.attempt_id=$script:UpdateAttemptId;$Record.failure=Get-UpdateFailureInfo $Failure
+  Write-UpdateJson $Path $Record
+  $saved=Get-Content -LiteralPath $Path -Raw -Encoding UTF8|ConvertFrom-Json
+  if($saved.attempt_id -ceq $script:UpdateAttemptId -and $saved.failure.code -ceq $Record.failure.code){$script:UpdateDiagnosticPath=$Path}
+ } catch {} # O diagnostico secundario nao substitui a falha principal.
+}
+function Get-CurrentUpdateDiagnostic($Failure) {
+ if(-not $script:UpdateDiagnosticPath){return $null}
+ try {
+  $saved=Get-Content -LiteralPath $script:UpdateDiagnosticPath -Raw -Encoding UTF8|ConvertFrom-Json
+  $safe=Get-UpdateFailureInfo $Failure
+  if($saved.attempt_id -ceq $script:UpdateAttemptId -and $saved.failure.code -ceq $safe.code){return $script:UpdateDiagnosticPath}
+ } catch {}
+ return $null
+}
 function Read-ReleaseManifest([string]$Path,[string]$ExpectedHash) {
- if($ExpectedHash -notmatch '^[a-f0-9]{64}$' -or (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() -cne $ExpectedHash){throw 'Integridade do manifesto recusada.'}
+ $ExpectedHash=ConvertTo-ReleaseHash $ExpectedHash
+ if((Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() -cne $ExpectedHash){throw 'Integridade do manifesto recusada.'}
  $m=Get-Content -LiteralPath $Path -Raw -Encoding UTF8|ConvertFrom-Json
  if($m.format -ne 1 -or $m.commit -notmatch '^[a-f0-9]{40}$' -or $m.origin -cne 'Tomas5014/sistema-backup' -or $m.reader_min -ne 1 -or $m.reader_max -ne 1){throw 'Origem/contrato do pacote recusado.'}
- $allowed=@('Backup-MacipCliente.ps1','Central-Alerts.ps1','MacipBackup-Gui.ps1','Activation-Code.ps1','Monitoring-Task.ps1','Update-Installation.ps1','Desinstalar-Tarefa.ps1','restic.exe','perfil.example.json')
+ $allowed=@((Get-ReleaseFiles).Keys)
  foreach($property in $m.files.PSObject.Properties){
-  if($allowed -cnotcontains $property.Name -or $property.Value -notmatch '^[a-f0-9]{64}$'){throw 'Arquivo de pacote nao permitido.'}
+  if($allowed -cnotcontains $property.Name){throw 'Arquivo de pacote nao permitido.'}
+  $property.Value=ConvertTo-ReleaseHash $property.Value
  }
  foreach($name in @('Backup-MacipCliente.ps1','MacipBackup-Gui.ps1','restic.exe')){if(-not $m.files.PSObject.Properties[$name]){throw 'Modulo obrigatorio ausente.'}}
  return $m
@@ -25,7 +83,7 @@ function Test-CodeFiles([string]$Directory,$Manifest) {
    $tokens=$null;$errors=$null;[void][Management.Automation.Language.Parser]::ParseFile($path,[ref]$tokens,[ref]$errors)
    if($errors.Count -gt 0){throw 'Modulo PowerShell invalido.'}
   }
-  if((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -cne $file.Value){throw 'Integridade de modulo recusada.'}
+  if((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -cne (ConvertTo-ReleaseHash $file.Value)){throw 'Integridade de modulo recusada.'}
  }
 }
 function Write-UpdateJson([string]$Path,$Value) {
@@ -51,9 +109,13 @@ function Get-OwnedUpdateTasks([string]$Code,[string]$Data,$Svc,[string]$Helper) 
   $description=if($monitor){'MACIP Backup - envio central do piloto'}else{'MACIP Backup - agente de backup do piloto'}
   $entry=& {
    param($helper,$name,$description,$code,$data,$svc,$monitor)
-   . $helper -Nome $name -DescricaoEsperada $description -PrefixoAcao $code -Svc $svc -Monitoramento:$monitor -SomenteVerificar
+   $parameters=@{Nome=$name;DescricaoEsperada=$description;PrefixoAcao=$code;Svc=$svc;SomenteVerificar=$true}
+   $supportsMonitoring=(Get-Command $helper -ErrorAction Stop).Parameters.ContainsKey('Monitoramento')
+   if($supportsMonitoring){$parameters.Monitoramento=$monitor}
+   . $helper @parameters
    $info=Get-TarefaInfo -Svc $svc
    if($info.Status -eq 'ausente'){return $null}
+   if($monitor -and -not $supportsMonitoring){throw 'Versao incapaz de executar a sincronizacao existente.'}
    if($info.Status -ne 'encontrada' -or -not(Test-Propriedade $info.Tarefa)){throw 'Tarefa alheia/inconclusiva; instalacao preservada.'}
    $t=$info.Tarefa
    if((Get-InstanciasAtivas $t) -ne 0 -or [int]$t.State -notin @(1,3)){throw 'Tarefa ativa/pendente; aguarde, nao sera encerrada.'}
@@ -103,6 +165,7 @@ function Set-InstalledUpdateVersion([string]$Code,$Manifest,[switch]$OnlyCheck) 
 function Move-CodeDirectory([string]$From,[string]$To){[IO.Directory]::Move($From,$To)}
 function Invoke-CodeUpdate {
  param([string]$Mode,[string]$Code,[string]$Data,[string]$Package,[string]$Hash,[string]$Legacy,$Svc,[scriptblock]$Probe,[string]$LegacyHash)
+ $script:UpdateAttemptId=[Guid]::NewGuid().ToString('N');$script:UpdateDiagnosticPath=$null
  $Code=[IO.Path]::GetFullPath($Code);$Data=[IO.Path]::GetFullPath($Data)
  if($Data -eq $Code -or $Data.StartsWith($Code+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or $Code.StartsWith($Data+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)){throw 'Codigo e dados precisam ser separados.'}
  $work=Join-Path ([IO.Path]::GetDirectoryName($Code)) '.MACIP-Backup-update'
@@ -116,6 +179,7 @@ function Invoke-CodeUpdate {
    if(-not ([IO.Path]::GetFullPath($prior.previous)).StartsWith($work+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)){throw 'Caminho de recuperacao divergente.'}
    $Package=$prior.previous;$Hash=$prior.previous_manifest_hash
   }
+  $Hash=ConvertTo-ReleaseHash $Hash
   $manifestPath=Join-Path $Package 'MANIFEST.json';$m=Read-ReleaseManifest $manifestPath $Hash
   Test-CodeFiles $Package $m;Test-DataReader $Data $m
   Set-InstalledUpdateVersion $Code $m -OnlyCheck
@@ -133,6 +197,7 @@ function Invoke-CodeUpdate {
    }
    $previousHash=$LegacyHash
    if(Test-Path -LiteralPath $receiptPath){$receipt=Get-Content -LiteralPath $receiptPath -Raw|ConvertFrom-Json;if($receipt.install_root -cne $Code -or $receipt.data_root -cne $Data){throw 'Identidade dos diretorios instalados divergente.'};$previousHash=$receipt.manifest_hash}
+   $previousHash=ConvertTo-ReleaseHash $previousHash
    $current=Read-ReleaseManifest $installed $previousHash
    Test-CodeFiles $Code $current
   }
@@ -149,11 +214,11 @@ function Invoke-CodeUpdate {
   if(Test-Path -LiteralPath $uninstaller){$uninstallerHash=(Get-FileHash -LiteralPath $uninstaller -Algorithm SHA256).Hash.ToLowerInvariant()}
   $desiredUninstaller=if($Mode -in @('Rollback','Recover')){Join-Path $Package 'desinstalar.exe'}else{$uninstaller}
   if(Test-Path -LiteralPath $desiredUninstaller){
-   if($Mode -in @('Rollback','Recover') -and (Get-FileHash -LiteralPath $desiredUninstaller -Algorithm SHA256).Hash.ToLowerInvariant() -cne $prior.previous_uninstaller_hash){throw 'Integridade do desinstalador anterior divergente.'}
+   if($Mode -in @('Rollback','Recover') -and (Get-FileHash -LiteralPath $desiredUninstaller -Algorithm SHA256).Hash.ToLowerInvariant() -cne (ConvertTo-ReleaseHash $prior.previous_uninstaller_hash)){throw 'Integridade do desinstalador anterior divergente.'}
    Copy-Item -LiteralPath $desiredUninstaller -Destination (Join-Path $next 'desinstalar.exe')
   }
   $saved=@($tasks|ForEach-Object{[pscustomobject]@{name=$_.Name;enabled=$_.Enabled;xml=$_.Xml}})
-  $record=@{state='prepared';previous=$previous;previous_manifest_hash=$previousHash;previous_uninstaller_hash=$uninstallerHash;next=$next;commit=$m.commit;tasks=$saved}
+  $record=@{attempt_id=$script:UpdateAttemptId;state='prepared';previous=$previous;previous_manifest_hash=$previousHash;previous_uninstaller_hash=$uninstallerHash;next=$next;commit=$m.commit;tasks=$saved}
   Write-UpdateJson $journalPath $record
   foreach($task in $tasks){$task.Task.Enabled=$false}
   $fresh=Get-OwnedUpdateTasks $Code $Data $Svc $helper
@@ -185,7 +250,7 @@ function Invoke-CodeUpdate {
  }catch{
   if($swapped){try{Move-CodeDirectory $Code $next;$swapped=$false}catch{}}
   if($oldMoved -and -not(Test-Path -LiteralPath $Code)){try{Move-CodeDirectory $previous $Code;$oldMoved=$false}catch{}}
-  if($record){$record.state='failed';Write-UpdateJson $journalPath $record}
+  if($record){$record.state='failed';Save-UpdateFailure $journalPath $record $_}
   throw
  }finally{
   foreach($handle in $handles){$handle.Dispose()}
@@ -198,10 +263,16 @@ function Invoke-CodeUpdate {
    }catch{$resumeFailed=$true;Write-Warning 'Agenda preservada desabilitada: confira a recuperacao antes de retomar.'}
   }
   $lock.Dispose()
-  if($resumeFailed){if($record){$record.state='needs-recovery';Write-UpdateJson $journalPath $record};throw 'Agenda nao foi confirmada; codigo preservado, consulte recuperacao.'}
+  if($resumeFailed){try{throw 'Agenda nao foi confirmada; codigo preservado, consulte recuperacao.'}catch{if($record){$record.state='needs-recovery';Save-UpdateFailure $journalPath $record $_};throw}}
  }
 }
 if($MyInvocation.InvocationName -ne '.'){
  try{Invoke-CodeUpdate $Action $InstallRoot $DataRoot $Payload $ManifestHash $LegacyManifest $Service $ProcessProbe $LegacyManifestHash|ConvertTo-Json -Compress;exit 0}
- catch{[Console]::Error.WriteLine('Atualizacao recusada/incompleta. Instalacao e dados preservados; consulte transaction.json na area protegida.');exit 1}
+ catch{
+  $safe=Get-UpdateFailureInfo $_
+  [Console]::Error.WriteLine(('Atualizacao recusada/incompleta. [{0}] Causa: {1} Acao: {2}' -f $safe.code,$safe.cause,$safe.action))
+  $diagnostic=Get-CurrentUpdateDiagnostic $_
+  if($diagnostic){[Console]::Error.WriteLine(('Diagnostico desta tentativa: {0}' -f $diagnostic))}
+  exit 1
+ }
 }

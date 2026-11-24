@@ -1,5 +1,7 @@
 # Atualização e reversão do Windows · laboratório
 
+**Recompilação corrigida da dev4:** siga [o procedimento completo](installer/REBUILD-dev4.md), incluindo referência 0.1.3, hashes e bytes Git. Exemplos de build anteriores são históricos.
+
 A candidata atual é **0.1.4-dev4-lab**, com importação assistida por B. Use
 [ASSISTED-OPERATIONS.md](ASSISTED-OPERATIONS.md) para a versão/payload atuais.
 As referências dev3 a seguir são históricas; o formato persistente/fila continua

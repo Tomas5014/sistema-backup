@@ -2486,3 +2486,114 @@ Restic Windows aprovado ausentes: build, assinatura e SHA-256 do instalador
 pendentes, sem hash inventado. Recursos locais de teste foram temporários;
 nenhum equipamento operacional, dado real, timer antigo ou instalação global
 foi acessado. Escopo funcional congelado para build e aceite integrado.
+
+## 2026-11-24 — Correção do instalador Windows dev4
+
+Branch própria `fix/windows-dev4-installer-update`, criada exatamente de
+`0381ba7b7695125655c437912119fc7579dd2e09`. Linha Central não foi alterada.
+Inspecionados status, worktrees, histórico, scripts e instruções aplicáveis;
+worktree Windows estava limpo. Arquivos preexistentes da Central permanecem
+fora desta entrega. Candidata continua **0.1.4-dev4-lab**, sem mudança nos
+contratos centrais ou nos formatos persistentes Windows.
+
+### Evidência relatada e reprodução local
+
+O operador informou compilação NSIS **3.11** bem-sucedida da base dev4, mas
+recusa ao atualizar a VM 0.1.3. Informou também SHA-256 correspondente de todos
+os arquivos da instalação à referência
+`7d62a800325146d1357f8832b1df5c4c3b2eff8d`, com conversão Git de quebras de
+linha desabilitada. Isso é evidência do operador; não foi executado nesta sessão.
+
+Reprodução isolada antes da alteração, PowerShell portátil **7.4.6** em Linux,
+Git e payload Restic sintético, sem execução desse payload:
+
+- Gerador recusou ResticHash maiúsculo com "Restic nao corresponde ao payload aprovado".
+- Leitor recusou manifesto SHA maiúsculo com "Integridade do manifesto recusada".
+- Manifesto real gerado do commit base, com hash minúsculo, foi recusado por
+  incluir Assisted-Recovery.ps1: "Arquivo de pacote nao permitido".
+- Entrada pública, hash divergente antes dos efeitos, mandou consultar
+  transaction.json embora esse arquivo contivesse somente o journal anterior.
+- Git temporário demonstrou que archive com core.autocrlf=true altera bytes
+  LF; com override false eles correspondem ao blob. As **24** verificações
+  anteriores passavam sem detectar esses casos.
+
+### Correções
+
+Lista única Get-ReleaseFiles compartilhada pelo gerador e atualizador, incluindo
+Assisted-Recovery.ps1. Regressão confere que NSIS instala exatamente essa lista
+e possui as remoções correspondentes, sem aceitar um arquivo extra no manifesto.
+
+SHA-256 exige string com exatamente 64 caracteres hexadecimais e é normalizado
+para minúsculas em entradas, arquivos do manifesto, recibo, journal, verificação,
+atualização, uninstaller anterior e retorno. Hash divergente ou formato inválido
+continua recusado. O gerador também aceita hashes aprovados maiúsculos.
+
+A saída pública agora apresenta causa e ação por categorias fixas, sem expor
+exceção bruta ou valores recebidos. Cada tentativa reinicia sua identidade de
+diagnóstico. Falha inicial não sobrescreve o journal anterior nem aponta para
+ele. Uma transação já preparada grava diagnóstico sanitizado com attempt_id;
+só após leitura e conferência dessa identidade o caminho pode aparecer no erro.
+Falha secundária de gravação não substitui a falha principal. Regressão cobre
+inclusive duas tentativas diferentes com a mesma categoria de erro.
+
+Novo ensaio real de arquivos legados revelou que o helper 0.1.3 não aceita o
+parâmetro Monitoramento, passado incondicionalmente pelo controlador. A chamada
+agora consulta o contrato do helper conferido e só fornece esse parâmetro quando
+suportado. Tarefa de sincronização existente permanece incompatível com leitor
+legado e é recusada; propriedade/atividade das tarefas não foi relaxada.
+Retorno de instalação sem fila monitorada foi verificado com arquivos 0.1.3
+vindos de Git, não com referência inventada da pasta instalada.
+
+Gerador usa git -c core.autocrlf=false -c core.eol=lf archive e compara cada
+arquivo exportado com o blob aprovado via hash-object --no-filters. A configuração
+Git Windows não pode transformar silenciosamente a referência; divergência de
+bytes recusa o build. Nenhum git config global foi alterado.
+
+### Comandos e resultados
+
+Na raiz do worktree Windows, com interpretador portátil em diretório temporário:
+
+```powershell
+pwsh -NoProfile -File agent/windows/tests/run-installer-contract-tests.ps1
+pwsh -NoProfile -File agent/windows/tests/run-update-tests.ps1
+pwsh -NoProfile -File agent/windows/tests/run-gui-tests.ps1
+pwsh -NoProfile -File agent/windows/tests/run-windows-agent-tests.ps1
+```
+
+- Contrato: **50 verificações aprovadas**, **0 falhas**. Manifesto completo real
+  por commit, todos os módulos, Git com autocrlf=true/eol=crlf no ambiente,
+  exportação de bytes exatos, SHA maiúsculo/minúsculo e inválido, arquivo extra,
+  legado sem manifesto correspondente/divergente, atualização e Recover,
+  preservação de dados/pausa/journal e erro público da tentativa atual.
+- Atualização: **36 verificações aprovadas**, **0 falhas**. Inclui Verify com
+  recibo maiúsculo, aplicação idempotente, Rollback com hashes maiúsculos de
+  manifesto/uninstaller e diagnóstico de falha parcial seguido de falha inicial.
+- GUI: **393 aprovadas**, **0 falhas**, **1 skip COM real**.
+- Agente: **150 aprovadas**, **0 falhas**; grupo opcional Restic real + registrador
+  SSH ignorado por falta da configuração explícita. Não equivale a teste real.
+- Parser PowerShell e git diff --check aprovados. Primeira fixture de tarefa
+  estava incompleta; foi corrigida para a estrutura exata gerada pelo app.
+  Depois disso o teste encontrou a incompatibilidade real do helper legado acima.
+
+Git, hashes, parse dos módulos, arquivos, locks, renames e criação/consumo dos
+manifestos são reais. Restic.exe/NSIS da fixture são texto sintético; COM,
+DPAPI e processos Windows foram simulados. Não houve build NSIS nesta sessão,
+execução de Restic Windows, instalação global ou acesso à VM/ambientes operacionais.
+A compilação NSIS relatada pelo operador e o aceite nativo pendente permanecem
+separados das regressões Linux. Repetições de gates não são casos adicionais.
+
+### Recompilação e aceite pendente
+
+Roteiro completo executável: agent/windows/installer/REBUILD-dev4.md. Usa checkout
+novo do SHA completo aprovado, payload exclusivo, Restic da candidata e referência
+legada a partir do commit 0.1.3 e do Restic original aprovado, além dos dois hashes
+no NSIS. BUILD.md, UPDATE-ROLLBACK.md e ASSISTED-OPERATIONS.md apontam para esse
+procedimento; exemplos antigos são históricos. Não se gera manifesto a partir de
+arquivos instalados desconhecidos. Preserve instaladores e evidências anteriores.
+
+Próximo passo do operador: recompilar, registrar SHA-256 real do exe e repetir a
+atualização na VM com UAC, tarefas/pausas, configuração, DPAPI, fila, backup e
+restauração conferidos. Nenhuma homologação Windows ou produção foi declarada.
+Sem merge, tag, deploy, force-push ou alteração na Central. Recursos temporários
+próprios das suítes são removidos em finally; interpretador e auxiliares desta
+sessão serão removidos após a conferência do commit exato.
