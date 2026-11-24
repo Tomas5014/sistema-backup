@@ -1,5 +1,7 @@
 # Como gerar o instalador do MAC IP Backup
 
+**Antes de reinstalar a dev4:** siga o [gate nativo de troca e retomada](DIRECTORY-SWAP.md). Preserve next, previous e journal existentes.
+
 **Recompilação corrigida da dev4:** siga [o procedimento completo](REBUILD-dev4.md), incluindo referência 0.1.3, hashes e bytes Git. Exemplos de build anteriores são históricos.
 
 A candidata desta entrega é **0.1.4-dev4-lab**. A importação de arquivos de B

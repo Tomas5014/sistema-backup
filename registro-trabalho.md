@@ -2597,3 +2597,135 @@ restauração conferidos. Nenhuma homologação Windows ou produção foi declar
 Sem merge, tag, deploy, force-push ou alteração na Central. Recursos temporários
 próprios das suítes são removidos em finally; interpretador e auxiliares desta
 sessão serão removidos após a conferência do commit exato.
+
+## 2026-11-24 — Troca de diretórios do atualizador Windows
+
+Branch `fix/windows-update-directory-swap`, criada exatamente de
+`87158ac965cd339a633783061957fe296487b524`. Worktree Windows estava limpo;
+Central e alterações preexistentes foram preservadas. Nenhum acesso à VM,
+instalação operacional ou dados reais. Candidata continua 0.1.4-dev4-lab.
+
+### Evidência e investigação antes da alteração
+
+O operador relatou NSIS 3.11 e Windows PowerShell 5.1: atualização recusada,
+saída unconfirmed, journal failed, aplicativo e next presentes, previous ausente.
+A suíte temporária nativa falhou em IO.Directory.Move com acesso negado a next.
+O relato não trouxe HRESULT numérico. É evidência nativa do operador, não
+execução Windows por este agente.
+
+A inspeção confirmou que o controlador mantinha handles ReadWrite/FileShare.Delete
+sobre arquivos filhos até finally, abrangendo renames e recuperação. O diagnóstico
+examinava principalmente a exceção externa do PowerShell; não identificava
+adequadamente a IOException interna nem a etapa da troca. Além disso, erro ao
+retomar tarefa no finally podia substituir a falha principal.
+
+A documentação Microsoft FILE_RENAME_INFORMATION descreve restrição de rename
+de diretório contendo arquivo aberto, com exceção de oplocks:
+https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information
+Isso sustenta a hipótese dos próprios handles; não prova isoladamente a causa
+exata na VM nem exclui antivírus/processo externo/permissões. Não se ampliaram ACL.
+
+Criada reprodução mínima em TEMP com quatro casos: sem handles; antigo com
+handles em active+next; antigo só next; sondagem exclusiva fechada antes de mover.
+Em Linux/PowerShell portátil 7.4.6, volume identificado como ext3 pela API .NET,
+todos os casos passaram. Saída **not-proven-on-Linux**. Não existe Windows
+nativo neste ambiente; confirmação NTFS fica pendente. Baseline da suíte antiga:
+**36 verificações aprovadas**, apesar da falha nativa relatada.
+
+### Correção
+
+A sondagem de acesso exclusivo não foi retirada: usa FileShare.None, recusa
+arquivo em uso e fecha seus handles antes do primeiro rename. O lock externo
+update.lock continua exclusivo até o fim da transação/retomada de tarefas.
+Tarefas permanecem pausadas; propriedade, ausência de execução, processos,
+compatibilidade e hashes continuam conferidos. Há nova conferência de integridade
+antes e depois da publicação. Não há kill, overwrite forçado, remoção da instalação
+ou alteração de permissões. Abertura externa posterior à sondagem ainda pode
+causar recusa; não se promete uma exclusão universal de antivírus/processos.
+
+Fases fixas move-active/publish-next e recuperação são registradas, com tipo da
+exceção interna e HRESULT sanitizados. A exceção principal recebe metadados da
+etapa original antes da recuperação; erros secundários ficam separados em
+recovery_errors, inclusive falha de retomada no finally. Mensagens brutas,
+comandos, segredos e conteúdo de arquivos não entram no diagnóstico.
+
+Uma tentativa nova nunca reutiliza/apaga next ou previous anteriores: verifica
+o código ativo, usa GUID novo e arquiva o journal anterior byte a byte em history
+antes de escrever a nova transação. No estado relatado failed/active presente/
+previous ausente, pode repetir o instalador corrigido sem limpeza manual.
+Código ausente ou needs-recovery recusa nova instalação; Recover só aceita
+referência anterior válida e mesmas definições de tarefas. Reposição restaura
+as pausas originalmente gravadas, não a pausa temporária deixada pela falha.
+
+Falha depois de gravar recibo novo também repõe o recibo anterior quando o código
+anterior é restaurado. O controlador externo corrigido passa a ser publicado
+atomicamente, preservando o anterior; não fica retido um controlador antigo com
+a mesma falha de handles no atalho de reversão. Configuração, chaves, DPAPI, fila
+e repositórios não são movidos ou apagados por estes procedimentos.
+
+### Provas efetivamente executadas
+
+Na raiz do worktree Windows, com PowerShell portátil 7.4.6 em /tmp:
+
+```powershell
+pwsh -NoProfile -File agent/windows/tests/probe-directory-rename.ps1 -AllowNonWindows
+pwsh -NoProfile -File agent/windows/tests/run-update-tests.ps1
+pwsh -NoProfile -File agent/windows/tests/run-installer-contract-tests.ps1
+pwsh -NoProfile -File agent/windows/tests/run-gui-tests.ps1
+pwsh -NoProfile -File agent/windows/tests/run-windows-agent-tests.ps1
+```
+
+- Matriz mínima: **4 casos Linux aprovados**, hipótese NTFS **não comprovada**.
+  Sem AllowNonWindows, o helper recusa Linux; no Windows exige PowerShell 5.1
+  e TEMP em NTFS. JSON informa plataforma, compartilhamento, handles retidos,
+  etapa, tipo/HRESULT observado e resultado depois de fechar os handles.
+- Atualização: **63 verificações aprovadas**, 0 falhas. Instalação inicial,
+  atualização com manifesto e rollback não retêm seus próprios handles no hook
+  de rename. Dados/fila sintéticos conferidos por SHA-256, código ativo, recibo
+  e pausas independentes verificados após sucesso/recusa/reposição.
+- Dois testes usam outro processo PowerShell real: arquivo aberto e update.lock.
+  Recusa confirmada sem matar esse processo; ele só libera ao sinal da fixture,
+  com prazo próprio. Não equivale a NTFS; são processos/locks reais no Linux.
+- Falhas injetadas no primeiro rename reproduzem o layout relatado sem destruir
+  active/next. Repetição usa staging novo e preserva exatamente o journal antigo.
+  Falha entre os renames, falha secundária de reposição e do finally preservam
+  a exceção inicial; needs-recovery bloqueia Apply; Recover repõe código e pausas.
+  Falha final após recibo também retorna código e recibo coerentes.
+- IOException/HRESULT 0x80070005 usados na fixture são **sintéticos**, não uma
+  medição da VM. Diagnóstico tipado testado sem vazar a mensagem sintética.
+- Contrato Git/legado: **50 verificações aprovadas**, 0 falhas, incluindo arquivos
+  reais da referência 0.1.3, adoção e Recover. Restic/NSIS são texto sintético.
+- GUI: **393 aprovadas**, 0 falhas, **1 skip COM real**.
+- Agente: **150 aprovadas**, 0 falhas; grupo opcional Restic real/registrador SSH
+  não configurado e ignorado. Não apresentado como teste real.
+
+COM, DPAPI, processos do produto e registro Windows são simulados. As duas suítes
+de atualização agora substituem explicitamente o acesso ao registro mesmo na VM,
+para que testes temporários não consultem/alterem HKLM da instalação existente.
+File IO, locks, renames, manifestos e processos filhos da fixture são reais no
+sistema de teste. Validação de parser, links locais e git diff --check concluídos.
+Falhas iniciais da nova regressão foram expectativa antiga de unconfirmed e
+semântica Linux de FileShare.Delete distinta do guard FileShare.None; corrigidos
+expectativas e sondagem exclusiva, sem inferir um resultado NTFS.
+
+### Gate nativo e recompilação
+
+Roteiro: agent/windows/installer/DIRECTORY-SWAP.md, ligado pelo BUILD,
+UPDATE-ROLLBACK e REBUILD-dev4. Antes de outro instalador, o operador deve executar
+probe-directory-rename.ps1, run-update-tests.ps1 e run-installer-contract-tests.ps1
+em PowerShell 5.1/NTFS, usando checkout novo do SHA completo final. São fixtures
+em TEMP; não modificam dados, tarefas ou registro da VM instalada. Guardar saídas,
+exit codes e rename-native.json. Controles sem handles/sondagem fechada e suítes
+precisam passar; registrar se o comportamento antigo foi realmente reproduzido.
+
+Só depois dos gates, recompilar pelo REBUILD-dev4.md com NSIS 3.11, payload
+aprovado e referência legada do commit original conhecido, preservando os bytes
+Git. Registrar SHA-256 real do exe e repetir atualização/backup/recuperação na
+janela do operador. Não usar o atalho de um controlador anterior como reparo
+antes dessa conferência. Não gerar referências a partir de instalação desconhecida.
+
+Não se executou NSIS, PowerShell 5.1, NTFS, COM/DPAPI reais ou instalação nativa
+nesta sessão. Build novo e aceite na VM permanecem pendentes. Não há homologação
+Windows ou produção. Sem merge, tag, deploy, force-push ou mudança na Central.
+Fixtures são removidas em finally; auxiliares portáteis serão removidos após o
+gate do commit exato. Código, journal e next deixados na VM não foram acessados.

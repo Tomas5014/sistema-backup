@@ -1,5 +1,7 @@
 # Atualização e reversão do Windows · laboratório
 
+**Antes de reinstalar a dev4:** siga o [gate nativo de troca e retomada](installer/DIRECTORY-SWAP.md). Preserve next, previous e journal existentes.
+
 **Recompilação corrigida da dev4:** siga [o procedimento completo](installer/REBUILD-dev4.md), incluindo referência 0.1.3, hashes e bytes Git. Exemplos de build anteriores são históricos.
 
 A candidata atual é **0.1.4-dev4-lab**, com importação assistida por B. Use
@@ -64,7 +66,7 @@ ACL ou agendador inconclusiva exige recusa, não overwrite.
   informa o caminho protegido para atendimento pela MAC IP.
 
 Não é uma garantia contra perda abrupta de energia em toda combinação de
-NTFS, antivírus e permissões. A VM deve provar rename/FILE_SHARE_DELETE, UAC,
+NTFS, antivírus e permissões. A VM deve executar a matriz de handles e a troca com sondagens fechadas, UAC,
 consulta de processos de outras sessões, COM e ACL reais antes do piloto.
 
 ## Congelar payload e compilar

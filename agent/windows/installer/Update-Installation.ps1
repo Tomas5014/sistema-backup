@@ -4,6 +4,7 @@ param([ValidateSet('Preflight','Apply','Rollback','Recover','Verify')][string]$A
  [string]$InstallRoot,[string]$DataRoot,[string]$Payload,[string]$ManifestHash,[string]$LegacyManifest,[string]$LegacyManifestHash,
  $Service=$null,[scriptblock]$ProcessProbe=$null)
 $ErrorActionPreference='Stop'
+$script:UpdateControllerSource=$PSCommandPath
 
 function ConvertTo-ReleaseHash($Value) {
  if($Value -isnot [string] -or $Value.Length -ne 64 -or $Value -cnotmatch '^[a-fA-F0-9]{64}$'){throw 'Formato SHA-256 invalido.'}
@@ -25,6 +26,12 @@ function Get-ReleaseFiles {
  }
 }
 function Get-UpdateFailureInfo($Failure) {
+ $cachedException=$Failure.Exception
+ while($cachedException){
+  $cached=$cachedException.Data['MACIP.UpdateFailure']
+  if($cached -and $cached.attempt_id -ceq $script:UpdateAttemptId){return $cached}
+  $cachedException=$cachedException.InnerException
+ }
  # Nunca devolve Exception.Message, caminhos de entrada ou dados do pacote.
  $code='unconfirmed';$cause='Nao foi possivel confirmar a atualizacao.';$action='Confira acesso ao pacote e aos diretorios protegidos; preserve os arquivos e solicite suporte.'
  switch -Regex ($Failure.Exception.Message) {
@@ -41,7 +48,15 @@ function Get-UpdateFailureInfo($Failure) {
   '^Codigo e dados|^Identidade dos diretorios|^Registro pertence|^Link de codigo|^Link nos dados|^Dados mudaram' {$code='layout-unconfirmed';$cause='Layout ou estado da instalacao nao confirmado.';$action='Preserve codigo e dados; confira diretorios, links e operacoes em andamento com o administrador.';break}
  }
  if($code -eq 'unconfirmed' -and $Failure.Exception -is [IO.IOException]){$code='file-access';$cause='Arquivo ausente, bloqueado ou acesso inconclusivo.';$action='Confira o pacote, permissoes e arquivos em uso; nao apague dados ou tarefas.'}
- return [pscustomobject]@{code=$code;cause=$cause;action=$action}
+ $e=$Failure.Exception;while($e.InnerException){$e=$e.InnerException}
+ if($code -eq 'unconfirmed' -and ($e -is [IO.IOException] -or $e -is [UnauthorizedAccessException])){$code='file-access';$cause='Acesso ao arquivo ou diretorio recusado.';$action='Feche o aplicativo e aguarde trabalhos; preserve as pastas e confira o diagnostico.'}
+ $stage=$script:UpdateStage
+ if($stage -notin @('preflight','update-lock','package','tasks','active-code','stage-next','archive-journal','pause-tasks','probe-access','move-active','publish-next','verify-active','controller','receipt','journal','resume-tasks','dispose-lock','recover-unpublish','recover-previous','recover-receipt','recover-version')){$stage='preflight'}
+ if($stage -in @('move-active','publish-next','recover-unpublish','recover-previous')){$code='directory-rename';$cause='Troca de diretorios nao concluida.';$action='Preserve codigo, next e journal; aguarde arquivos em uso e use o procedimento de retomada.'}
+ if($stage -eq 'update-lock'){$code='update-busy';$cause='Exclusao entre atualizadores nao obtida.';$action='Aguarde a outra tentativa terminar; nao remova o arquivo de lock.'}
+ if($Failure.Exception.Message -like 'Recuperacao anterior pendente*'){$code='recovery-required';$cause='A tentativa anterior requer recuperacao antes de nova troca.';$action='Preserve as pastas e use o controlador corrigido com o journal existente; nao reinstale sobre codigo ausente.'}
+ $type=$e.GetType().FullName;if($type -cnotmatch '^System\.[A-Za-z0-9_.]+$'){$type='System.Exception'}
+ return [pscustomobject]@{code=$code;cause=$cause;action=$action;stage=$stage;exception_type=$type;hresult=('0x'+$e.HResult.ToString('X8'));attempt_id=$script:UpdateAttemptId}
 }
 function Save-UpdateFailure([string]$Path,$Record,$Failure) {
  if(-not $Record){return}
@@ -162,17 +177,60 @@ function Set-InstalledUpdateVersion([string]$Code,$Manifest,[switch]$OnlyCheck) 
   if(-not $OnlyCheck){Set-ItemProperty -LiteralPath $key -Name DisplayVersion -Value $Manifest.version;Set-ItemProperty -LiteralPath $key -Name DisplayName -Value ('MAC IP Backup '+$Manifest.version)}
  }
 }
+function Test-CodeFileAccess([string[]]$Directories) {
+ # Sondagem exclusiva preservada. Nenhum handle filho atravessa Directory.Move.
+ $handles=@();$failure=$null;$disposeFailure=$null
+ try {
+  foreach($directory in $Directories){
+   if(Test-Path -LiteralPath $directory){foreach($file in Get-ChildItem -LiteralPath $directory -File){
+    $handles+=,[IO.File]::Open($file.FullName,'Open','ReadWrite',[IO.FileShare]::None)
+   }}
+  }
+ }catch{$failure=$_;throw}finally{
+  foreach($handle in $handles){try{$handle.Dispose()}catch{if(-not $disposeFailure){$disposeFailure=$_}}}
+  if($disposeFailure -and -not $failure){throw $disposeFailure}
+ }
+}
+function Archive-UpdateJournal([string]$Work) {
+ $journal=Join-Path $Work 'transaction.json'
+ if(-not(Test-Path -LiteralPath $journal)){return $null}
+ if((Get-Item -LiteralPath $journal).Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Caminho de recuperacao divergente.'}
+ $history=Join-Path $Work 'history'
+ if(-not(Test-Path -LiteralPath $history)){New-Item -ItemType Directory $history|Out-Null}
+ if((Get-Item -LiteralPath $history).Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Caminho de recuperacao divergente.'}
+ $archive=Join-Path $history ('journal-'+[Guid]::NewGuid().ToString('N')+'.json')
+ [IO.File]::Copy($journal,$archive,$false)
+ if((Get-FileHash $journal -Algorithm SHA256).Hash -cne (Get-FileHash $archive -Algorithm SHA256).Hash){throw 'Caminho de recuperacao divergente.'}
+ return $archive
+}
+function Install-UpdateController([string]$Work) {
+ $target=Join-Path $Work 'Update-Installation.ps1'
+ if(Test-Path -LiteralPath $target){if((Get-FileHash $target -Algorithm SHA256).Hash -ceq (Get-FileHash $script:UpdateControllerSource -Algorithm SHA256).Hash){return}}
+ $temp=Join-Path $Work ('controller-'+[Guid]::NewGuid().ToString('N')+'.ps1')
+ [IO.File]::Copy($script:UpdateControllerSource,$temp,$false)
+ if(Test-Path -LiteralPath $target){[IO.File]::Replace($temp,$target,(Join-Path $Work ('controller-previous-'+[Guid]::NewGuid().ToString('N')+'.ps1')))}else{[IO.File]::Move($temp,$target)}
+}
+function Add-UpdateRecoveryFailure($Record,$Failure,[string]$Stage) {
+ $script:UpdateStage=$Stage
+ $safe=Get-UpdateFailureInfo $Failure
+ $Record.recovery_errors=@($Record.recovery_errors)+@($safe)
+}
 function Move-CodeDirectory([string]$From,[string]$To){[IO.Directory]::Move($From,$To)}
 function Invoke-CodeUpdate {
  param([string]$Mode,[string]$Code,[string]$Data,[string]$Package,[string]$Hash,[string]$Legacy,$Svc,[scriptblock]$Probe,[string]$LegacyHash)
- $script:UpdateAttemptId=[Guid]::NewGuid().ToString('N');$script:UpdateDiagnosticPath=$null
+ $script:UpdateAttemptId=[Guid]::NewGuid().ToString('N');$script:UpdateDiagnosticPath=$null;$script:UpdateStage='preflight'
  $Code=[IO.Path]::GetFullPath($Code);$Data=[IO.Path]::GetFullPath($Data)
  if($Data -eq $Code -or $Data.StartsWith($Code+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or $Code.StartsWith($Data+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)){throw 'Codigo e dados precisam ser separados.'}
  $work=Join-Path ([IO.Path]::GetDirectoryName($Code)) '.MACIP-Backup-update'
  if(-not(Test-Path -LiteralPath $work)){New-Item -ItemType Directory -Path $work|Out-Null}
+ $script:UpdateStage='update-lock'
  $lock=[IO.File]::Open((Join-Path $work 'update.lock'),'OpenOrCreate','ReadWrite','None')
- $receiptPath=Join-Path $work 'current.json';$journalPath=Join-Path $work 'transaction.json';$handles=@();$tasks=@();$record=$null;$swapped=$false;$oldMoved=$false
+ $receiptPath=Join-Path $work 'current.json';$journalPath=Join-Path $work 'transaction.json';$tasks=@();$record=$null;$swapped=$false;$oldMoved=$false;$primaryError=$null;$oldReceipt=$null;$receiptChanged=$false;$versionChanged=$false;$current=$null;$previousHash=$null
  try{
+  $script:UpdateStage='package'
+  $priorJournal=$null
+  if(Test-Path -LiteralPath $journalPath){$priorJournal=Get-Content -LiteralPath $journalPath -Raw -Encoding UTF8|ConvertFrom-Json}
+  if($Mode -notin @('Rollback','Recover') -and $priorJournal -and ($priorJournal.state -eq 'needs-recovery' -or ($priorJournal.state -in @('failed','prepared') -and -not(Test-Path -LiteralPath $Code)))){throw 'Recuperacao anterior pendente; nao instalar sobre codigo ausente.'}
   if($Mode -in @('Rollback','Recover')){
    $prior=Get-Content -LiteralPath $journalPath -Raw|ConvertFrom-Json
    if(-not $prior.previous -or -not(Test-Path -LiteralPath $prior.previous)){throw 'Codigo anterior indisponivel; arquivos preservados.'}
@@ -184,10 +242,20 @@ function Invoke-CodeUpdate {
   Test-CodeFiles $Package $m;Test-DataReader $Data $m
   Set-InstalledUpdateVersion $Code $m -OnlyCheck
   $helper=Join-Path $Package 'Desinstalar-Tarefa.ps1'
+  $script:UpdateStage='tasks'
   $tasks=Get-OwnedUpdateTasks $Code $Data $Svc $helper
+  if($Mode -eq 'Recover' -and $prior -and $prior.state -in @('failed','prepared','needs-recovery')){
+   if(@($prior.tasks).Count -ne $tasks.Count){throw 'Tarefa mudou durante atualizacao; preservar arquivos.'}
+   foreach($task in $tasks){
+    $savedTask=@($prior.tasks|Where-Object{$_.name -ceq $task.Name})
+    if($savedTask.Count -ne 1 -or (Get-TaskUpdateSignature $savedTask[0].xml) -cne (Get-TaskUpdateSignature $task.Xml)){throw 'Tarefa mudou durante atualizacao; preservar arquivos.'}
+    $task.Enabled=[bool]$savedTask[0].enabled
+   }
+  }
   if(@($tasks|Where-Object{$_.Name -ceq 'MACIP-Backup-Sync'}).Count -gt 0 -and $m.results_contract -ne 1){throw 'Versao incapaz de executar a sincronizacao existente.'}
   Assert-NoCodeProcesses $Code $Probe
   $before=Get-DataShape $Data
+  $script:UpdateStage='active-code'
   $current=$null
   if(Test-Path -LiteralPath $Code){
    $installed=Join-Path $Code 'MANIFEST.json'
@@ -196,7 +264,7 @@ function Invoke-CodeUpdate {
     $installed=$Legacy
    }
    $previousHash=$LegacyHash
-   if(Test-Path -LiteralPath $receiptPath){$receipt=Get-Content -LiteralPath $receiptPath -Raw|ConvertFrom-Json;if($receipt.install_root -cne $Code -or $receipt.data_root -cne $Data){throw 'Identidade dos diretorios instalados divergente.'};$previousHash=$receipt.manifest_hash}
+   if(Test-Path -LiteralPath $receiptPath){$receipt=Get-Content -LiteralPath $receiptPath -Raw|ConvertFrom-Json;if($receipt.install_root -cne $Code -or $receipt.data_root -cne $Data){throw 'Identidade dos diretorios instalados divergente.'};$previousHash=$receipt.manifest_hash;$oldReceipt=$receipt}
    $previousHash=ConvertTo-ReleaseHash $previousHash
    $current=Read-ReleaseManifest $installed $previousHash
    Test-CodeFiles $Code $current
@@ -204,6 +272,7 @@ function Invoke-CodeUpdate {
   if($Mode -eq 'Verify' -and (-not $current -or $previousHash -cne $Hash)){throw 'Versao instalada difere do pacote escolhido.'}
   if($Mode -in @('Preflight','Verify')){return [pscustomobject]@{state='verified';commit=$m.commit;tasks=$tasks.Count;data_version=1}}
   if($current -and $previousHash -ceq $Hash){return [pscustomobject]@{state='updated';commit=$m.commit;already_current=$true;recovery=$work}}
+  $script:UpdateStage='stage-next'
   $id=[Guid]::NewGuid().ToString('N');$next=Join-Path $work ('next-'+$id);$previous=Join-Path $work ('previous-'+$id)
   New-Item -ItemType Directory -Path $next|Out-Null
   foreach($file in $m.files.PSObject.Properties){Copy-Item -LiteralPath (Join-Path $Package $file.Name) -Destination (Join-Path $next $file.Name)}
@@ -218,52 +287,82 @@ function Invoke-CodeUpdate {
    Copy-Item -LiteralPath $desiredUninstaller -Destination (Join-Path $next 'desinstalar.exe')
   }
   $saved=@($tasks|ForEach-Object{[pscustomobject]@{name=$_.Name;enabled=$_.Enabled;xml=$_.Xml}})
-  $record=@{attempt_id=$script:UpdateAttemptId;state='prepared';previous=$previous;previous_manifest_hash=$previousHash;previous_uninstaller_hash=$uninstallerHash;next=$next;commit=$m.commit;tasks=$saved}
+  # Nunca reutiliza/apaga next-* de uma tentativa anterior. Guarda o journal
+  # byte a byte antes de publicar a nova transacao, sob o mesmo lock.
+  $script:UpdateStage='archive-journal';$archived=Archive-UpdateJournal $work
+  $record=@{attempt_id=$script:UpdateAttemptId;state='prepared';stage='pause-tasks';previous=$previous;previous_manifest_hash=$previousHash;previous_uninstaller_hash=$uninstallerHash;previous_receipt=$oldReceipt;next=$next;commit=$m.commit;tasks=$saved;prior_journal=$archived;recovery_errors=@()}
   Write-UpdateJson $journalPath $record
+  $script:UpdateStage='pause-tasks'
   foreach($task in $tasks){$task.Task.Enabled=$false}
   $fresh=Get-OwnedUpdateTasks $Code $Data $Svc $helper
+  if($fresh.Count -ne $tasks.Count){throw 'Tarefa mudou durante atualizacao; preservar arquivos.'}
   foreach($task in $fresh){
    $original=@($tasks|Where-Object{$_.Name -ceq $task.Name})
    if($original.Count -ne 1 -or $task.Task.Enabled -or (Get-TaskUpdateSignature $task.Xml) -cne (Get-TaskUpdateSignature $original[0].Xml)){throw 'Tarefa mudou durante atualizacao; preservar arquivos.'}
   }
   Assert-NoCodeProcesses $Code $Probe
-  # FILE_SHARE_DELETE permite rename enquanto nega novas leituras/escritas
-  # desses arquivos. Um handle preexistente incompatível causa recusa.
-  foreach($directory in @($Code,$next)){
-   if(Test-Path -LiteralPath $directory){foreach($file in Get-ChildItem -LiteralPath $directory -File){
-    $handles+=,[IO.File]::Open($file.FullName,'Open','ReadWrite',[IO.FileShare]::Delete)
-   }}
-  }
+  $script:UpdateStage='probe-access'
+  Test-CodeFileAccess @($Code,$next)
+  # As sondagens ja foram fechadas. A exclusao do atualizador permanece fora
+  # das pastas; tarefas seguem pausadas. Reconfere integridade antes/depois.
+  Test-CodeFiles $next $m
+  if($current){Test-CodeFiles $Code $current}
+  Assert-NoCodeProcesses $Code $Probe
   if($current -and -not(Test-Path -LiteralPath (Join-Path $Code 'MANIFEST.json'))){
    # O manifesto legado fica no backup de codigo; nao nos dados DPAPI.
    Copy-Item -LiteralPath $Legacy -Destination (Join-Path $Code 'MANIFEST.json')
   }
-  if(Test-Path -LiteralPath $Code){Move-CodeDirectory $Code $previous;$oldMoved=$true}
+  if(Test-Path -LiteralPath $Code){
+   $script:UpdateStage='move-active';$record.stage=$script:UpdateStage;Write-UpdateJson $journalPath $record
+   Move-CodeDirectory $Code $previous;$oldMoved=$true
+  }
+  $script:UpdateStage='publish-next';$record.stage=$script:UpdateStage;Write-UpdateJson $journalPath $record
   Move-CodeDirectory $next $Code;$swapped=$true
+  $script:UpdateStage='verify-active';$record.stage=$script:UpdateStage
+  Test-CodeFiles $Code $m
   if((Get-DataShape $Data) -cne $before){throw 'Dados mudaram durante a janela; confira antes de retomar.'}
-  Set-InstalledUpdateVersion $Code $m
+  $script:UpdateStage='controller';Install-UpdateController $work
+  $script:UpdateStage='receipt';$versionChanged=$true;Set-InstalledUpdateVersion $Code $m
+  $receiptChanged=$true
   Write-UpdateJson $receiptPath @{manifest_hash=$Hash;commit=$m.commit;install_root=$Code;data_root=$Data}
-  $controller=Join-Path $work 'Update-Installation.ps1'
-  if(-not(Test-Path -LiteralPath $controller)){Copy-Item -LiteralPath (Join-Path $Package 'Update-Installation.ps1') -Destination $controller}
-  $record.state='verified';Write-UpdateJson $journalPath $record
+  $script:UpdateStage='journal';$record.state='verified';$record.stage='verified';Write-UpdateJson $journalPath $record
   return [pscustomobject]@{state='updated';commit=$m.commit;recovery=$work}
  }catch{
-  if($swapped){try{Move-CodeDirectory $Code $next;$swapped=$false}catch{}}
-  if($oldMoved -and -not(Test-Path -LiteralPath $Code)){try{Move-CodeDirectory $previous $Code;$oldMoved=$false}catch{}}
-  if($record){$record.state='failed';Save-UpdateFailure $journalPath $record $_}
+  $primaryError=$_
+  $primaryError.Exception.Data['MACIP.UpdateFailure']=Get-UpdateFailureInfo $primaryError
+  if($swapped){try{$script:UpdateStage='recover-unpublish';Move-CodeDirectory $Code $next;$swapped=$false}catch{Add-UpdateRecoveryFailure $record $_ 'recover-unpublish'}}
+  if($oldMoved -and -not(Test-Path -LiteralPath $Code)){try{$script:UpdateStage='recover-previous';Move-CodeDirectory $previous $Code;$oldMoved=$false}catch{Add-UpdateRecoveryFailure $record $_ 'recover-previous'}}
+  if(-not $swapped -and -not $oldMoved){
+   if($receiptChanged){try{
+    $script:UpdateStage='recover-receipt'
+    if($oldReceipt){Write-UpdateJson $receiptPath $oldReceipt}elseif(Test-Path -LiteralPath $receiptPath){[IO.File]::Move($receiptPath,(Join-Path $work ('receipt-failed-'+$script:UpdateAttemptId+'.json')))}
+   }catch{Add-UpdateRecoveryFailure $record $_ 'recover-receipt'}}
+   if($versionChanged -and $current){try{$script:UpdateStage='recover-version';Set-InstalledUpdateVersion $Code $current}catch{Add-UpdateRecoveryFailure $record $_ 'recover-version'}}
+  }
+  if($record){$record.state=if($oldMoved -or $swapped -or $record.recovery_errors.Count){'needs-recovery'}else{'failed'};Save-UpdateFailure $journalPath $record $primaryError}
   throw
  }finally{
-  foreach($handle in $handles){$handle.Dispose()}
-  $resumeFailed=$false
+  $cleanupError=$null
   foreach($entry in $tasks){
    try{
+    $script:UpdateStage='resume-tasks'
+    if($primaryError -and ($oldMoved -or $swapped)){throw 'Agenda nao foi confirmada; codigo preservado, consulte recuperacao.'}
     $fresh=Get-OwnedUpdateTasks $Code $Data $Svc $helper
     $same=@($fresh|Where-Object{$_.Name -ceq $entry.Name -and (Get-TaskUpdateSignature $_.Xml) -ceq (Get-TaskUpdateSignature $entry.Xml)})
     if($same.Count -eq 1 -and (Test-Path -LiteralPath (Join-Path $Code 'Backup-MacipCliente.ps1'))){$same[0].Task.Enabled=$entry.Enabled;if([bool]$same[0].Task.Enabled -ne $entry.Enabled){throw 'Estado da agenda nao confirmado.'}}else{throw 'Propriedade da tarefa mudou.'}
-   }catch{$resumeFailed=$true;Write-Warning 'Agenda preservada desabilitada: confira a recuperacao antes de retomar.'}
+   }catch{
+    if(-not $cleanupError){$cleanupError=$_;$cleanupError.Exception.Data['MACIP.UpdateFailure']=Get-UpdateFailureInfo $cleanupError}
+    if($record){Add-UpdateRecoveryFailure $record $_ 'resume-tasks'}
+    Write-Warning 'Agenda nao confirmada; preserve codigo, dados e journal antes de retomar.' -WarningAction Continue
+   }
   }
-  $lock.Dispose()
-  if($resumeFailed){try{throw 'Agenda nao foi confirmada; codigo preservado, consulte recuperacao.'}catch{if($record){$record.state='needs-recovery';Save-UpdateFailure $journalPath $record $_};throw}}
+  # Grava erros secundarios enquanto ainda possui o lock; nao troca a causa principal.
+  if($cleanupError -and $record){$record.state='needs-recovery';$toSave=if($primaryError){$primaryError}else{$cleanupError};Save-UpdateFailure $journalPath $record $toSave}
+  try{$script:UpdateStage='dispose-lock';$lock.Dispose()}catch{
+   if(-not $cleanupError){$cleanupError=$_;$cleanupError.Exception.Data['MACIP.UpdateFailure']=Get-UpdateFailureInfo $cleanupError}
+   if($record){Add-UpdateRecoveryFailure $record $_ 'dispose-lock';$record.state='needs-recovery';$toSave=if($primaryError){$primaryError}else{$cleanupError};Save-UpdateFailure $journalPath $record $toSave}
+  }
+  if($cleanupError -and -not $primaryError){throw $cleanupError}
  }
 }
 if($MyInvocation.InvocationName -ne '.'){
@@ -271,6 +370,7 @@ if($MyInvocation.InvocationName -ne '.'){
  catch{
   $safe=Get-UpdateFailureInfo $_
   [Console]::Error.WriteLine(('Atualizacao recusada/incompleta. [{0}] Causa: {1} Acao: {2}' -f $safe.code,$safe.cause,$safe.action))
+  [Console]::Error.WriteLine(('Etapa: {0}; tipo: {1}; HRESULT: {2}' -f $safe.stage,$safe.exception_type,$safe.hresult))
   $diagnostic=Get-CurrentUpdateDiagnostic $_
   if($diagnostic){[Console]::Error.WriteLine(('Diagnostico desta tentativa: {0}' -f $diagnostic))}
   exit 1

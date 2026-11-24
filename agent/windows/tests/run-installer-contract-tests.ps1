@@ -6,6 +6,8 @@ $repo=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../..'))
 $updater=Join-Path $repo 'agent/windows/installer/Update-Installation.ps1'
 $generator=Join-Path $repo 'agent/windows/installer/New-ReleaseManifest.ps1'
 . $updater
+# Nao consulta/altera registro da VM: somente o filesystem e nativo nesta suite.
+function Set-InstalledUpdateVersion([string]$Code,$Manifest,[switch]$OnlyCheck) {}
 $checks=0
 function Assert($Value,$Message){if(-not $Value){throw $Message};$script:checks++}
 function Refuses([scriptblock]$Run,[string]$Message){$failed=$false;try{& $Run|Out-Null}catch{$failed=$true};Assert $failed $Message}

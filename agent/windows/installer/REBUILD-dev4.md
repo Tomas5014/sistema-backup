@@ -1,5 +1,7 @@
 # Recompilar a correção do instalador 0.1.4-dev4-lab
 
+**Gate obrigatório antes de outro instalador:** execute a [prova de troca de diretórios](DIRECTORY-SWAP.md) em Windows PowerShell 5.1/NTFS com o novo SHA aprovado. A falha nativa de rename da base 87158ac ainda exige essa conferência.
+
 Este roteiro substitui os exemplos incompletos de build dev4 anteriores.
 Somente laboratório. Preserve o instalador 0.1.3 e o build dev4 anterior.
 Não houve alteração na Central ou nos formatos de configuração/fila.
