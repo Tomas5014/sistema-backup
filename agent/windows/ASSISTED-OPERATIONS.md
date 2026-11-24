@@ -32,6 +32,37 @@ parcial permanece marcada INCOMPLETA e não é reutilizada. Há limite de
 1 GiB/1.000 arquivos no transporte de laboratório. `conferencia.json` é um
 comprovante de suporte; o técnico não precisa lê-lo/editar JSON.
 
+## Origem ausente e A indisponível
+
+A importação do ZIP de B usa somente a leitura **estrutural** da configuração
+ativa para proteger a origem histórica e os dados do aplicativo. Não exige que
+a origem exista, que os arquivos de credenciais de A estejam disponíveis ou que
+A responda. Não consulta snapshots nem executa Restic/SSH/DPAPI para importar.
+Backup/preparo continuam exigindo origem legível e credenciais existentes.
+
+Caminhos protegidos continuam comparados em ambas as direções, depois de
+normalização, mesmo se a origem já não existir. Um destino igual à origem ou
+que a contenha é recusado antes de criar a pasta. Links/junctions, manifesto,
+SHA-256, arquivos extras e criação exclusiva de uma pasta nova mantêm as
+validações existentes. Configuração ativa ou metadados locais inválidos recebem
+erro explícito; não são ignorados para omitir a proteção da origem. Corrigir a
+configuração exige atendimento, não substituir silenciosamente a instalação.
+
+Para recompilar, use o SHA Windows **novo** informado no relatório e o
+[procedimento dev4](installer/REBUILD-dev4.md), com payload novo, hashes, referência
+legada aprovada e NSIS 3.11. Preserve os instaladores anteriores. A versão continua
+0.1.4-dev4-lab; formatos de dados/fila e contratos com a Central não mudaram.
+O [gate de troca de diretórios](installer/DIRECTORY-SWAP.md) permanece aplicável.
+
+Depois da instalação corrigida na VM, mantenha a origem renomeada/preservada,
+A indisponível e as pausas como estavam. Em **Restaurar → Abrir recuperação de B**,
+selecione o mesmo ZIP válido e Documentos (fora da origem e dos dados do app).
+Confirme dois arquivos e SHA-256, pasta nova, origem preservada e configuração,
+credenciais, fila e pausas sem alteração pelo fluxo. Não recrie a origem nem
+retome a agenda para contornar a validação. Teste também destino sobreposto à
+origem ausente, em arquivos fictícios. O aceite WinForms/Windows será repetido
+pelo operador; testes PowerShell Linux não o substituem.
+
 ## Build — administrador
 
 Use Windows PowerShell 5.1 e checkout do SHA exato aprovado da branch.

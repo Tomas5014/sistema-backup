@@ -2729,3 +2729,116 @@ nesta sessão. Build novo e aceite na VM permanecem pendentes. Não há homologa
 Windows ou produção. Sem merge, tag, deploy, force-push ou mudança na Central.
 Fixtures são removidas em finally; auxiliares portáteis serão removidos após o
 gate do commit exato. Código, journal e next deixados na VM não foram acessados.
+
+## 2026-11-24 — Recuperação por B com origem ausente no Windows
+
+Branch `fix/windows-b-recovery-missing-source`, criada exatamente de
+`17f5e7c89027267a220a973aed9fdf8cf43f0878`. Status/histórico e instruções
+aplicáveis inspecionados; worktree Windows estava limpo. Central preservada,
+sem merge das linhas. Alterações preexistentes fora do Windows não foram tocadas.
+
+### Evidência do operador e reprodução
+
+O operador relatou backup Windows copiado para B, agenda pausada, origem
+renomeada para origem-preservada e contêiner SFTP A pausado. A Central recuperou
+o ponto por B, gerou ZIP válido com dois arquivos e SHA-256 iguais aos originais.
+Na GUI, Restaurar → Abrir recuperação de B, após escolher ZIP e Documentos,
+apareceu "origem nao existe ou nao e pasta". Essas provas nativas e da Central
+foram fornecidas pelo operador; não foram executadas nesta sessão.
+
+Reprodução local descartável, antes de editar: dot-source da GUI, configuração
+JSON real sintética, metadados apontando para origem ausente e backend de tarefas
+simulado. As linhas de leitura usadas pelo handler lançaram a mesma mensagem
+antes da importação, sem conexão ou acesso ao ZIP. Baseline: as **28** verificações
+anteriores de recuperação passavam porque chamavam diretamente o importador,
+sem exercitar a leitura da configuração pelo fluxo do botão.
+
+### Correção limitada
+
+Read-AgenteConfigEstrutural reaproveita validação do contrato, campos, padrões,
+repositório, horário, identidade e caminhos absolutos. Não exige existência/leitura
+da origem, existência de arquivos de credenciais ou conexão a A. Caminhos ainda
+são válidos e normalizáveis; JSON/estrutura inválidos são recusados explicitamente.
+Erro de parse não reproduz conteúdo bruto da configuração na interface.
+
+Read-AgenteConfig continua sendo o caminho operacional de backup/preparo:
+chama a leitura estrutural e mantém checagem de volume local, origem existente e
+legível e arquivos de credenciais existentes/resolvidos. Backup com origem
+ausente continua recusado. Nenhum contrato de configuração ou fila foi alterado.
+
+O botão chama Invoke-RecuperacaoB: seleciona a configuração efetivamente usada
+pela tarefa (fallback nos metadados locais) e usa sua origem histórica mais BaseDir
+como ProtectedRoots, independentemente da existência atual da origem. A leitura
+estrita de metadados nesse fluxo recusa JSON/identificação local inválidos, sem
+engolir a exceção para omitir a origem. Os demais fluxos conservam seu fallback
+anterior. Não há edição da configuração para tornar a recuperação possível.
+
+Assisted-Recovery.ps1 permanece **inalterado**: validação de destinos em ambas
+as direções, normalização, links/junctions, manifesto, SHA-256, limites, lock,
+pasta nova e tratamento de parcial mantidos. A importação não executa Restic/SSH,
+lê senha DPAPI, muda configuração/credenciais/outbox ou reativa tarefas.
+
+### Regressões e alcance
+
+Ambiente: PowerShell portátil 7.4.6 em Linux, recursos exclusivos em TEMP.
+
+```powershell
+pwsh -NoProfile -File agent/windows/tests/run-assisted-tests.ps1
+pwsh -NoProfile -File agent/windows/tests/run-gui-tests.ps1
+pwsh -NoProfile -File agent/windows/tests/run-windows-agent-tests.ps1
+pwsh -NoProfile -File agent/windows/tests/run-update-tests.ps1
+pwsh -NoProfile -File agent/windows/tests/run-installer-contract-tests.ps1
+```
+
+Recuperação: **50 verificações aprovadas**, 0 falhas. Preservadas as 28 anteriores,
+incluindo conteúdo, layout Restic, binário, corrupção/extra/ausente, paths,
+concorrência e dados protegidos. Novos casos:
+
+- Origem realmente criada e renomeada em fixture; importação de ZIP de dois
+  arquivos, SHA-256 de ambos conferidos e origem-preservada intacta.
+- Callback original após confirmação (try/catch/finally extraído da AST da GUI)
+  executado com controles simulados, com feedback de êxito e botão reabilitado.
+  Não é clique/WinForms nativo. O vínculo do Add_Click ao mesmo fluxo também
+  é conferido para evitar repetir a lacuna de testar somente o importador.
+- Seleção por metadados e prioridade da tarefa sobre um metadado desatualizado.
+- Destino igual ou pai da origem ausente recusado antes de criar pasta, inclusive
+  caminho com .. normalizado. Backup segue recusando a origem ausente.
+- JSON da configuração inválido, tipo de exclusões incorreto e metadados inválidos
+  produzem erro explícito, sem sucesso falso ou exposição do conteúdo sintético.
+- Extração sem arquivos locais de credenciais A disponíveis; links/junctions no
+  destino continuam recusados no fluxo da GUI.
+- SHA/metadados dos arquivos de configuração, credenciais e fila preservados;
+  ambas as pausas mantidas independentemente em objetos de tarefa simulados.
+  Fronteiras Restic/SSH/DPAPI proibidas na fixture: zero chamadas no fluxo B.
+
+Regressões relacionadas: GUI **393 aprovadas**, 0 falhas, **1 skip COM real**;
+agente **150 aprovadas**, 0 falhas, grupo opcional Restic real/registrador SSH
+não configurado e ignorado; atualização **63 aprovadas**, 0 falhas; contrato
+Git/legado **50 aprovadas**, 0 falhas. Repetições finais não são casos adicionais.
+Warnings da suíte de atualização pertencem a falhas intencionais de reposição,
+não a uma instalação operacional.
+
+Filesystem, ZIP, hashes e leitura do código/callback são reais no Linux. COM,
+DPAPI, tarefas, WinForms e fronteiras do motor são simulados. Não houve backup
+ou SFTP real nesta sessão: a prova relevante do ZIP por B é a relatada pelo
+operador. Parser PowerShell e git diff --check conferidos. Nenhum acesso à VM,
+laboratório, contêiner operacional, credencial ou dado real.
+
+### Build e aceite posterior
+
+ASSISTED-OPERATIONS.md documenta a correção e os cliques. Para recompilar, use
+o SHA completo final desta branch no REBUILD-dev4.md, com payload novo do Git,
+referências/hashes aprovados e NSIS 3.11. Continua 0.1.4-dev4-lab; preserve
+instaladores anteriores. O gate de troca de diretórios permanece aplicável.
+Nenhum novo instalador/hash foi produzido sem NSIS e Restic Windows aprovado.
+
+Depois da instalação corrigida na VM, repetir o mesmo ZIP com A indisponível e
+origem renomeada, sem recriar a origem ou retomar a agenda para contornar a leitura.
+Conferir dois arquivos/SHA-256, pasta nova, origem preservada, configurações,
+credenciais, fila e pausas mantidas pelo fluxo. Aceite nativo ainda **pendente**;
+Linux/controles simulados não o substituem. Sem merge, tag, deploy ou mudança na
+Central. Suítes de recuperação/GUI/instalação removem suas fixtures em finally.
+A suíte legada do agente deixa diretórios: **90 fixtures desta sessão** foram
+identificadas por referências nos logs, janela temporal, usuário e sentinelas
+sintéticas e removidas, sem limpeza ampla dos temporários preexistentes.
+Auxiliares portáteis serão removidos após a verificação do commit final exato.

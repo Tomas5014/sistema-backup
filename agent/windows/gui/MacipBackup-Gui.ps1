@@ -75,9 +75,18 @@ $activationModule = Join-Path $PSScriptRoot 'Activation-Code.ps1'
 . (Join-Path $PSScriptRoot 'Monitoring-Task.ps1')
 
 function Read-GuiMeta {
+    param([switch]$Estrito)
     if (Test-Path -LiteralPath $script:GuiMeta -PathType Leaf) {
-        try { return (Get-Content -LiteralPath $script:GuiMeta -Raw | ConvertFrom-Json) }
-        catch { }
+        try {
+            $meta = Get-Content -LiteralPath $script:GuiMeta -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($Estrito) {
+                if ($meta -isnot [pscustomobject]) { throw 'Metadados devem ser objeto JSON.' }
+                if ($null -ne $meta.config_atual -and ($meta.config_atual -isnot [string] -or [string]::IsNullOrWhiteSpace($meta.config_atual) -or -not [IO.Path]::IsPathRooted($meta.config_atual))) { throw 'Referencia de configuracao invalida.' }
+            }
+            return $meta
+        } catch {
+            if ($Estrito) { throw 'Metadados da configuracao ativa invalidos; acione a MAC IP antes de importar. Nada foi alterado.' }
+        }
     }
     return [pscustomobject]@{ estado_atual = $null; config_atual = $null; conta_tarefa = $null }
 }
@@ -381,11 +390,22 @@ function Get-EstadoAtual {
 }
 
 function Get-ConfigAtual {
+    param([switch]$Estrito)
     $c = Get-TaskArg -Nome 'Config'
     if ($c) { return $c }
-    $meta = Read-GuiMeta
+    $meta = Read-GuiMeta -Estrito:$Estrito
     if ($meta.config_atual) { return $meta.config_atual }
     return $null
+}
+
+function Invoke-RecuperacaoB {
+    # Mesmo fluxo do botao: consulta local estrutural, sem executar o motor de A.
+    param([string]$Archive, [string]$Parent)
+    if (-not (Get-Command Import-AssistedRecovery -ErrorAction SilentlyContinue)) { throw 'Módulo de recuperação ausente; reinstale a candidata aprovada.' }
+    $protected = @($script:BaseDir)
+    $active = Get-ConfigAtual -Estrito
+    if ($active) { $protected += [string](Read-AgenteConfigEstrutural -Caminho $active).origem }
+    return (Import-AssistedRecovery -Archive $Archive -Parent $Parent -ProtectedRoots $protected)
 }
 
 function Set-TarefaHabilitada {
@@ -2602,11 +2622,7 @@ function Show-Gui {
         $lblRecuperacaoB.ForeColor = 'DarkBlue';$lblRecuperacaoB.Text = 'Conferindo o pacote e os arquivos...'
         $form.Refresh()
         try {
-            if(-not(Get-Command Import-AssistedRecovery -ErrorAction SilentlyContinue)){throw 'Módulo de recuperação ausente; reinstale a candidata aprovada.'}
-            $protected = @($script:BaseDir)
-            $active = Get-ConfigAtual
-            if($active){$protected += [string](Read-AgenteConfig -Caminho $active).origem}
-            $recovered = Import-AssistedRecovery -Archive $package.FileName -Parent $parent.SelectedPath -ProtectedRoots $protected
+            $recovered = Invoke-RecuperacaoB -Archive $package.FileName -Parent $parent.SelectedPath
             $lblRecuperacaoB.ForeColor = 'DarkGreen'
             $lblRecuperacaoB.Text = "$($recovered.Files) arquivos conferidos. Pasta: $($recovered.Destination). Isso não reconstrói A nem reativa o backup."
         } catch {

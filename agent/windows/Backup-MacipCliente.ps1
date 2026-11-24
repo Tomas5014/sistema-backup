@@ -46,7 +46,8 @@ function Get-CaminhoEstado {
     return (Join-Path $dir 'macip-estado')
 }
 
-function Read-AgenteConfig {
+function Read-AgenteConfigEstrutural {
+    # Contrato e caminhos apenas; nao exige arquivos de origem/credenciais nem servidor online.
     param([string]$Caminho)
     if (-not $Caminho) { throw 'Informe -Config com o caminho do backup.json.' }
     if (-not (Test-Path -LiteralPath $Caminho -PathType Leaf)) {
@@ -54,7 +55,7 @@ function Read-AgenteConfig {
     }
     $abs = (Resolve-Path -LiteralPath $Caminho).ProviderPath
     try { $cfg = Get-Content -LiteralPath $abs -Raw -Encoding UTF8 | ConvertFrom-Json }
-    catch { throw "backup.json invalido ($abs): $($_.Exception.Message)" }
+    catch { throw "backup.json invalido ou sem leitura ($abs); confira a configuracao local com a MAC IP." }
     if ($null -eq $cfg -or $cfg -isnot [pscustomobject]) {
         throw "backup.json deve ser um objeto JSON: $abs"
     }
@@ -82,23 +83,12 @@ function Read-AgenteConfig {
         if ($origem -cnotmatch '^[A-Za-z]:[\\/]') {
             throw "origem deve ser caminho absoluto com unidade (ex.: D:\\Dados): '$origem'"
         }
-        try {
-            $drv = [IO.DriveInfo]::new($origem.Substring(0, 1))
-            if ($drv.DriveType -in @('Network', 'CDRom', 'NoRootDirectory')) {
-                throw "origem deve ser volume local: '$origem'"
-            }
-        } catch [System.ArgumentException] {
-            throw "unidade da origem invalida: '$origem'"
-        }
     }
     elseif (-not [IO.Path]::IsPathRooted($origem)) {
         throw "origem deve ser um caminho local absoluto: '$origem'"
     }
-    if (-not (Test-Path -LiteralPath $origem -PathType Container)) {
-        throw "origem nao existe ou nao e pasta: '$origem'"
-    }
-    try { [void][IO.Directory]::EnumerateFileSystemEntries($origem).GetEnumerator().MoveNext() }
-    catch { throw "origem sem leitura para esta conta: '$origem'" }
+    try { [void][IO.Path]::GetFullPath($origem) }
+    catch { throw 'origem contem caminho invalido.' }
     $r.origem = $origem
 
     # Validacao sobre o objeto interpretado: em chave duplicada o
@@ -157,11 +147,40 @@ function Read-AgenteConfig {
     foreach ($c in 'identidade_ssh', 'known_hosts') {
         $p = [string]$cfg.$c
         if (-not [IO.Path]::IsPathRooted($p)) { throw "$c deve ser caminho absoluto: '$p'" }
-        if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { throw "$c nao encontrado: '$p'" }
-        $r[$c] = (Resolve-Path -LiteralPath $p).ProviderPath
+        try { [void][IO.Path]::GetFullPath($p) }
+        catch { throw "$c contem caminho invalido." }
+        $r[$c] = $p
     }
 
     return [pscustomobject]$r
+}
+
+function Read-AgenteConfig {
+    # Backup/preparo conservam as verificacoes operacionais existentes.
+    param([string]$Caminho)
+    $cfg = Read-AgenteConfigEstrutural -Caminho $Caminho
+    $origem = $cfg.origem
+    if (Test-IsWindows) {
+        try {
+            $drv = [IO.DriveInfo]::new($origem.Substring(0, 1))
+            if ($drv.DriveType -in @('Network', 'CDRom', 'NoRootDirectory')) {
+                throw "origem deve ser volume local: '$origem'"
+            }
+        } catch [System.ArgumentException] {
+            throw "unidade da origem invalida: '$origem'"
+        }
+    }
+    if (-not (Test-Path -LiteralPath $origem -PathType Container)) {
+        throw "origem nao existe ou nao e pasta: '$origem'"
+    }
+    try { [void][IO.Directory]::EnumerateFileSystemEntries($origem).GetEnumerator().MoveNext() }
+    catch { throw "origem sem leitura para esta conta: '$origem'" }
+    foreach ($c in 'identidade_ssh', 'known_hosts') {
+        $p = [string]$cfg.$c
+        if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { throw "$c nao encontrado: '$p'" }
+        $cfg.$c = (Resolve-Path -LiteralPath $p).ProviderPath
+    }
+    return $cfg
 }
 
 function Test-OpenSshExe {
