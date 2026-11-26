@@ -1460,6 +1460,7 @@ def create_app() -> FastAPI:
         response.set_cookie(
             CSRF_COOKIE,
             value,
+            max_age=config.session_ttl_seconds(),
             httponly=False,  # o JS lê e repete em X-CSRF-Token
             samesite="lax",
             secure=config.session_cookie_secure(),
@@ -1481,6 +1482,7 @@ def create_app() -> FastAPI:
     @app.get("/api/v1/auth/csrf", status_code=204)
     def csrf_token(response: Response) -> None:
         """Emite o cookie CSRF pré-sessão — o login exige o par."""
+        response.headers["Cache-Control"] = "no-store"
         _set_csrf_cookie(response)
 
     @app.post("/api/v1/auth/login", dependencies=[Depends(csrf_pair_guard)])
@@ -1551,7 +1553,14 @@ def create_app() -> FastAPI:
         response.delete_cookie(CSRF_COOKIE, path="/")
 
     @app.get("/api/v1/auth/me")
-    def me(operator: Operator = Depends(require_operator)) -> OperatorOut:
+    def me(request: Request, response: Response,
+           operator: Operator = Depends(require_operator)) -> OperatorOut:
+        # A sessão HttpOnly pode sobreviver ao cookie CSRF antigo (que era
+        # de sessão). Restauração autenticada repõe SOMENTE o cookie ausente;
+        # não prolonga a sessão nem rotaciona o token das outras abas.
+        response.headers["Cache-Control"] = "no-store"
+        if not request.cookies.get(CSRF_COOKIE):
+            _set_csrf_cookie(response)
         return _out_operator(operator)
 
     # ---- operadores: administração -------------------------------------

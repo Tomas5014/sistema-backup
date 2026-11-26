@@ -1,7 +1,8 @@
 /** Contrato HTTP: CSRF, 204 sem JSON, classificação de erros. */
 
 import { afterEach, describe, expect, it } from "vitest";
-import { ApiError, csrfToken, login, logout, me } from "../src/api";
+import { ApiError, csrfToken, login, logout, me, requestAssisted,
+  invalidateSessionRequests, SESSION_RECOVERY_EVENT } from "../src/api";
 import { clearCookies, json, noContent, stubFetch, OPERATOR } from "./helpers";
 
 afterEach(() => {
@@ -78,4 +79,18 @@ describe("logout", () => {
     await expect(logout()).rejects.toBeInstanceOf(ApiError);
     expect(calls).toHaveLength(0);
   });
+});
+
+it.each([401,403])("resposta %i de sessão antiga não inicia recuperação na nova", async (status) => {
+  document.cookie = "macip_csrf=old; Path=/";
+  let resolve!: (r:Response)=>void;
+  stubFetch({"POST /api/v1/installations/old/assisted":()=>new Promise<Response>(r=>{resolve=r;})});
+  const recovery=vi.fn();window.addEventListener(SESSION_RECOVERY_EVENT,recovery);
+  try {
+    const pending=requestAssisted("old", {id:"request",action:"catalog",expected_epoch:1,confirmed:true});
+    invalidateSessionRequests(); // login/verificação novos tornam a resposta obsoleta
+    resolve(new Response(null,{status,headers:{"X-MACIP-Session-Protection":"required"}}));
+    await expect(pending).rejects.toBeInstanceOf(ApiError);
+    expect(recovery).not.toHaveBeenCalled();
+  } finally {window.removeEventListener(SESSION_RECOVERY_EVENT,recovery);}
 });

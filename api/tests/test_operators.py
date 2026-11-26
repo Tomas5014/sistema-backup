@@ -128,6 +128,45 @@ def test_senha_persistida_apenas_como_hash(client, admin_headers):
 # ---- login e sessão ----------------------------------------------------------
 
 
+@pytest.mark.parametrize("role", ["admin", "viewer"])
+def test_restored_session_reissues_only_missing_csrf(portal, admin_headers, role):
+    make_operator(portal, admin_headers, login="restored", role=role)
+    signed = login(portal, "restored", "senha-super-secreta-1")
+    csrf_cookie = next(c for c in signed.headers.get_list("set-cookie") if c.startswith("macip_csrf="))
+    assert "Max-Age=" in csrf_cookie and "Secure" in csrf_cookie
+    assert "Path=/" in csrf_cookie and "SameSite=lax" in csrf_cookie
+    assert "HttpOnly" not in csrf_cookie
+    session_token = portal.cookies.get("macip_session")
+    old_session = _exec("SELECT token_hash, expires_at FROM operator_sessions").one()
+    portal.cookies.delete("macip_csrf")  # navegador restaurou somente a sessão persistente
+    blocked = portal.post("/api/v1/clients", json={"name": "não criar"})
+    assert blocked.status_code == 403
+    assert _exec("SELECT count(*) FROM clients").scalar() == 0
+    restored = portal.get("/api/v1/auth/me")
+    assert restored.status_code == 200 and restored.json()["role"] == role
+    assert restored.headers["cache-control"] == "no-store"
+    assert portal.cookies.get("macip_csrf")
+    token = portal.cookies.get("macip_csrf")
+    assert portal.cookies.get("macip_session") == session_token
+    assert _exec("SELECT token_hash, expires_at FROM operator_sessions").one() == old_session
+    assert portal.get("/api/v1/auth/me").headers.get("set-cookie") is None
+    assert portal.cookies.get("macip_csrf") == token  # outras abas não são invalidadas
+    assert portal.post("/api/v1/clients", json={"name": "sem cabeçalho"}).status_code == 403
+    written = portal.post("/api/v1/clients", json={"name": "laboratório"}, headers=csrf_headers(portal))
+    assert written.status_code == (201 if role == "admin" else 403)
+
+
+def test_expired_session_cannot_restore_csrf_or_write(portal, admin_headers):
+    make_operator(portal, admin_headers, login="expired-restored")
+    assert login(portal, "expired-restored", "senha-super-secreta-1").status_code == 200
+    _exec("UPDATE operator_sessions SET expires_at = now() - interval '1 second'")
+    portal.cookies.delete("macip_csrf")
+    response = portal.get("/api/v1/auth/me")
+    assert response.status_code == 401 and "set-cookie" not in response.headers
+    assert portal.post("/api/v1/clients", json={"name": "não criar"}).status_code in (401, 403)
+    assert _exec("SELECT count(*) FROM clients").scalar() == 0
+
+
 def test_login_valido_emite_cookies_e_me(portal, admin_headers):
     make_operator(portal, admin_headers, login="ana", name="Ana")
     response = login(portal, "  ANA  ", "senha-super-secreta-1")

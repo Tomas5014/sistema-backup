@@ -140,7 +140,8 @@ def _require_csrf_pair(request: Request) -> None:
     cookie = request.cookies.get(CSRF_COOKIE)
     header = request.headers.get(CSRF_HEADER)
     if not cookie or not header or not hmac.compare_digest(header, cookie):
-        raise HTTPException(403, "proteção CSRF: token ausente ou divergente")
+        raise HTTPException(403, "proteção CSRF: token ausente ou divergente",
+                            headers={"X-MACIP-Session-Protection": "required"})
 
 
 def require_agent(

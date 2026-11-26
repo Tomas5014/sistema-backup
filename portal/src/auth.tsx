@@ -22,18 +22,21 @@ import {
 } from "react";
 import {
   ApiError,
+  SESSION_RECOVERY_EVENT,
+  invalidateSessionRequests,
   login as apiLogin,
   logout as apiLogout,
   me as apiMe,
   type Operator,
 } from "./api";
 
-export type AuthState = "loading" | "authenticated" | "anonymous" | "unavailable";
+export type AuthState = "loading" | "authenticated" | "anonymous" | "unavailable" | "protection_required";
 
 interface AuthContextValue {
   state: AuthState;
   operator: Operator | null;
   refresh: () => Promise<void>;
+  recoverSession: () => Promise<void>;
   signIn: (login: string, password: string) => Promise<void>;
   signOut: () => Promise<string | null>; // devolve erro visível ou null
 }
@@ -47,6 +50,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const generation = useRef(0);
   // …mas uma TRANSIÇÃO (login/logout) também suprime novos refresh
   const transitioning = useRef(0);
+  const protectionRequired = useRef(false);
+
+  useEffect(() => {
+    const recover = (event: Event) => {
+      if (transitioning.current > 0) return;
+      generation.current++; // respostas da página/transição anterior não valem
+      protectionRequired.current = (event as CustomEvent).detail !== "expired";
+      setOperator(null);
+      setState((event as CustomEvent).detail === "expired" ? "anonymous" : "protection_required");
+    };
+    window.addEventListener(SESSION_RECOVERY_EVENT, recover);
+    return () => window.removeEventListener(SESSION_RECOVERY_EVENT, recover);
+  }, []);
 
   useEffect(() => {
     const alive = () => generation.current;
@@ -69,6 +85,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     })();
     return () => {
       generation.current++; // desmontou → pendente descartado
+      invalidateSessionRequests();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -76,7 +93,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const refresh = useCallback(async () => {
     // revalidação não interfere em login/logout em andamento —
     // suprimida aqui, antes mesmo de tocar na rede ou na geração
-    if (transitioning.current > 0) return;
+    if (transitioning.current > 0 || protectionRequired.current) return;
     const gen = ++generation.current;
     try {
       const op = await apiMe();
@@ -94,12 +111,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const recoverSession = useCallback(async () => {
+    if (transitioning.current > 0) return;
+    protectionRequired.current = false;
+    invalidateSessionRequests();
+    setState("loading"); // desmonta intenções antigas; nenhuma escrita é repetida
+    await refresh();
+  }, [refresh]);
+
   const signIn = useCallback(async (loginName: string, password: string) => {
+    invalidateSessionRequests();
     const gen = ++generation.current;
     transitioning.current++;
     try {
       const op = await apiLogin(loginName, password); // lança ApiError
       if (gen !== generation.current) return;
+      protectionRequired.current = false;
       setOperator(op);
       setState("authenticated");
     } finally {
@@ -108,6 +135,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const signOut = useCallback(async () => {
+    invalidateSessionRequests();
     const gen = ++generation.current;
     transitioning.current++;
     try {
@@ -129,7 +157,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   return (
-    <AuthContext.Provider value={{ state, operator, refresh, signIn, signOut }}>
+    <AuthContext.Provider value={{ state, operator, refresh, recoverSession, signIn, signOut }}>
       {children}
     </AuthContext.Provider>
   );

@@ -149,6 +149,16 @@ export class ApiError extends Error {
   }
 }
 
+// Não repete escritas. A área protegida sai de cena e exige revalidação;
+// ao voltar, a página consulta o estado e exige uma confirmação nova.
+export const SESSION_RECOVERY_EVENT = "macip:session-recovery";
+let sessionContext = 0;
+export function invalidateSessionRequests() { sessionContext++; }
+function sessionRecovery(reason: "protection" | "expired", context: number) {
+  if (context !== sessionContext) return; // resposta de uma sessão anterior
+  window.dispatchEvent(new CustomEvent(SESSION_RECOVERY_EVENT, {detail: reason}));
+}
+
 function defaultMessage(kind: ApiErrorKind): string {
   switch (kind) {
     case "unauthenticated":
@@ -200,11 +210,15 @@ async function apiFetch(
   path: string,
   options: { method?: string; body?: unknown; csrf?: boolean } = {},
 ): Promise<Response> {
+  const context = sessionContext;
   const headers: Record<string, string> = {};
   if (options.body !== undefined) headers["Content-Type"] = "application/json";
   if (options.csrf) {
     const token = csrfToken();
-    if (!token) throw new ApiError("forbidden", null, "Proteção CSRF ausente — recarregue a página.");
+    if (!token) {
+      sessionRecovery("protection", context);
+      throw new ApiError("forbidden", null, "Proteção da sessão ausente — verifique a sessão antes de confirmar novamente.");
+    }
     headers["X-CSRF-Token"] = token;
   }
   let response: Response;
@@ -214,11 +228,14 @@ async function apiFetch(
       headers,
       body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
       credentials: "same-origin",
+      cache: "no-store",
     });
   } catch {
     throw new ApiError("network", null);
   }
   if (!response.ok) {
+    if (response.status === 401 && !path.startsWith("/api/v1/auth/")) sessionRecovery("expired", context);
+    if (response.status === 403 && response.headers.get("X-MACIP-Session-Protection") === "required") sessionRecovery("protection", context);
     // 429 usa mensagem própria — o detalhe bruto do servidor não ajuda
     const detail =
       response.status === 429 ? undefined : await parseDetail(response);

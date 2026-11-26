@@ -9,20 +9,29 @@ import {
   useLocation,
 } from "react-router-dom";
 import { useAuth } from "../auth";
+import { invalidateSessionRequests } from "../api";
 import { LabVersion } from "./LabVersion";
 import { Loading } from "./common";
 
 export function Layout() {
-  const { state, operator, refresh, signOut } = useAuth();
+  const { state, operator, refresh, recoverSession, signOut } = useAuth();
   const location = useLocation();
   const [logoutError, setLogoutError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   // reabertura/atualização de rota protegida → revalida a sessão
   useEffect(() => {
+    invalidateSessionRequests(); // respostas de outra visita não mudam esta sessão
     void refresh();
   }, [refresh, location.key]);
 
+  if (state === "protection_required") {
+    return <main className="center"><div role="alert" className="error-state">
+      <p>A proteção da sessão precisa ser verificada. A ação não será repetida automaticamente.</p>
+      <p>Depois, confira a instalação e confirme novamente. Se a sessão expirou, entre novamente.</p>
+      <button className="btn" onClick={() => void recoverSession()}>Verificar sessão</button>
+    </div></main>;
+  }
   if (state === "loading") {
     return (
       <main className="center">
