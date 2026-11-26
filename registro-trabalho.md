@@ -2842,3 +2842,137 @@ A suíte legada do agente deixa diretórios: **90 fixtures desta sessão** foram
 identificadas por referências nos logs, janela temporal, usuário e sentinelas
 sintéticas e removidas, sem limpeza ampla dos temporários preexistentes.
 Auxiliares portáteis serão removidos após a verificação do commit final exato.
+
+## 2026-11-26 — Disparo manual Windows e inicialização do teste ZIP
+
+Branch `fix/windows-manual-task-run`, criada exatamente de
+`ff714cd244bfade1a38264371e326ca89ebd3792`. Status, histórico, worktrees e
+instruções aplicáveis inspecionados. Worktree Windows estava limpo; Central,
+suas alterações preexistentes e o laboratório foram preservados. Candidata
+continua 0.1.4-dev4-lab; contratos e dados persistentes não mudaram.
+
+### Evidência e investigação
+
+O operador relatou Windows PowerShell 5.1, tarefa previamente configurada,
+backup agendado sem sessão já bem-sucedido, A disponível e origem existente.
+Retomar agenda → Executar backup agora retornou "O valor não recai no intervalo
+esperado", inclusive após instalar ff714cd. Último backup permaneceu em
+24/11/2026 14:52, snapshot abreviado 4fb7dd6a42a8. Não há evidência de que esse
+pedido manual tenha executado um backup novo. Relato nativo do operador;
+nenhum acesso à VM ou suas tarefas nesta sessão.
+
+A inspeção local mostrou Run(@('manual')) usando System.Object[]. O contrato
+Microsoft de IRegisteredTask.Run aceita um BSTR único para Arg0 ou array de BSTRs:
+https://learn.microsoft.com/en-us/windows/win32/api/taskschd/nf-taskschd-iregisteredtask-run
+A documentação .NET descreve String como BSTR e String[] como SAFEARRAY de BSTRs:
+https://learn.microsoft.com/en-us/dotnet/standard/native-interop/type-marshaling
+O tipo gerenciado foi demonstrado em PowerShell 7.4.6/Linux (Object[] versus
+System.String), **não** o marshaling real do COM no Windows PowerShell 5.1.
+A hipótese de incompatibilidade do array permanece pendente da prova nativa.
+
+Também foi confirmado no código que uma exceção de Run limpava o pedido,
+mostrava brevemente o erro e chamava a atualização genérica, que podia reapresentar
+o sucesso anterior como estado atual. Esse defeito de apresentação foi
+reproduzido/coberto pelo callback e pelo modelo de tela com fronteiras controladas.
+
+O operador relatou ainda ZipArchive usado por New-Zip antes de carregar
+System.IO.Compression em processo Windows novo. Com Add-Type prévio, as 50
+verificações existentes passaram nativamente segundo o relato; a limpeza havia
+ocultado a causa inicial. Esse carregamento implícito não é reproduzido no Linux.
+
+### Correção
+
+Start-TarefaAgora passa uma **string escalar explícita** ('manual') em uma única
+chamada ao mesmo IRegisteredTask.Run. Sem Run(null), RunEx, execução direta do
+agente ou fallback que possa duplicar um disparo já aceito. Verificações de
+propriedade da tarefa, conta/SID do preparo e concorrência foram mantidas.
+O macro $(Arg0) e a distinção manual/agendado não mudaram.
+
+O callback captura o pedido antes da chamada COM. Recusa/erro vira resolução
+'recusado', preservada pela atualização periódica. Último backup bem-sucedido
+continua separado; não prova êxito do pedido. Consulta anterior inconclusiva ou
+estado running sem LastRunTime novo não promove histórico a execução nova.
+Run aceito segue aguardando; regras existentes de vínculo do resultado à
+execução nova permanecem obrigatórias. Nada disso escreve/reinicializa histórico,
+configuração, fila ou tarefa.
+
+run-assisted-tests carrega explicitamente System.IO.Compression antes de New-Zip.
+Construtor do ZIP está dentro do try; entradas, ZIP e arquivo são fechados com
+proteção para a exceção principal. Mesmo Dispose ou limpeza externa falhando,
+a primeira falha é preservada. Há regressões injetando falha de construtor e
+falha de entrada seguida de Dispose falho, conferindo liberação do arquivo.
+
+### Prova nativa reproduzível, ainda pendente
+
+Novo helper tests/probe-manual-run-com.ps1 recusa Linux/versão incompatível antes
+de criar recursos. Exige Windows PowerShell 5.1. Registra pasta exclusiva
+MACIP-ManualRunProbe-UUID, tarefa Probe e área TEMP com ação **sintética**, sem
+backup/Restic ou comunicação externa. Confirma ausência, usa CREATE e reconfirma
+marcador, executável e argumentos antes de alterar/parar/remover recursos próprios.
+Não consulta ou modifica as tarefas instaladas MACIP-Backup/MACIP-Backup-Sync.
+
+Compara Object[], String[] e string em Run real, registra tipo gerenciado,
+VARIANT gerado pelo marshaler .NET, erro/HRESULT e efeitos por tentativa. Medição
+.NET é complementar; não é captura do binder interno do PowerShell. Executa
+Start-TarefaAgora real com backend limitado à sua tarefa, SID/Arg0, UUID novo
+e confirmação do modelo; testa ainda trigger por horário na mesma tarefa.
+Configurações de ensaio são imutáveis por tentativa, arquivos publicados
+atomicamente e efeitos atrasados auditados para evitar falso positivo.
+
+A ação usa a conta interativa atual (logon 3), sem senha. Não equivale a validar
+a tarefa PASSWORD/sem sessão do produto, DPAPI, SFTP ou WinForms. Prazos limitados,
+nomes impressos antes da criação e limpeza somente dos recursos próprios; se
+identidade/limpeza mudarem, falha e preserva a área. Hypothesis só informa
+reproduced-in-this-environment se a forma antiga falhar **sem efeito** e a forma
+escalar funcionar; caso contrário a causa não é declarada comprovada.
+
+A suíte GUI tinha um bloco legado que tentava registrar MACIP-Backup real no
+Windows. Foi substituído por skip e indicação do helper isolado, para que sua
+regressão não altere tarefas instaladas nem seja confundida com aceite COM.
+
+### Testes efetivamente executados
+
+PowerShell portátil **7.4.6/Linux**, recursos fictícios exclusivos:
+
+```powershell
+pwsh -NoProfile -File agent/windows/tests/run-gui-tests.ps1
+pwsh -NoProfile -File agent/windows/tests/run-assisted-tests.ps1
+pwsh -NoProfile -File agent/windows/tests/run-update-tests.ps1
+pwsh -NoProfile -File agent/windows/tests/run-installer-contract-tests.ps1
+```
+
+- GUI: **406 aprovados**, **0 falhas**, **1 skip COM nativo isolado**. Contrato
+  simulado recusa Object[] e confirma string manual, uma chamada e SID/concorrência
+  existentes. Callback original testado com controles/COM simulados: recusa,
+  atualização periódica, histórico byte a byte, consulta inconclusiva e aceite
+  sem evidência nova permanecendo aguardando. Casos anteriores de resultado novo
+  vinculado, duplicidade, falha e timeout foram preservados.
+- Recuperação/ZIP: **54 verificações aprovadas**, **0 falhas**. As 50 anteriores
+  mais construtor falho, erro primário com Dispose secundário e arquivos fechados.
+  ZIP, hashes e filesystem reais; DPAPI/COM/controles simulados.
+- Atualização: **63 aprovados**, 0 falhas; warnings esperados das falhas injetadas.
+- Contrato/manifesto Git: **50 aprovados**, 0 falhas; Restic/NSIS sintéticos.
+- Parser PowerShell, links locais e git diff --check aprovados. Helper nativo
+  executado no Linux somente para conferir a **recusa explícita**: código não zero,
+  gate pendente, nenhuma tarefa criada. Não contabilizado como aprovação COM.
+
+Não houve execução de Windows PowerShell 5.1, COM/VARIANT nativos, NSIS ou VM
+nesta sessão. Não houve envio a Central ou alteração de instalações operacionais.
+Repetições finais não são novos casos independentes.
+
+### Recompilação e aceite
+
+Roteiro executável: installer/MANUAL-RUN.md, ligado por REBUILD-dev4.md. O operador
+obtém o SHA completo final, cria checkout descartável e executa o helper nativo e
+a suíte ZIP em processos Windows PowerShell 5.1 novos, guardando saídas/exit codes.
+Se os controles não passarem, não declarar o marshaling ou a candidata aprovados.
+
+Depois, recompilar o mesmo SHA com NSIS 3.11, payload novo do Git e Restic/
+referências aprovados, preservando instaladores anteriores e registrando o hash
+real do exe. No aceite autorizado após instalar, conferir Executar backup agora,
+mesma tarefa/conta, UUID/horário/snapshot novos e manual/agendado. Histórico de
+24/11 não substitui prova nova. Aceite sem sessão, DPAPI e demais gates continuam
+separados. Nenhum hash de instalador foi inventado.
+
+Sem merge, tag, deploy ou mudança na Central. Fixtures são removidas pelas suítes;
+auxiliares portáteis serão removidos depois do gate do commit final exato.

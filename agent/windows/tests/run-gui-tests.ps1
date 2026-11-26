@@ -1,7 +1,7 @@
 #requires -Version 5.1
 # Testes da interface MAC IP Backup -- mesma infra da suite do agente.
 # Roda em pwsh no Linux: DPAPI e Agendador sao substituidos (backend
-# injetavel com memoria de tarefa); no Windows roda a prova COM real.
+# injetavel com memoria de tarefa). COM real somente no helper isolado separado.
 # Cobre: perfil, salvamento em 2 fases com rollback, tarefa (logon type,
 # propriedade, idempotencia, conta, execucao unica), classificacao e
 # restauracao exata (ls --json + dump + link/junction).
@@ -149,7 +149,7 @@ try {
                 Definition=$d
                 bk=$this
             }
-            $t | Add-Member ScriptMethod Run { param($x) $this.bk.runs++; $this.State = 4 } | Out-Null
+            $t | Add-Member ScriptMethod Run { param($x) if($x -isnot [string]){throw [ArgumentException]::new('Contrato COM simulado: requer BSTR escalar')};$this.bk|Add-Member NoteProperty runArgument $x -Force;$this.bk.runs++; $this.State = 4 } | Out-Null
             $t | Add-Member ScriptMethod GetInstances { param($n)
                 # ," preserva a colecao vazia -- return puro viraria $null
                 return ,(New-Object 'object[]' $this.bk.inst) } | Out-Null
@@ -349,6 +349,10 @@ try {
     $script:Backend.estado = 1
     Start-TarefaAgora
     eq $script:Backend.runs 1 'executar agora: Run chamado exatamente uma vez na tarefa'
+    ok ($script:Backend.runArgument -is [string]) 'Run recebe System.String, nao Object[]'
+    eq $script:Backend.runArgument 'manual' 'Arg0 manual preservado'
+    throws { $script:Backend.Get().Run(@('manual')) } 'contrato simulado recusa forma anterior Object[]'
+    eq $script:Backend.runs 1 'recusa simulada nao executa fallback ou segunda tarefa'
     $script:Backend.estado = 1
     $script:Backend.defData.userId = 'OUTRO\usuario'
     throws { Start-TarefaAgora } 'conta divergente do preparo (SID): disparo recusado'
@@ -999,6 +1003,43 @@ namespace System.Windows.Forms {
     eq $t.Classe 'concluido' 'resolucao expirada: classificacao generica descreve o novo disparo'
     eq $t.Origem 'generica' 'resolucao expirada: origem generica'
 
+    # Callback real de Executar agora, com COM e controles simulados.
+    $tokensManual=$null;$errorsManual=$null
+    $astManual=[Management.Automation.Language.Parser]::ParseFile((Resolve-Path $gui).ProviderPath,[ref]$tokensManual,[ref]$errorsManual)
+    $clickManual=@($astManual.FindAll({param($n)$n -is [Management.Automation.Language.InvokeMemberExpressionAst] -and $n.Member.Value -ceq 'Add_Click' -and $n.Expression -is [Management.Automation.Language.VariableExpressionAst] -and $n.Expression.VariablePath.UserPath -ceq 'btAgora'},$true))
+    $callbackManual=$clickManual[0].Arguments[0].ScriptBlock.GetScriptBlock()
+    $savedInfo=${function:Get-InfoTarefa};$savedEstado=${function:Get-EstadoAtual};$savedStart=${function:Start-TarefaAgora}
+    $savedRefresh=$script:AtualizarTela;$savedPedido=$script:Disparo;$savedResolution=$script:UltimaResolucao
+    $script:manualInfo=$infoAnt;$script:manualState=Join-Path $tmp 'manual-state';New-Item -ItemType Directory $script:manualState|Out-Null
+    $oldResultPath=Join-Path $script:manualState 'ultimo-resultado.json';$resAntigo|ConvertTo-Json|Set-Content -LiteralPath $oldResultPath -Encoding UTF8
+    $oldResultHash=(Get-FileHash -LiteralPath $oldResultPath -Algorithm SHA256).Hash
+    try{
+        function Get-InfoTarefa {return $script:manualInfo}
+        function Get-EstadoAtual {return $script:manualState}
+        function Start-TarefaAgora {throw [ArgumentException]::new('SYNTHETIC COM argumento fora do intervalo')}
+        $script:AtualizarTela={ $script:manualTela=Get-TelaExecucao -InfoTarefa $script:manualInfo -Res $resAntigo -Pedido $script:Disparo -Resolucao $script:UltimaResolucao }
+        $script:Disparo=$null;$script:UltimaResolucao=$null
+        & { $btAgora=[pscustomobject]@{Enabled=$true};$lblOp=[pscustomobject]@{Text='';ForeColor=''};& $callbackManual }
+        eq $script:manualTela.Classe 'recusado' 'callback: Run recusado nao volta ao sucesso antigo'
+        eq $script:manualTela.Cor 'DarkRed' 'pedido recusado aparece em vermelho'
+        ok ($script:manualTela.Mensagem -like 'Pedido recusado*') 'mensagem separa pedido de historico'
+        & $script:AtualizarTela
+        eq $script:manualTela.Classe 'recusado' 'atualizacao periodica preserva recusa'
+        eq (Get-FileHash -LiteralPath $oldResultPath -Algorithm SHA256).Hash $oldResultHash 'resultado historico permanece byte a byte'
+        $stillRunning=New-InfoFalsa -Ultima (Hora-Local $t0) -Estado 4
+        eq (Get-TelaExecucao -InfoTarefa $stillRunning -Res $resAntigo -Resolucao $script:UltimaResolucao).Classe 'recusado' 'estado running sem novo LastRunTime nao aceita pedido recusado'
+        $noReference=[pscustomobject]@{Classe='recusado';UltimaObservada=$null;PedidoUtc=[DateTimeOffset]::UtcNow;Mensagem='Pedido recusado'}
+        eq (Get-TelaExecucao -InfoTarefa $infoAnt -Res $resAntigo -Resolucao $noReference).Classe 'recusado' 'consulta anterior inconclusiva nao promove historico'
+        ok (Get-TelaExecucao -InfoTarefa (New-InfoFalsa -Ultima ([DateTime]::Now.AddMinutes(1))) -Res $resNovoDia -Resolucao $noReference).ResolucaoExpirada 'execucao realmente posterior pode expirar recusa sem referencia'
+        function Start-TarefaAgora {} # aceita Run, sem inventar evidencia de execucao
+        $script:Disparo=$null
+        & { $btAgora=[pscustomobject]@{Enabled=$true};$lblOp=[pscustomobject]@{Text='';ForeColor=''};& $callbackManual }
+        eq $script:manualTela.Classe 'aguardando' 'aceitacao COM sem evidencia nova continua aguardando'
+    }finally{
+        ${function:Get-InfoTarefa}=$savedInfo;${function:Get-EstadoAtual}=$savedEstado;${function:Start-TarefaAgora}=$savedStart
+        $script:AtualizarTela=$savedRefresh;$script:Disparo=$savedPedido;$script:UltimaResolucao=$savedResolution
+    }
+
     # contrato estatico do pedido
     ok ($guiSrc.Contains('New-PedidoDisparo') -and $guiSrc.Contains('Update-PedidoDisparo')) 'pedido: helpers separados e testaveis'
     ok ($guiSrc.Contains('UltimaRef') -and $guiSrc.Contains('InstRef') -and $guiSrc.Contains('ResInicioRef')) 'pedido: referencia completa antes do Run'
@@ -1496,17 +1537,9 @@ namespace System.Windows.Forms {
     eq $alheia.stops 0 'uninstall: tarefa alheia nunca e parada'
     eq ([bool]$alheia._en) $true 'uninstall: tarefa alheia nunca e desabilitada'
 
-    # ---- agendamento COM real (so no Windows) ----
-    if (Test-IsWindows) {
-        $script:Backend = $null
-        Register-TarefaMacip -Horario '02:30' -Conta 'LAB\operador' -SenhaConta 'x' -Config 'c' -Estado 'e'
-        Register-TarefaMacip -Horario '03:30' -Conta 'LAB\operador' -SenhaConta 'x' -Config 'c' -Estado 'e'
-        $t = (Get-Backend).Get()
-        ok ($t.Definition.Principal.LogonType -eq 1) 'COM: LogonType = TASK_LOGON_PASSWORD (1)'
-        ok ($t.Definition.RegistrationInfo.Description -like '*MACIP Backup*') 'COM: marca do aplicativo'
-    } else {
-        pula 'registro COM real (somente Windows)'
-    }
+    # Nao consultar/registrar MACIP-Backup real no host de testes.
+    pula 'COM nativo isolado: execute probe-manual-run-com.ps1 (recursos exclusivos)'
+
 } finally {
     Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item Env:RESTIC_STUB_DIR -ErrorAction SilentlyContinue

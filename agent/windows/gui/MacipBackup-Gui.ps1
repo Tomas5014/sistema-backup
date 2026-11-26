@@ -466,7 +466,9 @@ function Start-TarefaAgora {
     if ($sidTarefa -cne $sidPreparo) {
         throw "Conta da tarefa ($contaTarefa) difere da conta do preparo (SID divergente) - recusado."
     }
-    $t.Run(@('manual')) | Out-Null
+    # IRegisteredTask.Run aceita BSTR escalar para Arg0. Nao enviar Object[].
+    # Uma unica chamada, sem fallback que possa duplicar um disparo aceito.
+    $t.Run([string]'manual') | Out-Null
 }
 
 function Get-InfoTarefa {
@@ -699,6 +701,7 @@ function Update-PedidoDisparo {
 }
 
 $script:RotulosPedido = @{
+    recusado       = 'Pedido recusado ou não confirmado pelo Agendador — nenhum novo backup foi confirmado.'
     aguardando     = 'Aguardando início — o Agendador ainda não registrou uma execução nova.'
     em_execucao    = 'Backup em execução agora.'
     concluido      = 'Backup concluído — resultado confirmado desta execução.'
@@ -709,6 +712,7 @@ $script:RotulosPedido = @{
 }
 
 $script:AcaoPedido = @{
+    recusado       = 'Ação necessária: confira o erro do pedido. O último backup bem-sucedido permanece no histórico.'
     aguardando     = 'Aguarde — a tela acompanha sozinha enquanto o Agendador registra o disparo.'
     em_execucao    = 'Aguarde o término do backup em execução.'
     concluido      = 'Nenhuma ação pendente.'
@@ -750,13 +754,18 @@ function Get-TelaExecucao {
     if ($Resolucao) {
         # a resolucao vale ate um disparo MAIS NOVO que o observado na
         # resolucao aparecer (rodando agora ou LastRunTime posterior).
+        # Recusa nao expira somente por running: exige LastRunTime posterior.
         $novo = $false
         if ($InfoTarefa) {
-            if ([int]$InfoTarefa.Estado -eq 4) { $novo = $true }
+            if ([int]$InfoTarefa.Estado -eq 4 -and $Resolucao.Classe -ne 'recusado') { $novo = $true }
             $u = ConvertTo-DataLocal -Valor $InfoTarefa.Ultima
             if ($u -and $u.Year -gt 2000) {
                 $marca = ConvertTo-DataLocal -Valor $Resolucao.UltimaObservada
-                if (($null -eq $marca) -or ($u -gt $marca.AddSeconds(1))) { $novo = $true }
+                if ($Resolucao.Classe -eq 'recusado' -and $null -eq $marca) {
+                    # Consulta anterior inconclusiva nao transforma LastRunTime antigo em novidade.
+                    $pedidoUtc = ConvertTo-DataObj -Valor $Resolucao.PedidoUtc
+                    if ($pedidoUtc -and $u -gt $pedidoUtc.AddSeconds(1)) { $novo = $true }
+                } elseif (($null -eq $marca) -or ($u -gt $marca.AddSeconds(1))) { $novo = $true }
             }
         }
         if (-not $novo) {
@@ -2572,6 +2581,7 @@ function Show-Gui {
     }
     $btAgora.Add_Click({
         if ($script:Disparo) { return }      # ja ha pedido aberto: clique repetido ignorado
+        $ref = $null
         try {
             # Referencia ANTES de solicitar: ultimo LastRunTime, GUIDs
             # de instancia e a identidade do resultado ja gravado. So o
@@ -2581,15 +2591,21 @@ function Show-Gui {
             $ref = Get-InfoTarefa
             $estadoRef = Get-EstadoAtual
             $resRef = $(if ($estadoRef) { Read-UltimoResultado -Estado $estadoRef } else { $null })
+            $pedido = New-PedidoDisparo -InfoTarefa $ref -Res $resRef
             Start-TarefaAgora
-            $script:Disparo = New-PedidoDisparo -InfoTarefa $ref -Res $resRef
+            $script:Disparo = $pedido
             $btAgora.Enabled = $false
             $lblOp.ForeColor = 'DarkBlue'
             $lblOp.Text = $script:RotulosPedido.aguardando
         } catch {
             $script:Disparo = $null
+            $script:UltimaResolucao = [pscustomobject]@{
+                Classe = 'recusado'; UltimaObservada = $(if ($ref) { $ref.Ultima } else { $null })
+                PedidoUtc = [DateTimeOffset]::UtcNow
+                Mensagem = 'Pedido recusado ou não confirmado. ' + $_.Exception.Message
+            }
             $lblOp.ForeColor = 'DarkRed'
-            $lblOp.Text = $_.Exception.Message
+            $lblOp.Text = $script:UltimaResolucao.Mensagem
         }
         & $script:AtualizarTela
     })

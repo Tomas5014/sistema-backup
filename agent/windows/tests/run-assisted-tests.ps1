@@ -1,5 +1,7 @@
 ﻿#requires -Version 5.1
 $ErrorActionPreference='Stop'
+# Windows PowerShell 5.1 nao carrega ZipArchive implicitamente.
+Add-Type -AssemblyName System.IO.Compression
 . (Join-Path $PSScriptRoot '../gui/Assisted-Recovery.ps1')
 $checks=0
 function Assert($Value,$Message){if(-not $Value){throw $Message};$script:checks++}
@@ -10,7 +12,16 @@ $parent=Join-Path $root 'pasta nova ação';New-Item -ItemType Directory $parent
 $active=Join-Path $root 'dados ativos';New-Item -ItemType Directory $active|Out-Null
 foreach($name in @('backup.json','restic.dpapi','fila.json','pausa-backup','pausa-sync')){[IO.File]::WriteAllText((Join-Path $active $name),'preservar '+$name)}
 $before=@{};Get-ChildItem -LiteralPath $active|ForEach-Object{$before[$_.Name]=(Get-FileHash -LiteralPath $_.FullName).Hash}
-function New-Zip([string]$Name,[string]$FileName='home/usuário/origem com espaços/ação.txt',[switch]$Corrupt,[string]$Extra='',[switch]$Link,[switch]$TwoFiles){
+function Write-FixtureZipEntry($Zip,[string]$Name,[byte[]]$Bytes,[switch]$Link){
+ $stream=$null;$failure=$null
+ try{
+  $entry=$Zip.CreateEntry($Name);if($Link){$entry.ExternalAttributes=([int]40960 -shl 16)}
+  $stream=$entry.Open();$stream.Write($Bytes,0,$Bytes.Length)
+ }catch{$failure=$_;throw}finally{
+  if($stream){try{$stream.Dispose()}catch{if(-not $failure){throw}}}
+ }
+}
+function New-Zip([string]$Name,[string]$FileName='home/usuário/origem com espaços/ação.txt',[switch]$Corrupt,[string]$Extra='',[switch]$Link,[switch]$TwoFiles,[scriptblock]$ZipFactory){
  $path=Join-Path $root ($Name+'.zip')
  $operation=[Guid]::NewGuid().ToString();$bytes=[Text.Encoding]::UTF8.GetBytes("fictício`nsegunda linha`n")
  if($Name -ceq 'binario'){$bytes=[byte[]](@(0..255)*1024)}
@@ -20,17 +31,31 @@ function New-Zip([string]$Name,[string]$FileName='home/usuário/origem com espa�
  $sha=[Security.Cryptography.SHA256]::Create();try{$secondDigest=([BitConverter]::ToString($sha.ComputeHash($secondBytes))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
  if($TwoFiles){$files[$secondName]=$secondDigest}
  $meta=@{format=1;operation=$operation;installation=[Guid]::NewGuid().ToString();repository_a=('a'*64);repository_b=('b'*64);snapshot_a=('c'*64);snapshot_b=('d'*64);files=$files}
- $file=[IO.File]::Open($path,'CreateNew','ReadWrite','None');$zip=[IO.Compression.ZipArchive]::new($file,[IO.Compression.ZipArchiveMode]::Create,$true)
+ $file=$null;$zip=$null;$primary=$null;$cleanup=$null
  try{
-  $entry=$zip.CreateEntry('RECOVERY.json');$writer=[IO.StreamWriter]::new($entry.Open(),[Text.UTF8Encoding]::new($false));try{$writer.Write(($meta|ConvertTo-Json -Depth 10))}finally{$writer.Dispose()}
-  $entry=$zip.CreateEntry('files/'+$FileName);if($Link){$entry.ExternalAttributes=([int]40960 -shl 16)}
-  $stream=$entry.Open();try{if($Corrupt){$stream.WriteByte(0)}else{$stream.Write($bytes,0,$bytes.Length)}}finally{$stream.Dispose()}
-  if($TwoFiles){$entry=$zip.CreateEntry('files/'+$secondName);$stream=$entry.Open();try{$stream.Write($secondBytes,0,$secondBytes.Length)}finally{$stream.Dispose()}}
-  if($Extra){$e=$zip.CreateEntry($Extra);$s=$e.Open();$s.Dispose()}
- }finally{$zip.Dispose();$file.Dispose()}
+  $file=[IO.File]::Open($path,'CreateNew','ReadWrite','None')
+  $zip=if($ZipFactory){& $ZipFactory $file}else{[IO.Compression.ZipArchive]::new($file,[IO.Compression.ZipArchiveMode]::Create,$true)}
+  Write-FixtureZipEntry $zip 'RECOVERY.json' ([Text.UTF8Encoding]::new($false).GetBytes(($meta|ConvertTo-Json -Depth 10)))
+  $data=if($Corrupt){[byte[]]@(0)}else{$bytes}
+  Write-FixtureZipEntry $zip ('files/'+$FileName) $data -Link:$Link
+  if($TwoFiles){Write-FixtureZipEntry $zip ('files/'+$secondName) $secondBytes}
+  if($Extra){Write-FixtureZipEntry $zip $Extra ([byte[]]@())}
+ }catch{$primary=$_;throw}finally{
+  foreach($resource in @($zip,$file)){if($null -ne $resource){try{$resource.Dispose()}catch{if(-not $cleanup){$cleanup=$_}}}}
+  if($cleanup -and -not $primary){throw $cleanup}
+ }
  return [pscustomobject]@{Path=$path;Operation=$operation;Digest=$digest;Name=$FileName;SecondName=$secondName;SecondDigest=$secondDigest}
 }
+$suiteFailure=$null
 try{
+ # Falha de construtor e falha de Dispose nao podem ocultar a primeira causa.
+ try{New-Zip 'constructor-fail' -ZipFactory {param($stream)throw 'SYNTHETIC constructor failure'}|Out-Null;throw 'aceitou construtor'}catch{Assert ($_.Exception.Message -ceq 'SYNTHETIC constructor failure') 'erro de construtor ZIP preservado'}
+ $handle=[IO.File]::Open((Join-Path $root 'constructor-fail.zip'),'Open','ReadWrite','None');$handle.Dispose()
+ Assert $true 'stream fechado apos falha do construtor'
+ $fakeZip=[pscustomobject]@{};$fakeZip|Add-Member ScriptMethod CreateEntry {param($name)throw 'SYNTHETIC entry failure'};$fakeZip|Add-Member ScriptMethod Dispose {throw 'SYNTHETIC cleanup failure'}
+ try{New-Zip 'cleanup-fail' -ZipFactory {param($stream)return $fakeZip}|Out-Null;throw 'aceitou entrada'}catch{Assert ($_.Exception.Message -like '*SYNTHETIC entry failure*' -and $_.Exception.Message -notlike '*cleanup failure*') 'Dispose nao mascara erro da entrada ZIP'}
+ $handle=[IO.File]::Open((Join-Path $root 'cleanup-fail.zip'),'Open','ReadWrite','None');$handle.Dispose()
+ Assert $true 'stream externo fechado mesmo com Dispose ZIP falho'
  $valid=New-Zip 'valido';$r=Import-AssistedRecovery -Archive $valid.Path -Parent $parent -ProtectedRoots @($active)
  Assert ($r.State -ceq 'verified' -and $r.Files -eq 1) 'recuperação verificada'
  $recovered=Join-Path (Join-Path $r.Destination 'arquivos') ($valid.Name.Replace('/',[IO.Path]::DirectorySeparatorChar))
@@ -158,4 +183,6 @@ try{
  Assert ($errors.Count -eq 0 -and $handlers.Count -eq 1 -and $calls.Count -eq 1 -and $handlers[0].Extent.Text -notmatch 'Read-AgenteConfig') 'botao chama exatamente o fluxo de recuperacao testado'
  foreach($name in $before.Keys){Assert ((Get-FileHash -LiteralPath (Join-Path $active $name)).Hash -ceq $before[$name]) ('preservado '+$name)}
  Write-Output "$checks verificações de recuperação assistida aprovadas; filesystem/ZIP reais, sem DPAPI/COM/VM."
-}finally{Remove-Item -LiteralPath $root -Recurse -Force}
+}catch{$suiteFailure=$_;throw}finally{
+ try{Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction Stop}catch{if(-not $suiteFailure){throw};Write-Warning 'Limpeza da fixture incompleta; erro principal preservado.' -WarningAction Continue}
+}

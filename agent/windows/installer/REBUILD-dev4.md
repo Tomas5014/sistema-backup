@@ -1,5 +1,7 @@
 # Recompilar a correção do instalador 0.1.4-dev4-lab
 
+**Disparo manual:** antes do aceite, execute o [gate COM isolado e teste ZIP](MANUAL-RUN.md) com o SHA novo aprovado. Simulação Linux não confirma o marshaling do Windows PowerShell 5.1.
+
 **Gate obrigatório antes de outro instalador:** execute a [prova de troca de diretórios](DIRECTORY-SWAP.md) em Windows PowerShell 5.1/NTFS com o novo SHA aprovado. A falha nativa de rename da base 87158ac ainda exige essa conferência.
 
 Este roteiro substitui os exemplos incompletos de build dev4 anteriores.
