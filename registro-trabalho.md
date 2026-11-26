@@ -4496,3 +4496,90 @@ novo após o commit exato, com hashes e manifestos externos; artefatos congelado
 anteriores não serão substituídos.
 
 Pin funcional Central: `47463e342bb7e0aed8d053da667e3574e46ce11d`. Windows: `0381ba7b7695125655c437912119fc7579dd2e09`. O commit documental deste pin será registrado externamente como origem exata do pacote; não há SHA circular.
+
+## 2026-11-26 — Consolidação da candidata e recuperação de sessão
+
+Branches novas nas bases exatas, sem commits posteriores nessas worktrees:
+Central `fix/backup-integrated-candidate`, base
+`653b73008214df6ce7a373aee097589b0ca3b8b7`; Windows
+`fix/windows-integrated-candidate`, base `44e9ccf8b3217661084deaf329efb64d56c34969`.
+Nenhum merge das linhas. Alterações preexistentes ficaram fora dos commits.
+
+Causas confirmadas: Windows aceitava LastRunTime antigo sem identificar a
+configuração; reprodução controlada da base devolveu `sem_resultado`. A sessão
+HTTP tinha Max-Age, mas CSRF era cookie de sessão. Na base, GET /auth/me com
+identidade controlada válida devolveu 200 sem repor CSRF ausente. A observação
+operacional de login em janela anônima é do operador; não foi reexecutada no lab.
+Agora CSRF tem prazo persistente configurado, mesmos Secure/SameSite=Lax/Path=/,
+sem Domain e legível pelo JS; sessão segue HttpOnly. /auth/me autenticado repõe
+somente CSRF ausente, não renova sessão nem rotaciona cookie existente; no-store.
+Escritas continuam recusadas sem par válido. Falta de proteção exige verificação
+explícita; 401 pede login; 403 de permissão permanece distinto. Nenhum POST é
+repetido automaticamente; página, instalação/geração e confirmação são refeitas.
+Respostas de sessão/visita antiga não derrubam a sessão atual.
+
+Código funcional Central `e9a6769b717e006073409d9d386c8f8c8752604d` e Windows
+`b841192bc49339e8b5d9e6c71e0b052f318ef6f2`. Matriz em
+`docs/lab-automation-pins.json`. Windows 0.1.4-dev4-lab; API/portal 0.1.0;
+PostgreSQL 16 nas provas, migrações 1–15; contratos/formato de dados/fila v1.
+A única alteração persistente Windows é evidência local adicional compatível;
+nenhum histórico, fila, credencial, ponto ou tarefa é eliminado/recriado.
+Correção manual, helper COM e fechamento ZIP de 44e9ccf preservados integralmente.
+Marshaling COM continua hipótese aguardando Windows PowerShell 5.1 nativo.
+
+Validações finais desta sessão (sem somar repetições ou baterias sobrepostas):
+
+- `PYTHONPATH=src:../src ...python -m pytest -q tests/test_operators.py tests/test_assisted_operations.py`:
+  **46 aprovados, 0 falhos, 0 skips**; TestClient/API e PostgreSQL real descartável;
+  executores do teste de contrato controlados.
+- `npm test -- --maxWorkers=2 --minWorkers=1`: **129 aprovados, 0 falhos, 0 skips**,
+  JSDOM/fetch controlados; inclui sessão restaurada/expirada, permissão, revalidação,
+  geração atual, confirmação nova e ausência de POST duplicado. Testes de corridas
+  detectaram 401 atrasado no ajuste inicial; corrigido antes do resultado final.
+- `npm run typecheck` e `npm run build`: aprovados (Node 24.19.0).
+- `npm run test:e2e -- session-recovery.spec.ts`: **2 aprovados**, Chrome/API/PG
+  reais, cookie restaurado e perda de CSRF durante ação, escrita recusada sem
+  cabeçalho, nenhuma repetição e viewer sem permissão. HTTP restrito ao loopback
+  explícito do E2E; propriedades Secure também conferidas na API HTTPS TestClient.
+  Primeiro ensaio usava botão antigo; fixture corrigida para o formulário atual.
+- `...pytest -q tests/test_assisted_real.py tests/test_assisted_runtime.py` com
+  `MACIP_TEST_ASSISTED_REAL=1`, `MACIP_TEST_ASSISTED_BROWSER=1`, imagem SFTP própria,
+  PowerShell portátil e worktree Windows fixada: **7 aprovados, 0 falhos/skips**:
+  **1 integração real** (Chrome, HTTPS, API, PG, OpenSSH/SFTP, Restic e volume B,
+  dois clientes, substituição, recuperação com A parado, ZIP e hashes) e **6 testes
+  controlados** (transporte/Restic simulados, filesystem/journal reais).
+- Windows (pwsh 7.4.6/Linux): situação **23**, GUI **406 + 1 gate COM skip**,
+  agente **164** (154 controlados + 10 Restic Linux real/SSH registrador, sem SFTP
+  nesse grupo), ZIP/B **54**, atualização **63**, contrato instalador **50** no
+  commit Windows exato. DPAPI, COM, processos Windows e WinForms simulados.
+- `git diff --check`: limpo nas duas linhas. Nenhum NSIS/EXE nativo compilado;
+  hash de instalador permanece null. Gate COM, NTFS, recompilação e aceite da
+  candidata na VM pendentes; não substituídos por essas provas Linux.
+
+Roteiro único atualizado: `docs/homologacao-candidata-windows-a-b.md`, com TLS
+(checkend de 24h, SAN/fingerprint/CA e curl validando), transferência dos pins,
+gate COM/NTFS, referência 0.1.3, NSIS 3.11/payload novo/bytes Git conferidos,
+atualização preservando journal/dados/pausas e repetição dos defeitos. Renovação
+é decisão/ação do operador apenas no lab, sem bypass TLS. Evidências históricas
+do operador (backup sem sessão, restore A e B com A pausado/origem ausente e dois
+SHA-256 iguais) mantidas separadas. Registros anteriores de timers antigos
+**disabled/inactive** permanecem; nenhum timer operacional foi consultado/tocado.
+
+Recursos desta sessão: PostgreSQL exclusivo com três bancos de teste, fixture
+OpenSSH marcada, Mailpit/serviços/volume privado criados pela integração, Chrome e
+fixtures /tmp/macip-consolidation-20261126. Encerramento e limpeza somente desses
+recursos no fechamento; caches de imagens-base/dependências não são instalações
+operacionais. Nenhum acesso a srvdev1/VM/dados ou credenciais reais. Escopo congelado;
+sem merge/tag/deploy ou autorização de produção/dados reais.
+
+Fechamento local: `tests/test_lab_updates.py` **6 aprovados** (pacotes/journal e
+barreira HTTP controlados, sem atualização operacional). Comparação AST confirma
+`Start-TarefaAgora` integralmente igual a 44e9ccf; diffs dos helpers COM e ZIP
+vazios. Contrato do instalador reconferido no SHA Windows final: **50 aprovados**.
+Integração confirmou encerramento de sua supervisão e removeu seus A/Mailpit e
+volume privado. Conferência Docker final: nenhum contêiner com os marcadores
+próprios restante; PostgreSQL exclusivo removido com volume e tag SFTP removida.
+PowerShell portátil, logs e fixtures próprios serão removidos após empacotar o
+commit documental final em diretório dist novo. Artefatos anteriores preservados;
+instalador Windows ainda não gerado. O manifesto externo registra o SHA exato sem
+referência circular no commit.

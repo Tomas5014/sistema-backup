@@ -2,7 +2,7 @@
 
 **Ainda pendente. Não iniciar piloto com dados reais.** Este é o roteiro principal
 para aceitar a dupla congelada em [lab-automation-pins.json](lab-automation-pins.json).
-A candidata Windows é **0.1.4-dev4-lab**; PostgreSQL **15**; API/portal **0.1.0**;
+A candidata Windows é **0.1.4-dev4-lab**; PostgreSQL **16**, migrações **1–15**; API/portal **0.1.0**;
 contratos de ativação/resultados **v1**, atendimento/ZIP **v1**, dados/fila Windows
 **v1**. Preserve o aplicativo/instalador 0.1.3 como referência. Não una as linhas Git.
 
@@ -10,6 +10,129 @@ As instruções técnicas antigas do [ensaio A/B](ensaio-windows-a-b.md) são re
 histórica, não um segundo roteiro para executar em paralelo. Use o
 [guia curto de operação assistida](operacao-recuperacao-assistidas.md) para os cliques
 e o [runbook de atualização](atualizacao-reversao-laboratorio.md) para manutenção.
+
+## Retomada desta candidata — ordem única
+
+Bases aprovadas: Central `653b73008214df6ce7a373aee097589b0ca3b8b7` e Windows
+`44e9ccf8b3217661084deaf329efb64d56c34969`. Use os **SHAs finais do relatório e
+os pins compatíveis**, sem juntar as linhas. O pin Central identifica o commit
+funcional; o commit documental final é informado no relatório para evitar SHA
+circular. Não regenere referências a partir da instalação desconhecida.
+
+1. **Transferir:** obtenha somente as branches `fix/backup-integrated-candidate`
+   e `fix/windows-integrated-candidate` nos clones correspondentes. Confira SHA
+   completo, ancestralidade às bases e matriz. Preserve instalador 0.1.3, builds
+   anteriores, configurações, DPAPI, tarefas, pausas e journal de recuperação.
+   Faça checkout de build novo pelo procedimento Windows abaixo, sem alterar a
+   instalação. Não reaplique preparação, init ou migrações de outro roteiro ao
+   laboratório existente: não há migração nova nesta correção (migrações PostgreSQL 1–15).
+2. **TLS antes de HTTPS:** confira relógios, certificado público realmente servido,
+   SAN, emissor, fingerprint e validade. No terminal Linux **do operador**, somente
+   para os arquivos públicos e URL autorizados do laboratório:
+
+   ```bash
+   (
+     set -euo pipefail
+     read -r -p 'Certificado publico PEM servido pelo laboratorio: ' CERT
+     read -r -p 'CA PEM confiavel do laboratorio: ' CA
+     read -r -p 'URL HTTPS autorizada, sem credenciais: ' URL
+     [[ -f "$CERT" && -f "$CA" && "$URL" == https://* && "$URL" != *@* ]] || exit 1
+     openssl x509 -in "$CERT" -noout -subject -issuer -dates -ext subjectAltName -fingerprint -sha256
+     openssl x509 -in "$CERT" -checkend 86400 -noout || {
+       printf '%s\n' 'PARAR: certificado vencido ou com menos de 24h. Administrador deve renovar.' >&2
+       exit 1
+     }
+     curl --fail --silent --show-error --cacert "$CA" "${URL%/}/healthz"
+   )
+   ```
+
+   Compare o fingerprint com o certificado apresentado pelo navegador. O arquivo
+   local sozinho não comprova o certificado servido. Se faltar validade para a
+   janela, interrompa o ensaio: o administrador deve renovar **só o laboratório**,
+   conferir SAN/CA/fingerprint novo, atualizar a confiança nas contas necessárias
+   e repetir a validação TLS. Não use `-k`, SkipCertificateCheck, data falsa ou
+   aceitação cega de certificado. Não reinicialize repositórios/banco para renovar.
+3. **Gate COM e NTFS:** no Windows PowerShell **5.1**, checkout novo do SHA Windows,
+   execute `agent/windows/tests/probe-manual-run-com.ps1` pelo bloco completo de
+   `agent/windows/installer/MANUAL-RUN.md`. Ele cria/remove somente tarefa sintética
+   própria e registra nomes/UUID/SID. Execute também o gate de
+   `agent/windows/installer/DIRECTORY-SWAP.md` e `run-status-context-tests.ps1`.
+   Recusa/infraestrutura ausente é pendência. A hipótese de marshaling só pode
+   ser avaliada pela saída COM nativa; não é conclusão dos testes Linux.
+4. **Compilar → atualizar → conferir:** siga **somente**
+   `agent/windows/installer/REBUILD-dev4.md` do SHA Windows final. Esse procedimento
+   fornece comandos completos para worktree novo (`core.autocrlf=false`, LF),
+   exportação e conferência de cada blob Git, payload novo, Restic Windows aprovado,
+   referência 0.1.3 `7d62a800325146d1357f8832b1df5c4c3b2eff8d` e NSIS **3.11**.
+   Registre hashes reais dos dois manifestos e do EXE após compilar. Atualização
+   interativa segue `agent/windows/UPDATE-ROLLBACK.md`: não apague next/previous,
+   journal, fila ou DPAPI. Antes de executar, confirme o estado preservado da VM;
+   depois confira recibo, módulos, referências efetivas, conta e pausas individuais.
+   Atualize a Central **somente por decisão do operador**, no procedimento existente
+   de backup e atualização do laboratório, sem encerramento destrutivo. Esta entrega
+   não fez deploy. Confira saúde e versão em ambas as pontas antes dos testes.
+5. **Repetir os dois defeitos:** salve nova configuração válida sem recriar a tarefa.
+   Antes do primeiro disparo, exija “Configuração atual ainda sem execução comprovada”;
+   LastRunTime antigo não prova tentativa dela. O último sucesso deve permanecer
+   separado. Solicite uma vez **Executar backup agora**: aceite aguarda UUID/resultado
+   novo da configuração, recusa não vira sucesso histórico. Confira depois a primeira
+   execução agendada atual. Os casos de recusa/resultado atrasado também estão nas
+   suítes descartáveis. No painel, use a sessão normal restaurada: consultar e
+   **Recuperar usando B → Confirmar atendimento**. Se faltar proteção, use
+   **Verificar sessão**; se expirou, **Entrar**. A página deve consultar novamente a
+   instalação/geração e exigir nova confirmação. Não repetir ação de resultado
+   incerto sem conferir acompanhamento/mesmo identificador. Viewer continua sem
+   ações administrativas. Nenhum uso de janela anônima, DevTools ou limpeza manual
+   de cookies é parte do fluxo normal.
+6. **Preservar regressões operacionais:** repetir backup sem sessão, restore de um
+   arquivo/pasta por A e recuperação por B de ponto exato com A pausado/origem
+   ausente, comparando referências/SHA-256 e exclusão. Use somente recursos fictícios
+   autorizados. Registre pontos A/B, geração, pedido/execução, duração e resultado.
+   O operador já comprovou esses fluxos na candidata anterior; a lista abaixo
+   continua o aceite integrado mais amplo, não recursos novos.
+
+### Matriz congelada
+
+| Componente | Referência da candidata |
+|---|---|
+| Central, código funcional | `e9a6769b717e006073409d9d386c8f8c8752604d` |
+| Windows | `b841192bc49339e8b5d9e6c71e0b052f318ef6f2` |
+| API / portal | 0.1.0 / 0.1.0 |
+| Aplicativo Windows | 0.1.4-dev4-lab; referência 0.1.3 preservada |
+| PostgreSQL | engine 16 nas provas; migrações 1–15, sem migração nesta correção |
+| Ativação / resultados / atendimento / ZIP | v1 / v1 / v1 / v1 |
+| Dados / fila / controlador Windows | v1 / v1 / v1; campos locais adicionais de evidência compatíveis |
+| Execução das regressões | Python 3.14.4, Node 24.19.0, pwsh 7.4.6 Linux, Restic 0.18.1 Linux, Chrome real |
+| Aceite Windows exigido | Windows PowerShell 5.1, NSIS 3.11, Restic Windows previamente aprovado e hash conferido |
+| Instalador desta dupla | build nativo e SHA-256 pendentes; não reutilizar EXE de SHA anterior |
+
+SHAs e artefatos finais são informados no relatório; o commit documental não
+se referencia por seu próprio SHA. Nenhuma compatibilidade Windows adicional
+foi inferida dos testes Linux.
+
+### Evidência e limites desta consolidação
+
+Causas reproduzidas localmente: a base Windows classificava LastRunTime antigo como
+`sem_resultado` sem vínculo à configuração; a base Central respondia `/auth/me`
+com sessão válida sem repor CSRF ausente. Sessão tinha Max-Age; CSRF era cookie de
+sessão. Agora os cookies têm o mesmo prazo configurado, Secure/SameSite=Lax,
+Path=/ e sem Domain; só sessão é HttpOnly. `/auth/me` autenticado repõe somente
+CSRF ausente, sem prolongar sessão nem rotacionar o token de outras abas, com
+`Cache-Control: no-store`. Escrita continua exigindo cookie + cabeçalho.
+
+O frontend interrompe a intenção, oferece revalidação explícita e desmonta a
+confirmação antiga; não reenvia POST. Respostas de sessão/visita anterior são
+invalidadas; 401, 403 de permissão e recusa CSRF são distintos. Backend de backup,
+recuperação B, identidade dos repositórios e contratos não foram afrouxados.
+
+**Histórico do operador, não execução deste agente:** backup agendado sem sessão,
+restore de arquivo/pasta por A e ZIP por B com A pausado e origem ausente; dois
+SHA-256 conferidos. Ainda não é homologação desta recompilação, produção ou dados
+reais. A prova COM nativa, o novo instalador e o aceite integrado seguem pendentes.
+O escopo funcional está congelado; novas mudanças somente para defeitos demonstrados.
+
+<details>
+<summary>Checklist integrado ampliado (detalhes já previstos, sem novos recursos)</summary>
 
 ## Administrador — preparar uma vez
 
@@ -149,3 +272,5 @@ aprovação. Infraestrutura ausente é gate pendente. Dados fictícios não repr
 volumes de clientes. Não há conclusão do MVP, piloto iniciado, deploy ou aceite de
 produção por este documento. Após esta entrega, escopo funcional congelado;
 próximo passo é compilar e executar este roteiro na VM.
+
+</details>
