@@ -520,6 +520,36 @@ function Test-ResConfirmado {
             [string]$Res.snapshot -match '^[0-9a-f]{64}$')
 }
 
+function Get-ContextoConfiguracao {
+    # Configuracoes da GUI sao conjuntos imutaveis. A publicacao registra
+    # a fronteira ANTES do registro COM; tarefas atualizadas herdam LastRunTime.
+    param([string]$Config)
+    try {
+        $path = [IO.Path]::GetFullPath($Config)
+        $hash = Get-HashArquivo $path
+        $desde = [DateTimeOffset](Get-Item -LiteralPath $path).LastWriteTimeUtc
+        $f = Join-Path (Split-Path -Parent $path) 'situacao.json'
+        if (Test-Path -LiteralPath $f) {
+            $m = Get-Content -LiteralPath $f -Raw -Encoding UTF8 | ConvertFrom-Json
+            $desde = ConvertTo-DataObj $m.publicada_utc
+            if ($m.schema -ne 1 -or $m.config_sha256 -cne $hash -or -not $desde) { throw 'vinculo invalido' }
+        }
+        return [pscustomobject]@{ Config=$path; Hash=$hash; DesdeUtc=$desde; Valido=$true }
+    } catch {
+        return [pscustomobject]@{ Config=$Config; Hash=$null; DesdeUtc=$null; Valido=$false }
+    }
+}
+
+function Test-ResultadoContexto {
+    param($Res, $Contexto)
+    if (-not $Contexto) { return $true } # consumidores legados do modelo/teste COM
+    if (-not $Contexto.Valido -or -not $Res) { return $false }
+    $inicio = ConvertTo-DataObj $Res.inicio_utc
+    return ($Res.config_sha256 -ceq $Contexto.Hash -and
+            [string]$Res.config_caminho -ieq $Contexto.Config -and
+            $inicio -and $inicio -ge $Contexto.DesdeUtc.AddSeconds(-1))
+}
+
 function Classify-Resultado {
     # "Concluido" EXIGE resultado valido VINCULADO ao ultimo disparo
     # (inicio_utc >= LastRunTime da tarefa -- tolerancia so de 1s para
@@ -528,7 +558,18 @@ function Classify-Resultado {
     # do Agendador E sem resultado -> ainda_nao (resultado ausente/ilegivel
     # sozinho nunca prova "nunca rodou"). O codigo do Agendador so prova
     # FALHA DE INICIALIZACAO quando nao ha resultado do disparo.
-    param($Res, $InfoTarefa)
+    param($Res, $InfoTarefa, $Contexto)
+    if ($Contexto) {
+        if (-not $Contexto.Valido) { return 'config_invalida' }
+        $atual = Test-ResultadoContexto $Res $Contexto
+        $marca = if ($InfoTarefa) { ConvertTo-DataLocal $InfoTarefa.Ultima } else { $null }
+        # COM so e evidencia desta configuracao apos sua publicacao. Um
+        # resultado antigo continua no historico, sem afirmar um disparo novo.
+        if (-not $atual -and (-not $marca -or $marca -lt $Contexto.DesdeUtc)) {
+            return 'ainda_nao'
+        }
+        if (-not $atual -and $Res) { $Res = $null }
+    }
     if ($InfoTarefa -and $InfoTarefa.Estado -eq 4) { return 'em_execucao' }
     $ultima = $null
     if ($InfoTarefa -and $InfoTarefa.Ultima) {
@@ -569,7 +610,8 @@ $script:RotulosStatus = @{
     incompleto         = 'Incompleto — Restic código 3 (nem todo arquivo lido)'
     em_execucao        = 'Em execução — backup rodando agora'
     sem_resultado      = 'Sem resultado deste disparo — o Agendador tentou, nada foi gravado'
-    ainda_nao          = 'Ainda não executou — nenhum disparo até agora'
+    ainda_nao          = 'Configuração atual ainda sem execução comprovada'
+    config_invalida    = 'Não foi possível conferir a configuração atual — consulte os Detalhes'
     sem_tarefa         = 'Sem tarefa — configure e salve primeiro'
     tarefa_estranha    = 'Tarefa estranha — existe MACIP-Backup que não é do aplicativo'
 }
@@ -580,7 +622,8 @@ $script:AcaoStatus = @{
     incompleto         = 'Ação necessária: confira o que ficou de fora (arquivos em uso/abertos).'
     em_execucao        = 'Aguarde o término do backup em execução.'
     sem_resultado      = 'Ação necessária: verifique destino, conta da tarefa e permissão de execução sem sessão.'
-    ainda_nao          = 'Aguarde o próximo disparo ou use “Executar backup agora”.'
+    ainda_nao          = 'Aguarde o próximo disparo ou use “Executar backup agora”. O histórico anterior permanece separado.'
+    config_invalida    = 'Ação necessária: confira a configuração publicada antes de executar.'
     sem_tarefa         = 'Ação necessária: valide na aba Ativar e salve em “Pasta e horário”.'
     tarefa_estranha    = 'Ação necessária: chame a MAC IP — a tarefa estranha não é tocada.'
 }
@@ -598,7 +641,7 @@ function New-PedidoDisparo {
     # mais novo que a referencia OU uma instancia cujo GUID nao existia
     # no clique; "resultado da execucao nova" = um JSON que NAO existia
     # no clique e com inicio vinculado a ela.
-    param($InfoTarefa, $Res, [int]$PrazoSegundos = 120)
+    param($InfoTarefa, $Res, [int]$PrazoSegundos = 120, $Contexto)
     $inst = @{}
     if ($InfoTarefa) {
         foreach ($g in @($InfoTarefa.Instancias)) { if ($g) { $inst[[string]$g] = $true } }
@@ -606,6 +649,8 @@ function New-PedidoDisparo {
     return [pscustomobject]@{
         # LastRunTime preservado no TIPO do COM (DateTime local); os
         # comparadores usam ConvertTo-DataLocal, que aceita o objeto.
+        Contexto     = $Contexto
+        ExecucaoRef  = $(if ($Res) { $Res.execucao_id } else { $null })
         UltimaRef    = $(if ($InfoTarefa) { $InfoTarefa.Ultima } else { $null })
         InstRef      = $inst
         ResInicioRef = $(if ($Res -and $Res.inicio_utc) { ConvertTo-DataObj -Valor $Res.inicio_utc } else { $null })
@@ -686,6 +731,12 @@ function Update-PedidoDisparo {
                      (($null -eq $Pedido.ResInicioRef) -or ($ini -gt $Pedido.ResInicioRef))
         }
     }
+    if ($Pedido.Contexto) {
+        $deste = $deste -and (Test-ResultadoContexto $Res $Pedido.Contexto) -and
+            $Res.disparo -ceq 'manual' -and
+            [string]$Res.execucao_id -match '^[0-9a-f-]{36}$' -and
+            $Res.execucao_id -cne $Pedido.ExecucaoRef
+    }
     if ($deste) {
         if ([string]$Res.status -eq 'em_execucao') { return 'em_execucao' }
         if (Test-ResConfirmado -Res $Res) { return 'concluido' }
@@ -739,8 +790,17 @@ function Get-TelaExecucao {
     # encerrado, sua RESOLUCAO segue sendo a situacao apresentada ate um
     # disparo MAIS NOVO aparecer -- a tela nao volta a anunciar o
     # resultado anterior como se fosse o do pedido recem-encerrado.
-    param($InfoTarefa, $Res, $Pedido, $Resolucao, $AgoraUtc)
+    param($InfoTarefa, $Res, $Pedido, $Resolucao, $AgoraUtc, $Contexto)
+    $pedidoObsoleto = $false; $resolucaoObsoleta = $false
     if ($null -eq $AgoraUtc) { $AgoraUtc = [DateTimeOffset]::UtcNow }
+    if ($Pedido -and $Contexto -and $Pedido.Contexto -and
+        ($Pedido.Contexto.Config -ine $Contexto.Config -or $Pedido.Contexto.Hash -cne $Contexto.Hash)) {
+        # Troca de configuracao invalida a resposta do pedido anterior.
+        $pedidoObsoleto = $true; $resolucaoObsoleta = $true
+        $Pedido = $null; $Resolucao = $null
+    }
+    if ($Resolucao -and $Contexto -and $Resolucao.Contexto -and
+        ($Resolucao.Contexto.Config -ine $Contexto.Config -or $Resolucao.Contexto.Hash -cne $Contexto.Hash)) { $resolucaoObsoleta = $true; $Resolucao = $null }
     if ($Pedido) {
         $st = Update-PedidoDisparo -Pedido $Pedido -InfoTarefa $InfoTarefa -Res $Res -AgoraUtc $AgoraUtc
         return [pscustomobject]@{
@@ -779,7 +839,7 @@ function Get-TelaExecucao {
         # disparo mais novo observado: a resolucao expira e a
         # classificacao generica volta a descrever a execucao atual.
     }
-    $cls = Classify-Resultado -Res $Res -InfoTarefa $InfoTarefa
+    $cls = Classify-Resultado -Res $Res -InfoTarefa $InfoTarefa -Contexto $Contexto
     return [pscustomobject]@{
         Origem = 'generica'; Classe = $cls; Texto = $script:RotulosStatus[$cls]
         Cor = $(switch ($cls) {
@@ -787,7 +847,8 @@ function Get-TelaExecucao {
             'incompleto' { 'DarkOrange' } 'ainda_nao' { 'DarkBlue' }
             'sem_resultado' { 'DarkOrange' } default { 'DarkRed' } })
         Acao = $script:AcaoStatus[$cls]; Mensagem = $null
-        Encerrou = $false; ResolucaoExpirada = ($null -ne $Resolucao)
+        PedidoObsoleto = $pedidoObsoleto
+        Encerrou = $false; ResolucaoExpirada = ($resolucaoObsoleta -or $null -ne $Resolucao)
     }
 }
 
@@ -1607,6 +1668,11 @@ function Publish-Configuracao {
     #   nao reposta (ou 1o cadastro sem anterior) -> a tarefa CONTINUA
     #   apontando para o conjunto novo: arquivos preservados e funcionais.
     param($Built, [string]$Conta, [string]$SenhaConta)
+    # Apenas arquivos do conjunto novo; recusa sobrescrever uma fronteira.
+    $fronteira = Join-Path $Built.ConfigDir 'situacao.json'
+    $json = @{schema=1;config_sha256=(Get-HashArquivo $Built.Config);publicada_utc=[DateTime]::UtcNow.ToString('o')} | ConvertTo-Json
+    $stream = [IO.File]::Open($fronteira, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    try { $bytes=[Text.Encoding]::UTF8.GetBytes($json); $stream.Write($bytes,0,$bytes.Length) } finally { $stream.Dispose() }
     $Built.Publicado = $true
     $xmlAnterior = $null
     # Recusa colisao de sincronizacao ANTES de tocar a tarefa de backup.
@@ -2477,6 +2543,7 @@ function Show-Gui {
             $info = $null; $infoErro = $null
             try { $info = Get-InfoTarefa } catch { $infoErro = $_.Exception.Message }
             $cfgPath = Get-ConfigAtual
+            $contexto = Get-ContextoConfiguracao $cfgPath
             $monitorStatus=if($cfgPath){Get-MonitorStatus $cfgPath}else{$null}
             $lblMonitor.Text = if(-not $monitorStatus -or $monitorStatus.state -eq 'unconfigured'){'Monitoramento não configurado'} elseif($monitorStatus.state -eq 'synchronized'){'Monitoramento sincronizado · último envio: '+(Format-DataBR $monitorStatus.last_success)} else {'Envio pendente · '+$monitorStatus.pending+' mensagem(ns). A tarefa de sincronização tentará novamente.'}
             $origem = ''
@@ -2508,10 +2575,12 @@ function Show-Gui {
             # sucesso anterior como "concluido") so vale sem pedido nem
             # resolucao recente. A resolucao do pedido encerrado segue
             # apresentada ate um disparo MAIS NOVO aparecer.
-            $tela = Get-TelaExecucao -InfoTarefa $info -Res $res -Pedido $script:Disparo -Resolucao $script:UltimaResolucao
+            $tela = Get-TelaExecucao -InfoTarefa $info -Res $res -Pedido $script:Disparo -Resolucao $script:UltimaResolucao -Contexto $contexto
+            if ($tela.PedidoObsoleto) { $script:Disparo = $null; $script:UltimaResolucao = $null }
             if ($script:Disparo -and $tela.Encerrou) {
                 $script:UltimaResolucao = [pscustomobject]@{
                     Classe = $tela.Classe
+                    Contexto = $contexto
                     UltimaObservada = $(if ($script:Disparo.NovaUltima) { $script:Disparo.NovaUltima } else { $script:Disparo.UltimaRef })
                     Mensagem = $tela.Mensagem
                 }
@@ -2591,7 +2660,7 @@ function Show-Gui {
             $ref = Get-InfoTarefa
             $estadoRef = Get-EstadoAtual
             $resRef = $(if ($estadoRef) { Read-UltimoResultado -Estado $estadoRef } else { $null })
-            $pedido = New-PedidoDisparo -InfoTarefa $ref -Res $resRef
+            $pedido = New-PedidoDisparo -InfoTarefa $ref -Res $resRef -Contexto (Get-ContextoConfiguracao (Get-ConfigAtual))
             Start-TarefaAgora
             $script:Disparo = $pedido
             $btAgora.Enabled = $false
@@ -2600,6 +2669,7 @@ function Show-Gui {
         } catch {
             $script:Disparo = $null
             $script:UltimaResolucao = [pscustomobject]@{
+                Contexto = (Get-ContextoConfiguracao (Get-ConfigAtual))
                 Classe = 'recusado'; UltimaObservada = $(if ($ref) { $ref.Ultima } else { $null })
                 PedidoUtc = [DateTimeOffset]::UtcNow
                 Mensagem = 'Pedido recusado ou não confirmado. ' + $_.Exception.Message

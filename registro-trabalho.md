@@ -2976,3 +2976,32 @@ separados. Nenhum hash de instalador foi inventado.
 
 Sem merge, tag, deploy ou mudança na Central. Fixtures são removidas pelas suítes;
 auxiliares portáteis serão removidos depois do gate do commit final exato.
+
+## 2026-11-26 — Consolidação Windows: situação vinculada à configuração
+
+Base exata `44e9ccf8b3217661084deaf329efb64d56c34969`; branch
+`fix/windows-integrated-candidate`. Sem merge da Central, sem mudança de versão
+(0.1.4-dev4-lab). Reprodução isolada da base: LastRunTime antigo + ausência de
+resultado retornava `sem_resultado`, independentemente da configuração publicada.
+Correção: fronteira imutável por configuração, resultado local com caminho/hash,
+UUID e disparo; situação e pedido usam identidade e tempo, preservando último
+sucesso separadamente. Nenhuma exclusão de histórico/fila ou recriação de tarefa.
+
+Preservados sem alteração: helper COM descartável, chamada escalar única,
+validações de conta/SID/propriedade/concorrência e fechamento ZIP de 44e9ccf.
+O marshaling COM permanece hipótese aguardando prova Windows PowerShell 5.1.
+Operador já relatou backup sem sessão, restore de arquivo/pasta por A e restore
+por B com A pausado/origem ausente e dois hashes iguais; evidência histórica,
+não execução desta sessão. Guia de build exige NSIS 3.11, exportação por commit,
+core.autocrlf=false, blobs conferidos, Restic e referência 0.1.3 aprovados.
+
+Validações desta sessão: PowerShell **7.4.6/Linux**; GUI **406 aprovados,
+1 gate COM ignorado explicitamente**; situação/contexto **23**; agente **164**
+(inclui 10 verificações adicionais com Restic Linux **0.18.1** e SSH registrador,
+sem SFTP nesse grupo); recuperação B **54**; atualização **63**; contrato instalador
+**50**. Sem falhas finais. Não somadas execuções repetidas/sobrepostas. DPAPI,
+Agendador, processos Windows e WinForms são simulados; Git, arquivos e ZIP reais.
+Contrato será reconferido no commit exato após gravá-lo. Sem build nativo/NSIS,
+sem novo hash de EXE e sem acesso à VM. As provas nativas COM/NTFS e atualização
+mais regressões integradas devem ser repetidas pelo operador antes do aceite.
+`git diff --check` limpo; temporários exclusivos em /tmp, removidos no fechamento.

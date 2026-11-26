@@ -188,6 +188,10 @@ $bruto = Get-Content (Join-Path $lab.Estado 'ultimo-resultado.json') -Raw
 eq ($bruto -match '"inicio_utc"\s*:\s*"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}') $true 'resultado: inicio_utc UTC'
 eq ($bruto -match '"fim_utc"\s*:\s*"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}') $true 'resultado: fim_utc UTC'
 eq ([string]::IsNullOrEmpty($j.conta)) $false 'resultado: conta registrada'
+eq $j.config_sha256 (Get-HashArquivo $lab.Config) 'resultado: hash da configuracao efetiva'
+eq $j.config_caminho ([IO.Path]::GetFullPath($lab.Config)) 'resultado: caminho da configuracao efetiva'
+eq ([string]$j.execucao_id -match '^[0-9a-f-]{36}$') $true 'resultado: identidade propria de execucao'
+eq $j.disparo 'manual' 'resultado: distingue disparo manual'
 eq (Test-Path (Join-Path $lab.Estado 'ultimo-restic.log')) $true 'log do restic gravado'
 
 Write-Host '== ultimo-confirmado.json: o AGENTE grava, sem a janela =='

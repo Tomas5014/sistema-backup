@@ -604,6 +604,10 @@ function Invoke-AgenteBackup {
     $monitorPending = $null
     $estado = $null
     $res = [ordered]@{
+        execucao_id   = [Guid]::NewGuid().ToString()
+        disparo       = $Disparo
+        config_caminho = [IO.Path]::GetFullPath($Config)
+        config_sha256 = $null
         inicio_utc    = [DateTime]::UtcNow.ToString('o')
         fim_utc       = $null
         conta         = (Get-IdentidadeAtual).Nome
@@ -614,6 +618,7 @@ function Invoke-AgenteBackup {
     $estado = Get-EstadoCandidato -Config $Config -DiretorioEstado $DiretorioEstado
     $gravar = $false
     try {
+        $res.config_sha256 = Get-HashArquivo $Config
         $prep = $null
         if ($estado) {
             $preparoFile = Join-Path $estado 'preparo.json'

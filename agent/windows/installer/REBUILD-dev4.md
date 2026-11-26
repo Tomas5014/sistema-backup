@@ -8,6 +8,8 @@ Este roteiro substitui os exemplos incompletos de build dev4 anteriores.
 Somente laboratório. Preserve o instalador 0.1.3 e o build dev4 anterior.
 Não houve alteração na Central ou nos formatos de configuração/fila.
 
+**Situação inicial corrigida:** execute também `agent/windows/tests/run-status-context-tests.ps1` no checkout novo. Leia [vínculo de configuração e histórico](STATUS-CONTEXT.md). O roteiro único de retomada é `docs/homologacao-candidata-windows-a-b.md` da Central fixada na matriz.
+
 ## Evidência e alcance
 
 O operador relatou compilação real com **NSIS 3.11** do commit
@@ -67,8 +69,9 @@ $legacyHash = (Get-FileHash -LiteralPath (Join-Path $payload 'LEGACY-MANIFEST.js
 $nsis = (Get-Command makensis.exe -ErrorAction Stop).Source
 Push-Location $installer
 try {
-  & $nsis /VERSION
-  if ($LASTEXITCODE -ne 0) { throw 'NSIS indisponivel' }
+  $nsisVersion = & $nsis /VERSION
+  if ($LASTEXITCODE -ne 0 -or $nsisVersion -notmatch '^v?3\.11(?:[. -]|$)') { throw 'Exige NSIS 3.11 aprovado' }
+  Write-Host $nsisVersion
   & $nsis '/DVERSAO=0.1.4-dev4-lab' "/DMANIFEST_SHA256=$manifestHash" `
     "/DLEGACY_SHA256=$legacyHash" 'macip-backup.nsi'
   if ($LASTEXITCODE -ne 0) { throw 'Compilacao NSIS falhou' }
